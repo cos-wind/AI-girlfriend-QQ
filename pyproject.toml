@@ -1,0 +1,26 @@
+[project]
+name = "atri-qq-bot"
+version = "0.1.0"
+description = "A minimal OneBot/NapCat QQ companion bot with an Atri persona."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27.0",
+  "imageio-ffmpeg>=0.5.1",
+  "Pillow>=10.0.0",
+  "pypdf>=4.0.0",
+  "python-dotenv>=1.0.1",
+  "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
