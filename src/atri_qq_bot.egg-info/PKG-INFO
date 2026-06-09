@@ -1,0 +1,108 @@
+Metadata-Version: 2.4
+Name: atri-qq-bot
+Version: 0.1.0
+Summary: A minimal OneBot/NapCat QQ companion bot with an Atri persona.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: websockets>=12.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+
+# 亚托莉 QQ 陪伴机器人
+
+## 小白启动方式
+
+最简单：
+
+1. 双击桌面 `启动亚托莉 QQ机器人`
+2. 会自动启动亚托莉服务，并用 NapCat 打开 QQ `3380609082`
+3. 如果 QQ 要扫码登录，请扫码一次
+4. 用另一个 QQ 给 `3380609082` 发私聊消息测试
+
+停止机器人：
+
+- 双击桌面 `停止亚托莉 QQ机器人`
+
+NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/onebot`。不要双击 `run.ps1`，Windows 很容易把它当文本文件打开。
+
+这是一个最小可运行的 NapCat / OneBot v11 反向 WebSocket 机器人，用 QQ `3380609082` 接收消息并按“亚托莉”人设回复。
+
+## 当前完成内容
+
+- 监听 NapCat 反向 WebSocket 事件。
+- 默认绑定机器人 QQ：`3380609082`。
+- 私聊自动回复；群聊默认仅在 @机器人、提到“亚托莉”或“atri”时回复。
+- 支持 OpenAI 兼容接口；没有 API Key 时使用本地人设兜底回复。
+- 每个会话保留短期上下文，便于连续聊天。
+
+## 安装
+
+```powershell
+cd "D:\Codex project\ai-girlfriend-qq"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+Copy-Item .env.example .env
+```
+
+如需接入大模型，编辑 `.env`：
+
+```env
+OPENAI_API_KEY=你的_API_Key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+不填 `OPENAI_API_KEY` 也能运行，只是会使用本地规则回复。
+
+## 启动机器人服务
+
+```powershell
+cd "D:\Codex project\ai-girlfriend-qq"
+.\.venv\Scripts\Activate.ps1
+python -m atri_qq_bot
+```
+
+启动后会监听：
+
+```text
+ws://127.0.0.1:8765/onebot
+```
+
+## NapCat 配置
+
+在 NapCat 中登录 QQ `3380609082`，添加一个 OneBot v11 反向 WebSocket 连接：
+
+- 类型：反向 WebSocket / WebSocket Client
+- 地址：`ws://127.0.0.1:8765/onebot`
+- OneBot 版本：v11
+
+然后用另一个 QQ 给 `3380609082` 发私聊消息，应该能收到亚托莉风格回复。
+
+## 配置项
+
+`.env` 中常用配置：
+
+```env
+BOT_QQ=3380609082
+HOST=127.0.0.1
+PORT=8765
+REPLY_MODE=mention
+```
+
+`REPLY_MODE` 可选：
+
+- `private`：只回复私聊。
+- `mention`：回复私聊；群聊只在 @机器人或提到“亚托莉/atri”时回复。
+- `all`：私聊和群聊所有消息都回复，不建议直接用于大群。
+
+## 测试
+
+```powershell
+cd "D:\Codex project\ai-girlfriend-qq"
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m pytest
+```
