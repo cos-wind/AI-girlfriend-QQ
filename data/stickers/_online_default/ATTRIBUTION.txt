@@ -1,0 +1,8 @@
+﻿Default online sticker seed
+Source: Google Noto Emoji
+Repository: https://github.com/googlefonts/noto-emoji
+License: Apache License 2.0
+
+These images are cached locally so the bot does not need to fetch the network while chatting.
+Manual stickers can be added to data/stickers/<emotion>/.
+Chat-history stickers are saved to data/stickers/_chat_history/<emotion>/.

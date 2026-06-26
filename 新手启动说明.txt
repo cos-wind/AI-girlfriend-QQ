@@ -1,0 +1,67 @@
+最简单启动方法：
+
+1. 像平时一样启动 QQ：
+   双击桌面原有的 QQ 图标
+
+   后台监听器会在 1 秒内接管启动：正常显示 QQ 界面，同时后台启动亚托莉、NapCat 和本地模型。
+   不会弹出黑色终端窗口。
+
+2. 会出现 QQ 窗口。
+   如果 QQ 要扫码登录，请扫码一次。
+
+3. 不需要再手动配置 NapCat。
+   我已经写好了 OneBot 反向 WebSocket：
+   ws://127.0.0.1:8765/onebot
+
+4. 用另一个 QQ 给 3380609082 发私聊消息测试。
+
+群聊模块：
+已经开启。群里 @ 亚托莉或提到“亚托莉/atri”时，她会读取最近群聊上下文再回复。
+群里冷场时会低频主动插一句，默认单个群每天最多 3 次，不会刷屏。
+
+自迭代模块：
+已经开启。聊天记录会按私聊用户、群整体、群内用户分别保存。
+你指出“答非所问、重复、套话、人设不对”等问题时，她会记录并修正；如果要求破坏人设、越界或刷屏，她会拒绝。
+
+每天早上 7:30 早安：
+已经开启。
+如果只想发给你一个人，打开 .env，把 OWNER_QQ= 改成你的 QQ 号。
+
+电脑关机也能聊天：
+本机电脑关机后，这台电脑上的程序不能继续运行。
+要实现电脑不开机也能聊，需要把项目和 NapCat 搬到云服务器、NAS、软路由或旧电脑上 24 小时运行。
+云端说明在：
+D:\Codex project\ai-girlfriend-qq\deploy\cloud\README.md
+
+表情包放这里：
+D:\Codex project\ai-girlfriend-qq\data\stickers
+
+聊天记录里自动保存的表情包在：
+D:\Codex project\ai-girlfriend-qq\data\stickers\_chat_history
+
+我准备好的默认联网表情缓存放在：
+D:\Codex project\ai-girlfriend-qq\data\stickers\_online_default
+
+常用文件夹：
+happy 开心
+comfort 安慰
+tired 累了/困了
+proud 高性能/得意
+confused 没懂/纠错
+shy 害羞/亲密
+food 吃饭
+goodnight 晚安
+
+自定义触发词：
+D:\Codex project\ai-girlfriend-qq\data\stickers\triggers.json
+
+停止方法：
+
+- 平时不用手动停止，关闭 QQ 就行。
+- 如果需要彻底停止，双击项目文件夹里的：stop-all.bat
+
+检查状态：
+
+- 双击项目文件夹里的：检查亚托莉状态.bat
+
+不要双击 run.ps1，它在你的电脑上会被记事本打开。

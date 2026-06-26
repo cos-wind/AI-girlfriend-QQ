@@ -1,0 +1,5 @@
+﻿Curated open-source emoji stickers.
+Source: Google Noto Emoji
+Repository: https://github.com/googlefonts/noto-emoji
+License: SIL Open Font License 1.1, see https://github.com/googlefonts/noto-emoji/blob/main/LICENSE
+Downloaded files are stored by emotion. The bot only chooses images from the detected emotion folder.

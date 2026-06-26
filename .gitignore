@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+*.log
+logs/
+dist/
+build/
+*.egg-info/
+data/memory/
+data/webui/
+data/stickers/_chat_history/
+data/stickers/_deleted/

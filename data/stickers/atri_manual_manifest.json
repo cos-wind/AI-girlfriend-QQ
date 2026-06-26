@@ -1,0 +1,119 @@
+{
+  "说明": "用户提供的 ATRI 图片表情包映射。文件放在顶层情绪文件夹，优先级高于 _curated、_chat_history 和 _online_default。",
+  "添加时间": "2026-06-01",
+  "源目录": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI",
+  "图片": [
+    {
+      "file": "speechless/atri_calm_side_eye.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/029C79797CE990326542DD8A50699A50.jpg",
+      "emotion": "speechless",
+      "含义": "冷静侧目、轻微嫌弃、看破不说破",
+      "适用场景": ["嫌弃", "没眼看", "冷静吐槽", "主人说离谱话"]
+    },
+    {
+      "file": "shy/atri_please.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/02B0D86BA607B6C9C156CEA0E588A4E3.jpg",
+      "emotion": "shy",
+      "含义": "撒娇请求、拜托、求求你了",
+      "适用场景": ["求求你了", "拜托", "哄用户去休息/吃饭时的轻撒娇"]
+    },
+    {
+      "file": "speechless/atri_unamused_blank.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/064aed9f3e4cdfca1123661b00edd506.jpg",
+      "emotion": "speechless",
+      "含义": "面无表情、无语、沉默",
+      "适用场景": ["无语", "麻了", "沉默", "不想理"]
+    },
+    {
+      "file": "teasing/atri_teasing_scared.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/09635a4a5a08cd29bd98e77a5f6c5cc2.jpg",
+      "emotion": "teasing",
+      "含义": "我超怕的、反向调侃、轻松互怼",
+      "适用场景": ["我超怕的", "阴阳怪气", "逗你", "才不是", "轻松玩梗"]
+    },
+    {
+      "file": "happy/atri_happy_wave.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/1B57772B28D4DB87A57F9520B3F7D5E5.jpg",
+      "emotion": "happy",
+      "含义": "开心、元气上线、打招呼",
+      "适用场景": ["早安", "早上好", "在吗", "开心上线", "轻快问候"]
+    },
+    {
+      "file": "confused/atri_huh.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/23208E9AA1F4A0D47D94F93F61A11B73.jpg",
+      "emotion": "confused",
+      "含义": "啊？疑惑、震惊、没听懂",
+      "适用场景": ["啊？", "哈？", "啥？", "突然离谱"]
+    },
+    {
+      "file": "proud/atri_great.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/40F4D109C19177082225B4F516BA1B5F.jpg",
+      "emotion": "proud",
+      "含义": "就很棒、夸奖、认可",
+      "适用场景": ["很棒", "厉害", "夸夸", "用户完成事情"]
+    },
+    {
+      "file": "angry/atri_angry_complain.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/5CE7FEBA1E9CFA71710BE59D1E39D7E2.jpg",
+      "emotion": "angry",
+      "含义": "生气委屈、炸毛、替主人抱不平",
+      "适用场景": ["气死", "被欺负", "委屈到炸毛", "火大但偏可爱"]
+    },
+    {
+      "file": "shy/atri_no_horny.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/8F260B37163E1C5BD36A5A2BC616A83A.jpg",
+      "emotion": "shy",
+      "含义": "你不准涩涩、害羞制止",
+      "适用场景": ["涩涩", "不准涩涩", "暧昧玩笑越界"]
+    },
+    {
+      "file": "affection/atri_soft_shy.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/99D94434BDFF27A6D0AFBBB7555AFB23.jpg",
+      "emotion": "affection",
+      "含义": "软乎乎、轻害羞、贴近陪伴",
+      "适用场景": ["贴贴", "陪陪我", "抱一下", "温柔陪伴"]
+    },
+    {
+      "file": "speechless/atri_blank_text.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/9A31D31EC7F6885973891890A6160044.jpg",
+      "emotion": "speechless",
+      "含义": "呆滞、宕机、无语到停住",
+      "适用场景": ["呆滞", "懵", "麻了", "抽象到停机"]
+    },
+    {
+      "file": "happy/atri_laugh_text.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/BFBC811ED9B2D046D36882104B5E4D95.jpg",
+      "emotion": "happy",
+      "含义": "哈哈哈哈哈哈、大笑",
+      "适用场景": ["哈哈哈", "笑死", "开心玩梗"]
+    },
+    {
+      "file": "angry/atri_angry_serious.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/cdab452896f0c26ae6d9a166ba28a6f6.jpg",
+      "emotion": "angry",
+      "含义": "认真生气、皱眉、强硬表态",
+      "适用场景": ["生气", "火大", "红温", "要认真站队"]
+    },
+    {
+      "file": "proud/atri_high_performance.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/DDC98FECE316D23A1727143360F4E4BF.jpg",
+      "emotion": "proud",
+      "含义": "我可是高性能的、自信得意",
+      "适用场景": ["高性能", "任务完成", "亚托莉自夸", "被用户夸奖"]
+    },
+    {
+      "file": "happy/atri_smirk_laugh.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/F2CEFFEDBA72D4E6D2CDEA27E915E6D0.jpg",
+      "emotion": "happy",
+      "含义": "憨笑、嘿嘿、得意但轻松",
+      "适用场景": ["憨笑", "嘿嘿", "轻松调侃", "小得意"]
+    },
+    {
+      "file": "happy/atri_cheerful_open.jpg",
+      "source": "C:/Users/ASUS/Pictures/Screenshots/ACGN/ATRI/FC2F8F80440DA0F8DF8EA3100CCC4B0A.jpg",
+      "emotion": "happy",
+      "含义": "开朗笑脸、轻快回应、元气补给",
+      "适用场景": ["元气", "开心上线", "普通开心", "清晨问候"]
+    }
+  ]
+}
