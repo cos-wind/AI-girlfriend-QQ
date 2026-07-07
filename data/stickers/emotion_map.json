@@ -10,9 +10,9 @@
     "_online_default 默认开源兜底图",
     "QQ 内置表情或轻量 emoji"
   ],
-  "人工添加位置": "D:\\Codex project\\ai-girlfriend-qq\\data\\stickers\\<emotion>",
-  "网络精选位置": "D:\\Codex project\\ai-girlfriend-qq\\data\\stickers\\_curated\\<emotion>",
-  "聊天记录位置": "D:\\Codex project\\ai-girlfriend-qq\\data\\stickers\\_chat_history\\<emotion>",
+  "人工添加位置": "D:\\Codex project\\AI_ATRI\\data\\stickers\\<emotion>",
+  "网络精选位置": "D:\\Codex project\\AI_ATRI\\data\\stickers\\_curated\\<emotion>",
+  "聊天记录位置": "D:\\Codex project\\AI_ATRI\\data\\stickers\\_chat_history\\<emotion>",
   "情绪": {
     "happy": {
       "含义": "开心、成功、轻松、一起笑",

@@ -18,9 +18,15 @@ dev = [
   "pytest>=8.0.0",
 ]
 
+[project.gui-scripts]
+atri-desktop-pet = "atri_desktop.app:main"
+
 [build-system]
 requires = ["setuptools>=69.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+atri_desktop = ["assets/*.ico", "assets/*.png", "assets/expressions/*.png"]

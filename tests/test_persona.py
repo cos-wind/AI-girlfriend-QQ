@@ -314,9 +314,9 @@ def test_short_distress_uses_stable_comfort_without_fake_voice() -> None:
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
-        openai_api_key="ollama",
-        openai_base_url="http://127.0.0.1:11434/v1",
-        openai_model="qwen3:4b-instruct",
+        openai_api_key=None,
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-4.1-mini",
         temperature=0.45,
         max_tokens=180,
     )
@@ -327,6 +327,53 @@ def test_short_distress_uses_stable_comfort_without_fake_voice() -> None:
     assert any(word in reply for word in ("难受", "喝口水", "缓下来", "硬扛"))
     assert "声音" not in reply
     assert "我听到" not in reply
+
+
+def test_short_distress_uses_model_when_ai_is_enabled(monkeypatch) -> None:
+    config = BotConfig(
+        bot_qq=3380609082,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.45,
+        max_tokens=180,
+    )
+    engine = AtriReplyEngine(config)
+    called = False
+
+    async def fake_guarded_api(*args, **kwargs):
+        nonlocal called
+        called = True
+        return "先喝口水，别硬撑。我在这边，你慢慢说发生了什么。"
+
+    monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
+
+    reply = asyncio.run(engine.reply("private:10001", "好难受"))
+
+    assert called
+    assert "喝口水" in reply
+    assert "发生了什么" in reply
+    assert "十分钟" not in reply
+
+
+def test_group_distress_fallback_is_not_empty_positive_slogan() -> None:
+    reply = _group_fallback_reply("我好难受", allow_abstract=False)
+
+    assert reply is not None
+    assert "元气满满" not in reply
+    assert "该吃吃" not in reply
+    assert any(word in reply for word in ("缓", "硬扛", "慢慢说", "压着"))
+
+
+def test_direct_suggestion_fallback_avoids_generic_ten_minute_template() -> None:
+    reply = _persona_repair_fallback("我该怎么办", "告诉我更多")
+
+    assert "十分钟" not in reply
+    assert "目标写成一句话" not in reply
+    assert any(word in reply for word in ("背景", "限制", "卡住", "具体"))
 
 
 def test_local_question_fallback_has_no_local_mode_template() -> None:
@@ -419,9 +466,9 @@ def test_weather_question_does_not_fake_realtime_weather() -> None:
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
-        openai_api_key="ollama",
-        openai_base_url="http://127.0.0.1:11434/v1",
-        openai_model="qwen3:4b-instruct",
+        openai_api_key=None,
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-4.1-mini",
         temperature=0.45,
         max_tokens=180,
     )
@@ -431,6 +478,35 @@ def test_weather_question_does_not_fake_realtime_weather() -> None:
 
     assert "不能乱报" in reply
     assert "手机天气" in reply or "QQ 天气" in reply
+
+
+def test_weather_question_uses_model_when_ai_is_enabled(monkeypatch) -> None:
+    config = BotConfig(
+        bot_qq=3380609082,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.45,
+        max_tokens=180,
+    )
+    engine = AtriReplyEngine(config)
+    called = False
+
+    async def fake_guarded_api(*args, **kwargs):
+        nonlocal called
+        called = True
+        return "武汉天气需要看最新来源，我先查实时信息再说，不会乱报。"
+
+    monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
+
+    reply = asyncio.run(engine.reply("private:10001", "@3380609082 今日武汉天气"))
+
+    assert called
+    assert "最新来源" in reply
+    assert "手机天气" not in reply
 
 
 def test_generic_api_reply_triggers_humanized_rewrite_gate() -> None:

@@ -19,5 +19,5 @@ Write-Host ""
 if ($listen -and $established) {
     Write-Host "Status OK. Use another QQ account to message 3380609082."
 } else {
-    Write-Host "If not connected, double-click start-all.bat or 启动亚托莉.bat."
+    Write-Host "If not connected, open 亚托莉桌宠 and use the desktop pet menu: 启动亚托莉."
 }

@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>亚托莉 AI 智能体 · 完整架构说明</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#f5f7fa; --card:#ffffff; --ink:#1a1d2e; --ink-secondary:#4a5069;
+    --muted:#8b90a5; --line:#e2e5ed; --line-light:#f0f2f6;
+    --blue:#2563eb; --blue-light:#eef3ff; --blue-border:#c7d8fe;
+    --green:#059669; --green-light:#ecfdf5; --green-border:#b8e6d8;
+    --amber:#d97706; --amber-light:#fffbeb; --amber-border:#fde68a;
+    --red:#dc2626; --red-light:#fef2f2; --red-border:#fecaca;
+    --purple:#7c3aed; --purple-light:#f5f3ff; --purple-border:#ddd6fe;
+    --code-bg:#f8f9fc; --code-border:#e8eaf0;
+    --shadow:0 1px 4px rgba(0,0,0,.06), 0 2px 12px rgba(0,0,0,.04);
+    --radius:14px; --radius-sm:8px;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  ::selection { background:#dbeafe; color:var(--blue); }
+  body { font-family:"Inter","Microsoft YaHei UI","PingFang SC","Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--ink); line-height:1.8; font-size:16px; -webkit-font-smoothing:antialiased; }
+  header { padding:48px 24px 36px; text-align:center; background:linear-gradient(180deg,#f8faff 0%,#eef3ff 100%); border-bottom:1px solid var(--line); position:relative; }
+  header h1 { font-size:34px; font-weight:700; letter-spacing:-.5px; color:#0f172a; margin-bottom:6px; }
+  header p { color:var(--ink-secondary); font-size:16px; }
+  header .subtitle { display:inline-block; margin-top:10px; padding:4px 18px; background:var(--blue-light); border:1px solid var(--blue-border); border-radius:20px; font-size:13px; color:var(--blue); font-weight:500; }
+  nav { position:sticky; top:0; z-index:10; background:rgba(255,255,255,.92); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid var(--line); padding:6px 16px; overflow-x:auto; white-space:nowrap; text-align:center; }
+  nav a { display:inline-block; padding:8px 18px; margin:0 2px; color:var(--ink-secondary); text-decoration:none; font-size:14px; font-weight:500; border-radius:var(--radius-sm); transition:all .15s ease; }
+  nav a:hover { color:var(--blue); background:var(--blue-light); }
+  nav a:active { color:var(--blue); }
+  .container { max-width:1000px; margin:0 auto; padding:28px 16px 48px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:36px 36px 32px; margin-bottom:20px; box-shadow:var(--shadow); }
+  section:target { border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-light); }
+  h2 { font-size:22px; font-weight:700; margin-bottom:16px; padding-bottom:12px; border-bottom:2px solid var(--blue); color:#0f172a; display:flex; align-items:center; gap:10px; }
+  h3 { font-size:18px; font-weight:600; margin:24px 0 10px; color:var(--ink); }
+  h4 { font-size:15px; font-weight:600; margin:18px 0 8px; color:var(--ink-secondary); }
+  p { font-size:15px; color:var(--ink-secondary); margin:10px 0; line-height:1.8; }
+  ul, ol { padding-left:22px; margin:10px 0; }
+  li { margin:5px 0; font-size:15px; color:var(--ink-secondary); line-height:1.7; }
+  li::marker { color:var(--blue); }
+  strong { color:var(--ink); font-weight:600; }
+  code { background:var(--code-bg); padding:2px 8px; border-radius:5px; font-size:14px; font-family:"JetBrains Mono","Cascadia Code","Fira Code",monospace; color:var(--purple); border:1px solid var(--purple-border); }
+  pre { background:var(--code-bg); border:1px solid var(--code-border); border-radius:var(--radius-sm); padding:20px; overflow-x:auto; font-size:14px; line-height:1.65; margin:16px 0; tab-size:2; box-shadow:inset 0 1px 3px rgba(0,0,0,.02); }
+  pre code { background:none; padding:0; border:none; color:var(--ink-secondary); font-size:14px; }
+  table { width:100%; border-collapse:separate; border-spacing:0; margin:16px 0; font-size:14px; border:1px solid var(--line); border-radius:var(--radius-sm); overflow:hidden; }
+  th, td { border-bottom:1px solid var(--line-light); padding:12px 16px; text-align:left; font-size:14px; }
+  th { background:var(--code-bg); font-weight:600; color:var(--ink); font-size:13px; }
+  tr:last-child td { border-bottom:none; }
+  tr:hover td { background:var(--blue-light); }
+  .badge { display:inline-block; padding:3px 14px; border-radius:20px; font-size:12px; font-weight:600; line-height:1.5; white-space:nowrap; }
+  .badge-green { background:var(--green-light); color:var(--green); border:1px solid var(--green-border); }
+  .badge-blue { background:var(--blue-light); color:var(--blue); border:1px solid var(--blue-border); }
+  .badge-amber { background:var(--amber-light); color:var(--amber); border:1px solid var(--amber-border); }
+  .badge-red { background:var(--red-light); color:var(--red); border:1px solid var(--red-border); }
+  .badge-purple { background:var(--purple-light); color:var(--purple); border:1px solid var(--purple-border); }
+  .diagram { background:var(--code-bg); border:1px solid var(--code-border); border-radius:var(--radius-sm); padding:24px; font-family:"JetBrains Mono","Cascadia Code",monospace; font-size:13px; line-height:1.7; white-space:pre; overflow-x:auto; margin:16px 0; color:var(--ink-secondary); box-shadow:inset 0 1px 3px rgba(0,0,0,.02); }
+  .scenario { border-left:4px solid var(--blue); padding:18px 22px; margin:16px 0; background:var(--blue-light); border-radius:0 var(--radius-sm) var(--radius-sm) 0; }
+  .scenario.news { border-left-color:var(--amber); background:var(--amber-light); }
+  .scenario.emotion { border-left-color:var(--green); background:var(--green-light); }
+  .scenario p:first-child { margin-top:0; }
+  .scenario p:last-child { margin-bottom:0; }
+  .file-path { font-size:13px; color:var(--muted); margin-bottom:4px; font-family:"JetBrains Mono",monospace; }
+  .footnote { font-size:14px; color:var(--muted); text-align:center; padding:32px 16px 16px; border-top:1px solid var(--line); margin-top:40px; }
+  .footnote code { font-size:13px; }
+  .em { color:var(--ink); font-style:normal; font-weight:500; }
+  .arch-box { background:var(--card); border:2px solid var(--blue-border); border-radius:var(--radius); padding:20px 24px; margin:10px 0; box-shadow:var(--shadow); }
+  .arch-box p { margin:4px 0; }
+  .arch-box .label { font-size:12px; font-weight:600; color:var(--blue); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+  .arch-arrow { color:var(--muted); font-size:20px; text-align:center; padding:4px 0; }
+  @media (max-width:640px) {
+    section { padding:20px; } header { padding:32px 16px 24px; }
+    header h1 { font-size:26px; } .container { padding:16px 8px 32px; }
+    th, td { padding:8px 10px; font-size:13px; }
+    .diagram { font-size:12px; padding:16px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>亚托莉 AI 智能体</h1>
+  <p>Function Calling 工具系统 · 七层智能体设计 · 完整架构说明</p>
+  <span class="subtitle">atri-qq-bot · OneBot/NapCat QQ Companion Bot · v0.1.0</span>
+</header>
+
+<nav>
+  <a href="#arch">整体架构</a>
+  <a href="#layers">智能体七层</a>
+  <a href="#flow">消息流程</a>
+  <a href="#tools">工具系统</a>
+  <a href="#memory">记忆系统</a>
+  <a href="#scenarios">演示场景</a>
+  <a href="#config">配置项</a>
+</nav>
+
+<div class="container">
+
+<!-- ================ 整体架构 ================ -->
+<section id="arch">
+<h2>一、整体架构</h2>
+
+<div class="diagram">
+┌────────────────────────────────────────────────────────────┐
+│                     NapCat QQ (外部)                        │
+│                  ↕ WebSocket (OneBot 协议)                   │
+├────────────────────────────────────────────────────────────┤
+│  onebot/server.py  (OneBotServer)                          │
+│  ├─ 连接管理 / 消息路由 / 去重合并                           │
+│  ├─ 智能回复决策 (should_reply / smart / mention)           │
+│  └─ 主动推送循环 (闲时戳一戳 / 早安 / 群聊 nudge)           │
+├────────────────────────────────────────────────────────────┤
+│  persona/core.py  (AtriReplyEngine)                        │
+│  ├─ PERSONA_PROMPT (100+ 行人设规则)                        │
+│  ├─ 回复生成 (API / 重写校验 / 语言守卫 / Fallback)          │
+│  └─ 🔧 Function Calling 工具循环 (LLM 自主决定调用)         │
+├────────────────────────────────────────────────────────────┤
+│  llm_tools/  ←  LLM 自主调用的工具                           │
+│  ├─ time_tool.py      获取当前时间                           │
+│  ├─ web_search_tool.py  Bing News RSS 搜索                 │
+│  ├─ schema.py          OpenAI tool schemas                  │
+│  └─ tool_loop.py       工具执行循环                          │
+├────────────────────────────────────────────────────────────┤
+│  toolbox/  ← 被动附件分析（URL / 文件 / 图片 / 视频）         │
+├────────────────────────────────────────────────────────────┤
+│  memory.py  (UserMemoryStore)                              │
+│  ├─ 好感度系统 (affection_score 0-100)                      │
+│  ├─ 三级记忆 (L1 事实 / L2 事件 / L3 会话)                  │
+│  └─ 用户画像 (话题关键词 / 行为风格 / 迭代学习)               │
+├────────────────────────────────────────────────────────────┤
+│  stickers.py  (StickerManager) 表情包管理                   │
+├────────────────────────────────────────────────────────────┤
+│  atri_webui/  (Web 控制台)                                 │
+│  atri_desktop/ (Windows 桌宠)                              │
+└────────────────────────────────────────────────────────────┘</div>
+
+<h3>三大入口</h3>
+<table>
+  <tr><th>入口</th><th>命令</th><th>职责</th></tr>
+  <tr>
+    <td><code>atri_qq_bot/__main__.py</code></td>
+    <td><code>python -m atri_qq_bot</code></td>
+    <td>启动 OneBot WebSocket 服务 + WebUI</td>
+  </tr>
+  <tr>
+    <td><code>atri_desktop/app.py</code></td>
+    <td><code>atri-desktop-pet</code></td>
+    <td>Windows 桌宠窗口（Tkinter）</td>
+  </tr>
+  <tr>
+    <td><code>atri_webui/server.py</code></td>
+    <td>内嵌于 QQ Bot</td>
+    <td>本地管理面板 (<code>127.0.0.1:8787</code>)</td>
+  </tr>
+</table>
+</section>
+
+<!-- ================ 智能体七层 ================ -->
+<section id="layers">
+<h2>二、智能体七层设计</h2>
+
+<p>一个完整的 AI 智能体需要以下 7 层能力。当前项目覆盖情况如下：</p>
+
+<table>
+  <tr><th>#</th><th>层级</th><th>状态</th><th>实现方式</th></tr>
+  <tr>
+    <td><strong>1</strong></td>
+    <td><strong>🔧 工具</strong> — 与环境交互</td>
+    <td><span class="badge badge-green">✅ 完成</span></td>
+    <td>
+      <strong>LLM 自主调用</strong>：<code>get_current_time</code> (时间) + <code>search_web</code> (搜索)<br>
+      <strong>被动分析</strong>：<code>ToolAnalyzer</code> 分析 URL / 文件 / 图片 / 视频
+    </td>
+  </tr>
+  <tr>
+    <td><strong>2</strong></td>
+    <td><strong>🧠 思考</strong> — 推理引擎</td>
+    <td><span class="badge badge-green">✅ 完成</span></td>
+    <td>OpenAI 兼容 API / Ollama，支持 Function Calling</td>
+  </tr>
+  <tr>
+    <td><strong>3</strong></td>
+    <td><strong>💾 记忆</strong> — 短期 + 长期</td>
+    <td><span class="badge badge-green">✅ 完成</span></td>
+    <td>会话历史 (短期) + 用户画像 + 好感度 + 三级结构化记忆 (长期)</td>
+  </tr>
+  <tr>
+    <td><strong>4</strong></td>
+    <td><strong>📚 知识</strong> — 外部知识库</td>
+    <td><span class="badge badge-amber">⚠️ 基础</span></td>
+    <td>网页抓取 (被动) + Bing News 搜索 (主动)；<br>尚无持久化 RAG 知识库</td>
+  </tr>
+  <tr>
+    <td><strong>5</strong></td>
+    <td><strong>🔄 规划/观测</strong> — 自主决策</td>
+    <td><span class="badge badge-green">✅ 完成</span></td>
+    <td>
+      <strong>Function Calling <code>tool_choice: "auto"</code></strong><br>
+      LLM 自主判断何时调用工具、是否需要搜索<br>
+      而不是硬编码 if/else 关键词匹配
+    </td>
+  </tr>
+  <tr>
+    <td><strong>6</strong></td>
+    <td><strong>🛡️ 安全护栏</strong></td>
+    <td><span class="badge badge-green">✅ 完成</span></td>
+    <td><code>language_guard</code> (语言校验) + <code>persona_violations</code> (13 项人设检查) + 重写循环</td>
+  </tr>
+  <tr>
+    <td><strong>7</strong></td>
+    <td><strong>🎭 身份与边界</strong></td>
+    <td><span class="badge badge-green">✅ 完成</span></td>
+    <td>100+ 行 <code>PERSONA_PROMPT</code> + 场景管控 + 动态情绪标签</td>
+  </tr>
+</table>
+</section>
+
+<!-- ================ 消息流程 ================ -->
+<section id="flow">
+<h2>三、消息处理完整流程</h2>
+
+<div class="diagram">
+用户发送消息
+     │
+     ▼
+┌─────────────────────────────────┐
+│ onebot/server.py                 │
+│ 1. handle_payload() 接收消息     │
+│ 2. 进入会话队列 + 去重合并         │
+│ 3. should_reply() 决策是否回复    │
+│ 4. ToolAnalyzer.analyze() 附件分析│
+│    (URL/文件/图片 — 被动)         │
+└─────────┬───────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────┐
+│ persona/core.py                  │
+│ 5. AtriReplyEngine.reply()       │
+│     ├─ 检查 /affection 指令      │
+│     ├─ 纠错意图识别 / 迭代学习     │
+│     ├─ 情绪模式判定 (严肃/修复)    │
+│     └─ _reply_with_api()         │
+└─────────┬───────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────┐
+│ 6. 构建 messages[]                           │
+│    ├─ PERSONA_PROMPT + LANGUAGE_GUARD        │
+│    ├─ 用户画像 / 记忆上下文 / 历史对话         │
+│    ├─ 场景控制 / 动态情绪标签                  │
+│    ├─ 🔧 tool schemas (LLM 可见的工具列表)    │
+│    └─ 用户最新消息                            │
+└─────────┬───────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────┐
+│ 7. Function Calling 循环                     │
+│                                              │
+│    POST /chat/completions (tools + auto)      │
+│         │                                     │
+│         ▼                                     │
+│    ┌─ LLM 回复含 tool_calls? ──┐              │
+│    │ 是                       │ 否            │
+│    ▼                         ▼               │
+│ 执行工具                   返回最终回复         │
+│ (时间/搜索)                                    │
+│    │                                           │
+│    ▼                                           │
+│ 追加 tool result → 第二轮 API 调用              │
+│    │                                           │
+│    ▼                                           │
+│ 返回最终回复                                   │
+└─────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────┐
+│ 8. 输出后处理                     │
+│    ├─ persona_violations 检查    │
+│    ├─ 语言守卫 (外语/乱码检测)     │
+│    ├─ 重写循环 (最多 2 次)        │
+│    └─ _finalize_reply()          │
+├─────────────────────────────────┤
+│ 9. message_plan 拆分 & 发送      │
+│    ├─ 长文本拆成多条短消息         │
+│    ├─ StickerManager 选择表情包   │
+│    └─ send_private/group_msg     │
+└─────────────────────────────────┘</div>
+
+<h3>Function Calling 循环核心代码 (<code>persona/core.py:932-946</code>)</h3>
+<pre><code>if tool_schemas:
+    payload["tools"] = tool_schemas      # 注册可用工具
+    payload["tool_choice"] = "auto"      # LLM 自主决定
+
+data = await self._post_chat_completion(client, headers, payload)
+message = data["choices"][0]["message"]
+tool_calls = tool_calls_from_message(message)
+
+if tool_calls:                           # LLM 认为需要工具
+    await append_tool_results(messages, message, tool_calls, self.config)
+    # 执行工具 → 结果追加到 messages
+    data = await self._post_chat_completion(client, headers, messages)
+    message = data["choices"][0]["message"]
+    # 第二轮：LLM 整合工具结果生成最终回复</code></pre>
+</section>
+
+<!-- ================ 工具系统 ================ -->
+<section id="tools">
+<h2>四、工具系统详解</h2>
+
+<div class="scenario">
+<strong>设计哲学</strong>：所有工具调用由 LLM 自主决策（<code>tool_choice: "auto"</code>），而非硬编码关键词匹配。工具只提供能力和描述，用不用、什么时候用，交给模型自己判断。零 token 浪费——模型认为不需要时，不会产生任何 tool call 开销。
+</div>
+
+<h3>4.1 工具列表</h3>
+
+<table>
+  <tr><th>工具</th><th>文件</th><th>功能</th><th>触发场景</th></tr>
+  <tr>
+    <td><code>get_current_time</code></td>
+    <td><code>llm_tools/time_tool.py</code></td>
+    <td>获取当前日期、时间、星期、时区</td>
+    <td>"现在几点" "今天星期几" "今天是" "几号" "明天是"</td>
+  </tr>
+  <tr>
+    <td><code>search_web</code></td>
+    <td><code>llm_tools/web_search_tool.py</code></td>
+    <td>Bing News RSS 搜索，返回标题/摘要/发布时间/链接</td>
+    <td>"搜索""查一下""新闻""最新""最近发生了什么"</td>
+  </tr>
+</table>
+
+<h3>4.2 Tool Schema 注册 (<code>llm_tools/schema.py</code>)</h3>
+<pre><code>def available_tool_schemas(config):
+    if not config.llm_tools_enabled:
+        return []
+    tools = [_current_time_schema()]           # 时间工具始终可用
+    if config.web_search_enabled:
+        tools.append(_web_search_schema(config)) # 搜索可开关
+    return tools</code></pre>
+
+<h3>4.3 工具指令 Prompt (<code>llm_tools/schema.py:6-14</code>)</h3>
+<pre><code>TOOL_INSTRUCTION_PROMPT = """你可以在需要时自主调用工具，但不要为了显得聪明而调用。
+
+工具使用原则：
+- get_current_time：当回答依赖当前日期、时间、星期时使用。
+- search_web：当回答依赖实时变化的信息时使用，如最新消息、新闻、
+  价格、政策、天气、比赛结果，或用户明确说"查一下/搜一下"。
+- 普通闲聊、情绪安慰、群聊接梗、角色互动，如果上下文够用，不要调用。
+- 搜索结果必须按来源和发布时间判断时效性。
+- 工具失败时不要编造结果，直接说明拿不到可靠实时信息。
+"""</code></pre>
+
+<h3>4.4 工具执行器 (<code>llm_tools/tool_loop.py</code>)</h3>
+<pre><code>async def append_tool_results(messages, assistant_message, tool_calls, config):
+    max_calls = max(1, config.llm_tool_max_calls or 2)  # 上限保护
+    for call in tool_calls[:max_calls]:
+        name = tool_name(call)
+        arguments = tool_arguments(call)
+        content = await execute_tool(name, arguments, config)
+        messages.append(tool_message(call, name, content))</code></pre>
+
+<h3>4.5 搜索实现 (<code>llm_tools/web_search_tool.py</code>)</h3>
+<p>使用 <strong>Bing News RSS</strong> 接口（无需 API Key）：</p>
+<pre><code>BING_NEWS_RSS = "https://www.bing.com/news/search?q={query}&format=rss&mkt=zh-CN"
+
+async def search_web(arguments, config):
+    url = BING_NEWS_RSS.format(query=quote_plus(query))
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+    return format_search_results(query, parse_bing_news_rss(response.text))</code></pre>
+
+<h3>4.6 现有 Toolbox 对比</h3>
+<table>
+  <tr><th>维度</th><th>llm_tools (新)</th><th>toolbox (旧)</th></tr>
+  <tr><td>触发方式</td><td><span class="badge badge-green">LLM 自主</span></td><td><span class="badge badge-blue">被动硬编码</span></td></tr>
+  <tr><td>触发条件</td><td>模型根据对话语境自己决定</td><td>代码写死的关键词匹配</td></tr>
+  <tr><td>Token 开销</td><td>不需要时零开销</td><td>每条消息都跑分析逻辑</td></tr>
+  <tr><td>覆盖范围</td><td>时间 + 网页搜索</td><td>URL/文件/图片/视频/B站</td></tr>
+  <tr><td>可扩展性</td><td>加一个 schema 即可新增工具</td><td>需要改 if/else 链</td></tr>
+</table>
+</section>
+
+<!-- ================ 记忆系统 ================ -->
+<section id="memory">
+<h2>五、记忆系统</h2>
+
+<h3>5.1 好感度系统 (<code>memory_parts/core.py</code>)</h3>
+
+<table>
+  <tr><th>维度</th><th>细节</th></tr>
+  <tr><td>范围</td><td>0 – 100</td></tr>
+  <tr><td>初始值 (主人)</td><td>72</td></tr>
+  <tr><td>初始值 (普通用户)</td><td>50</td></tr>
+  <tr><td>正向大事件</td><td>+8.0（如"喜欢你""对不起"）</td></tr>
+  <tr><td>负向大事件</td><td>−8.0（如"讨厌你""滚"）</td></tr>
+  <tr><td>脆弱倾诉</td><td>+2.6（如"难受""焦虑"— 信任加分）</td></tr>
+  <tr><td>日常正向</td><td>+0.35（如"早安""谢谢"）</td></tr>
+  <tr><td>日常中性</td><td>+0（普通聊天）</td></tr>
+  <tr><td>闲置衰减 (主人)</td><td>−0.35/天（1 天宽限期后）</td></tr>
+  <tr><td>闲置衰减 (普通)</td><td>−1.2/天</td></tr>
+</table>
+
+<h3>5.2 好感度影响行为</h3>
+<table>
+  <tr><th>好感度</th><th>状态标签</th><th>Nudge 频率</th><th>提问间隔</th></tr>
+  <tr><td>≥ 84</td><td>非常亲密</td><td>正常 (1x)</td><td>3–5 轮</td></tr>
+  <tr><td>68–83</td><td>亲近</td><td>正常 (1x)</td><td>3–5 轮</td></tr>
+  <tr><td>42–67</td><td>自然</td><td>较慢 (2x)</td><td>5–8 轮</td></tr>
+  <tr><td>24–41</td><td>生疏</td><td>很慢 (4x)</td><td>很少</td></tr>
+  <tr><td>&lt; 24</td><td>疏远</td><td>🛑 停止推送</td><td>很少</td></tr>
+</table>
+
+<h3>5.3 三级结构化记忆</h3>
+<ul>
+  <li><strong>L1 候补事实</strong>：从对话中提取的关键信息片段，经多次确认后晋升为 L2</li>
+  <li><strong>L2 事件记忆</strong>：带时间戳的持久事件，如有衰减机制</li>
+  <li><strong>L3 会话上下文</strong>：当前 session 的短期记忆，session 结束后丢弃</li>
+</ul>
+
+<h3>5.4 用户画像动态适配</h3>
+<pre><code>profile = {
+    "message_count": 142,           # 消息总数
+    "avg_user_chars": 28,           # 平均消息长度 → 适配回复长度
+    "topic_words": ["工作","代码"], # 近期话题关键词
+    "affection_score": 68.0,        # 好感度
+    "correction_rate": 0.15,        # 纠错频率 → 减少套话
+    "emoji_rate": 0.42,             # 表情使用率 → 增加表情
+    "direct_rate": 0.20,            # 直球提问率 → 先给结论
+    "group_activity_score": 45.0,   # 群活跃度
+    "preferred_parts": 2,           # 适合拆成几条短句
+    "prompt_hint": "...",           # 最终拼入 system message
+}</code></pre>
+</section>
+
+<!-- ================ 演示场景 ================ -->
+<section id="scenarios">
+<h2>六、演示场景</h2>
+
+<!-- 场景 1 -->
+<h3>场景 1：获取当前时间</h3>
+<div class="scenario">
+<p><strong>用户发送</strong>：<code>现在几点啦</code></p>
+<p><strong>LLM 思考过程</strong>（内部）：用户想知道当前时间，我需要调用 <code>get_current_time</code> 工具。</p>
+<p><strong>函数调用</strong>：<code>get_current_time(timezone="Asia/Shanghai")</code></p>
+<p><strong>工具返回</strong>：</p>
+<pre><code>当前时间：2026-07-04 15:21:30
+星期：星期六
+时区：Asia/Shanghai</pre></code>
+<p><strong>最终回复</strong>：<em>"下午三点多了哦。星期六的下午，主人有什么打算吗？还是又在闷头写代码忘了看时间？"</em></p>
+<p><span class="badge badge-blue">✨ LLM 自主决策</span> <span class="badge badge-green">零 token 浪费</span></p>
+</div>
+
+<h3>场景 2：搜索最新消息</h3>
+<div class="scenario news">
+<p><strong>用户发送</strong>：<code>最近 AI 圈有什么大新闻吗</code></p>
+<p><strong>LLM 思考过程</strong>（内部）：用户问的是"最近"的新闻，我的训练数据可能已经过时，需要调用 <code>search_web</code> 获取实时信息。</p>
+<p><strong>函数调用</strong>：<code>search_web(query="AI 人工智能 最新新闻 2026", max_results=5)</code></p>
+<p><strong>工具返回</strong>：</p>
+<pre><code>搜索时间：2026-07-04 15:21:30 Asia/Shanghai
+搜索结果：
+1. 标题：OpenAI 发布 GPT-5 预览版
+   发布时间：Sat, 04 Jul 2026 10:00:00 GMT
+   摘要：OpenAI 今日发布 GPT-5 预览版...
+2. 标题：DeepSeek 开源新模型
+   发布时间：Fri, 03 Jul 2026 14:30:00 GMT
+   ...</pre></code>
+<p><strong>最终回复</strong>：<em>"今天刚出的消息，OpenAI 发布了 GPT-5 预览版。另外 DeepSeek 昨天也开源了一个新模型。你想了解哪个方向的细节？"</em></p>
+<p><span class="badge badge-amber">🌐 实时搜索</span> <span class="badge badge-blue">Bing News RSS</span></p>
+</div>
+
+<h3>场景 3：情绪陪伴（不调用工具）</h3>
+<div class="scenario emotion">
+<p><strong>用户发送</strong>：<code>今天好累啊，不想上班</code></p>
+<p><strong>LLM 思考过程</strong>（内部）：用户在倾诉疲惫情绪，需要安慰陪伴。不需要查时间或搜新闻，直接回复即可。</p>
+<p><strong>工具调用</strong>：🛑 <strong>无</strong>（零 token 消耗）</p>
+<p><strong>最终回复</strong>：<em>"辛苦了，主人。先别逞强，肩膀放下来一点。今天最消耗你的那件事，亚托莉陪你一起拆小。"</em></p>
+<p><span class="badge badge-green">零工具开销</span> <span class="badge badge-green">直接情感回应</span></p>
+</div>
+
+<h3>场景 4：群聊接梗（不调用工具）</h3>
+<div class="scenario emotion">
+<p><strong>用户发送</strong>（群聊）：<code>绷不住了</code></p>
+<p><strong>LLM 思考过程</strong>（内部）：群聊吐槽，轻松接梗就行。不需要任何工具。</p>
+<p><strong>工具调用</strong>：🛑 <strong>无</strong></p>
+<p><strong>最终回复</strong>：<em>"轻松绷住"</em></p>
+<p><span class="badge badge-green">零工具开销</span></p>
+</div>
+
+<h3>场景 5：搜索失败时的优雅降级</h3>
+<div class="scenario news">
+<p><strong>用户发送</strong>：<code>查一下明天天气</code></p>
+<p><strong>函数调用</strong>：<code>search_web(query="明天天气预报 2026-07-05")</code></p>
+<p><strong>工具返回</strong>（网络超时）：<code>"搜索失败：ConnectError。不要编造实时信息..."</code></p>
+<p><strong>最终回复</strong>：<em>"抱歉，现在网络不太稳定，没查到明天的天气预报。等网络好了我再帮你查一次，或者你可以直接告诉我城市名，我记住然后下次帮你留意。"</em></p>
+<p><span class="badge badge-red">工具失败</span> <span class="badge badge-green">不编造，自然过渡</span></p>
+</div>
+
+<h3>场景 6：多工具协作（时间 + 搜索）</h3>
+<div class="scenario news">
+<p><strong>用户发送</strong>：<code>今年诺贝尔奖公布了吗</code></p>
+<p><strong>Step 1</strong>：LLM 先调用 <code>get_current_time</code> 确认当前日期</p>
+<pre><code>→ 当前时间：2026-10-05
+→ 是 10 月，诺贝尔奖通常 10 月初公布</pre></code>
+<p><strong>Step 2</strong>：LLM 再调用 <code>search_web(query="2026 诺贝尔奖 公布")</code></p>
+<pre><code>→ 搜索结果包含今年获奖名单</pre></code>
+<p><strong>最终回复</strong>：<em>"现在 10 月 5 号，正好是诺贝尔奖公布的季节。今年生理学或医学奖刚刚颁给了……（结合搜索结果）想了解哪个奖项的细节？"</em></p>
+<p><span class="badge badge-amber">🔄 多轮工具协作</span></p>
+</div>
+
+<h3>场景 7：记忆 + 工具的融合</h3>
+<div class="scenario emotion">
+<p><strong>用户发送</strong>：<code>记得我上次说的那个项目吗？现在怎么样了</code></p>
+<p><strong>Step 1</strong>：记忆系统检索到 L2 事件："用户 6 月 28 日提到正在做一个数据分析项目，截止日期 7 月初"</p>
+<p><strong>Step 2</strong>：LLM 调用 <code>get_current_time</code> 确认当前是 7 月 4 日</p>
+<p><strong>最终回复</strong>：<em>"记得呀，你那个数据分析的项目，上次说 7 月初要交。现在都 4 号了，做完了吗？还是又在通宵赶工？哼哒，别把自己熬坏了。"</em></p>
+<p><span class="badge badge-blue">💾 记忆检索</span> <span class="badge badge-blue">⏰ 时间感知</span></p>
+</div>
+</section>
+
+<!-- ================ 配置项 ================ -->
+<section id="config">
+<h2>七、工具系统配置项</h2>
+
+<table>
+  <tr><th>环境变量</th><th>默认值</th><th>说明</th></tr>
+  <tr>
+    <td><code>LLM_TOOLS_ENABLED</code></td>
+    <td><code>true</code></td>
+    <td>总开关，关闭后 LLM 看不到任何工具</td>
+  </tr>
+  <tr>
+    <td><code>LLM_TOOL_MAX_CALLS</code></td>
+    <td><code>2</code></td>
+    <td>单次回复中最多执行几次工具调用（防循环）</td>
+  </tr>
+  <tr>
+    <td><code>WEB_SEARCH_ENABLED</code></td>
+    <td><code>true</code></td>
+    <td>联网搜索开关</td>
+  </tr>
+  <tr>
+    <td><code>WEB_SEARCH_TIMEOUT_SECONDS</code></td>
+    <td><code>6</code></td>
+    <td>搜索超时，超时后 LLM 拿到失败结果自然降级</td>
+  </tr>
+  <tr>
+    <td><code>WEB_SEARCH_MAX_RESULTS</code></td>
+    <td><code>5</code></td>
+    <td>每次搜索返回结果数量上限（1–8）</td>
+  </tr>
+</table>
+
+<h3>.env 示例</h3>
+<pre><code># LLM tool calling: the model may call local time or web search when context needs it.
+LLM_TOOLS_ENABLED=true
+LLM_TOOL_MAX_CALLS=2
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_TIMEOUT_SECONDS=6
+WEB_SEARCH_MAX_RESULTS=5</code></pre>
+</section>
+
+<!-- ================ 文件结构 ================ -->
+<section>
+<h2>八、核心文件索引</h2>
+
+<table>
+  <tr><th>文件</th><th>行数</th><th>职责</th></tr>
+  <tr><td><code>src/atri_qq_bot/llm_tools/__init__.py</code></td><td>15</td><td>工具模块导出</td></tr>
+  <tr><td><code>src/atri_qq_bot/llm_tools/schema.py</code></td><td>70</td><td>Tool schemas + 工具指令 prompt</td></tr>
+  <tr><td><code>src/atri_qq_bot/llm_tools/time_tool.py</code></td><td>49</td><td>时间获取（时区支持）</td></tr>
+  <tr><td><code>src/atri_qq_bot/llm_tools/web_search_tool.py</code></td><td>131</td><td>Bing News RSS 搜索</td></tr>
+  <tr><td><code>src/atri_qq_bot/llm_tools/tool_loop.py</code></td><td>95</td><td>工具执行循环</td></tr>
+  <tr><td><code>src/atri_qq_bot/persona/core.py</code></td><td>2114</td><td>回复引擎 + Function Calling 集成</td></tr>
+  <tr><td><code>src/atri_qq_bot/config/schema.py</code></td><td>76</td><td>配置数据类（含工具相关字段）</td></tr>
+  <tr><td><code>src/atri_qq_bot/config/loader.py</code></td><td>92</td><td>.env 加载</td></tr>
+  <tr><td><code>src/atri_qq_bot/onebot/server.py</code></td><td>541</td><td>OneBot 服务 + 消息路由</td></tr>
+  <tr><td><code>src/atri_qq_bot/memory.py</code></td><td>705</td><td>用户记忆 + 好感度</td></tr>
+  <tr><td><code>src/atri_qq_bot/toolbox.py</code></td><td>1170+</td><td>被动附件分析</td></tr>
+  <tr><td><code>tests/test_llm_tools.py</code></td><td>159</td><td>工具系统测试</td></tr>
+</table>
+</section>
+
+<div class="footnote">
+  <p>亚托莉 AI 智能体 · 项目架构文档 · 2026</p>
+  <p><code>atri-qq-bot</code> — OneBot/NapCat QQ companion bot with Atri persona</p>
+</div>
+
+</div>
+</body>
+</html>

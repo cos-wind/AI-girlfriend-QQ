@@ -1,17 +1,16 @@
 最简单启动方法：
 
-1. 像平时一样启动 QQ：
-   双击桌面原有的 QQ 图标
+1. 双击桌面快捷方式：亚托莉桌宠
 
-   后台监听器会在 1 秒内接管启动：正常显示 QQ 界面，同时后台启动亚托莉、NapCat 和本地模型。
-   不会弹出黑色终端窗口。
+   这个快捷方式直接启动桌宠，不会弹出黑色终端窗口。
 
-2. 会出现 QQ 窗口。
+2. 右键桌宠，点击：启动亚托莉
+
+   桌宠会在后台启动 Atri、NapCat/QQ 和 Ollama。
+   不需要再点“完整启动”“仅启动”之类的入口。
+
+3. 会出现 QQ 窗口。
    如果 QQ 要扫码登录，请扫码一次。
-
-3. 不需要再手动配置 NapCat。
-   我已经写好了 OneBot 反向 WebSocket：
-   ws://127.0.0.1:8765/onebot
 
 4. 用另一个 QQ 给 3380609082 发私聊消息测试。
 
@@ -31,16 +30,16 @@
 本机电脑关机后，这台电脑上的程序不能继续运行。
 要实现电脑不开机也能聊，需要把项目和 NapCat 搬到云服务器、NAS、软路由或旧电脑上 24 小时运行。
 云端说明在：
-D:\Codex project\ai-girlfriend-qq\deploy\cloud\README.md
+D:\Codex project\AI_ATRI\deploy\cloud\README.md
 
 表情包放这里：
-D:\Codex project\ai-girlfriend-qq\data\stickers
+D:\Codex project\AI_ATRI\data\stickers
 
 聊天记录里自动保存的表情包在：
-D:\Codex project\ai-girlfriend-qq\data\stickers\_chat_history
+D:\Codex project\AI_ATRI\data\stickers\_chat_history
 
 我准备好的默认联网表情缓存放在：
-D:\Codex project\ai-girlfriend-qq\data\stickers\_online_default
+D:\Codex project\AI_ATRI\data\stickers\_online_default
 
 常用文件夹：
 happy 开心
@@ -53,12 +52,12 @@ food 吃饭
 goodnight 晚安
 
 自定义触发词：
-D:\Codex project\ai-girlfriend-qq\data\stickers\triggers.json
+D:\Codex project\AI_ATRI\data\stickers\triggers.json
 
 停止方法：
 
 - 平时不用手动停止，关闭 QQ 就行。
-- 如果需要彻底停止，双击项目文件夹里的：stop-all.bat
+- 如果只是退出桌宠，右键桌宠，点击：退出桌宠
 
 检查状态：
 
