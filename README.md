@@ -11,27 +11,25 @@
 
 | 分支 | 版本 | 说明 |
 |------|------|------|
-| `master` / `codex/architecture-hardening` | **v0.2** (当前) | ✅ 重构为包结构 + LLM Function Calling 工具系统 |
+| `v0.3` | **v0.3** (当前) | ✅ 新增语音模块 + 天气工具 + 主动规划 v2 + WebUI 增强 |
+| `v0.2` | **v0.2** | 重构为包结构 + LLM Function Calling 工具系统 |
 | `v0.1-original` | **v0.1** | 原始扁平文件版本，仅作存档 |
 
-### v0.2 更新内容 (当前分支)
+### v0.3 相比 v0.2 新增功能
 
-- **重构为包结构**：单文件模块 `config.py` / `persona.py` / `group_chat.py` / `iteration.py` / `language_guard.py` / `lore.py` / `message_plan.py` / `onebot.py` / `proactive.py` 拆分为同名子包，职责更清晰
-- **引入 `llm_tools/` 工具系统**：基于 OpenAI Function Calling (`tool_choice: "auto"`)，LLM 自主决定是否调用工具
-  - `get_current_time` — 获取当前时间/日期/星期/时区
-  - `search_web` — Bing News RSS 联网搜索（默认开启，可关闭）
-  - 零 token 浪费：LLM 认为不需要工具时无任何额外开销
-- **子包拆分**：
-  - `memory_parts/` — 记忆系统核心逻辑（好感度、三级记忆、话题提取）
-  - `sticker_parts/` — 表情包情绪匹配核心逻辑
-  - `toolbox_parts/` — 工具箱子模块（格式化、媒体探测、Office 文档、请求收集）
-  - `runtime/` — 运行时路径与进程管理
-- **配置新增**：
-  - `LLM_TOOLS_ENABLED` / `LLM_TOOL_MAX_CALLS` — 工具系统开关与上限
-  - `WEB_SEARCH_ENABLED` / `WEB_SEARCH_TIMEOUT_SECONDS` / `WEB_SEARCH_MAX_RESULTS` — 联网搜索控制
-- **新增测试**：`tests/test_llm_tools.py` — 时间工具、搜索解析、工具执行循环、端到端 Function Calling 集成测试
-- **架构文档**：`docs/architecture_overview.html` — 完整架构说明与 7 个演示场景
-- **删除冗余**：移除旧的独立启动脚本、QQ 监听器、Watcher 脚本（功能已整合至 `tools/launch/`）
+- **语音模块** — 完整 TTS/ASR 管线：
+  - `atri_voice_service/` — 独立 FastAPI HTTP 语音合成服务（GPT-SoVITS / Edge-TTS 双引擎）
+  - `atri_qq_bot/voice/` — QQ 端语音决策与发送（6 层决策链：配置→LLM Function Calling→请求消费→合成→质量门→发送）
+  - SenseVoice ASR 语音识别，支持热词优化和口音矫正
+  - 质量门控：MOS 评分 + 时长校验，低质量自动降级为文字
+  - 流式语音回复（SSML），支持说话中被打断和响应式沉默检测
+  - 语音训练脚本：GPT-SoVITS v2Pro LoRA 微调管线
+  - 说话人音色库管理（VoiceProfileStore）
+- **LLM 天气工具** (`src/atri_qq_bot/llm_tools/weather_tool.py`) — 通过 Function Calling 查询实时天气
+- **主动规划 v2** (`src/atri_qq_bot/proactive/planner.py + policy.py`) — 重构后的空闲关怀引擎，支持分层活动检测和多策略规划
+- **WebUI 增强** — 新增通话页面 (`call_page.py`) 和语音管理页面 (`voice_admin.py`)
+- **架构加固** — 迭代自纠错引擎优化、6 层架构梳理、OneBot v11 协议完整实现
+- **安全清理** — 所有硬编码 QQ 号和本地路径已替换为环境变量或占位符，适合开源发布
 
 ---
 
