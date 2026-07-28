@@ -34,6 +34,7 @@ class BotConfig:
     sticker_capture_enabled: bool = True
     sticker_capture_max_bytes: int = 3_000_000
     memory_path: Path = field(default_factory=lambda: _project_root() / "data" / "memory" / "users.json")
+    proactive_v2_enabled: bool = False
     idle_proactive_enabled: bool = True
     idle_minutes: int = 180
     idle_cooldown_minutes: int = 720
@@ -64,9 +65,22 @@ class BotConfig:
     toolbox_video_max_frames: int = 4
     llm_tools_enabled: bool = True
     llm_tool_max_calls: int = 2
+    human_reply_pipeline_enabled: bool = True
     web_search_enabled: bool = True
     web_search_timeout_seconds: float = 6.0
     web_search_max_results: int = 5
+    voice_asr_enabled: bool = False
+    voice_tts_enabled: bool = False
+    voice_service_url: str = "http://127.0.0.1:8790"
+    voice_service_timeout_seconds: float = 180.0
+    voice_profile: str = "atri"
+    voice_zh_rescue_profile: str = "atri-official-v2pro-curated-gpt-e6"
+    voice_group_enabled: bool = False
+    voice_reply_to_voice: bool = False
+    voice_max_chars: int = 160
+    voice_segment_max_chars: int = 34
+    voice_cooldown_seconds: int = 30
+    voice_input_max_bytes: int = 20_000_000
     webui_enabled: bool = True
     webui_host: str = "127.0.0.1"
     webui_port: int = 8787

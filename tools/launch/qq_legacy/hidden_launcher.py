@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import ctypes
+import json
 import os
 import shutil
 import socket
@@ -12,14 +13,23 @@ from pathlib import Path
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[3]
-NAPCAT_DIR = Path(
-    r"D:\Tools\NapCat\OneKey\NapCat.44498.Shell\versions\9.9.26-44498\resources\app\napcat"
-)
+NAPCAT_DIR = Path(r"C:\Path\To\NapCat")  # TODO: set your NapCat path
 QQ_EXE = Path(r"C:\Program Files\Tencent\QQNT\QQ.exe")
-QQ_UIN = "3380609082"
+QQ_UIN = "YOUR_BOT_QQ"
 BOT_PORT = 8765
 OLLAMA_PORT = 11434
+VOICE_PORT = 8790
+GPT_SOVITS_PORT = 9880
+DEFAULT_OLLAMA_MODELS = Path(r"C:\Path\To\Local\Models")  # TODO: set your models path
+DEFAULT_ATRI_MODELS = DEFAULT_OLLAMA_MODELS / "AI_ATRI"
+VOICE_ASCII_MODELS = Path(r"C:\Path\To\AtriModels")  # TODO: set your AtriModels path
+VOICE_RUNTIME_CANDIDATES = (
+    PROJECT_DIR / "data" / "runtime" / "voice-runtime",
+    DEFAULT_OLLAMA_MODELS / "manifests" / "atri-runtime",
+    DEFAULT_OLLAMA_MODELS.parent / "Speech" / "atri-runtime",
+)
 WEBUI_STATUS_URL = "http://127.0.0.1:8787/api/status"
+VOICE_HEALTH_URL = f"http://127.0.0.1:{VOICE_PORT}/health"
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "hidden-launcher.log"
 _LAUNCHER_MUTEX_HANDLE: int | None = None
@@ -89,6 +99,148 @@ def run_hidden(args: list[str] | tuple[str, ...]) -> subprocess.CompletedProcess
         encoding="utf-8",
         errors="replace",
     )
+
+
+def project_env_value(name: str) -> str:
+    env_path = PROJECT_DIR / ".env"
+    if not env_path.exists():
+        return ""
+    prefix = f"{name}="
+    try:
+        lines = env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not stripped.startswith(prefix):
+            continue
+        value = stripped.split("=", 1)[1].strip()
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            value = value[1:-1].strip()
+        return value
+    return ""
+
+
+def ollama_models_path() -> Path:
+    configured = project_env_value("OLLAMA_MODELS") or os.environ.get("OLLAMA_MODELS", "")
+    configured = configured.strip()
+    return Path(configured) if configured else DEFAULT_OLLAMA_MODELS
+
+
+def ollama_process_env() -> dict[str, str]:
+    env = os.environ.copy()
+    models_path = ollama_models_path()
+    try:
+        models_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log(f"Could not create Ollama models directory {models_path}: {exc}")
+    env["OLLAMA_MODELS"] = str(models_path)
+    return env
+
+
+def voice_enabled() -> bool:
+    enabled_values = {"1", "true", "yes", "on"}
+    return any(
+        project_env_value(name).strip().lower() in enabled_values
+        for name in ("VOICE_ASR_ENABLED", "VOICE_TTS_ENABLED")
+    )
+
+
+def voice_tts_enabled() -> bool:
+    return project_env_value("VOICE_TTS_ENABLED").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def start_gpt_sovits_if_needed() -> None:
+    if not voice_tts_enabled() or port_open(GPT_SOVITS_PORT):
+        return
+    start_script = PROJECT_DIR / "tools" / "voice" / "start-gpt-sovits.ps1"
+    marker = PROJECT_DIR / "data" / "runtime" / "gpt-sovits" / ".dependencies-ready"
+    if not start_script.exists() or not marker.exists():
+        log("Voice synthesis is enabled but GPT-SoVITS is not fully installed.")
+        return
+    log("Starting GPT-SoVITS in background.")
+    popen_hidden(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(start_script),
+        ],
+        cwd=PROJECT_DIR,
+    )
+
+
+def start_voice_if_needed() -> None:
+    if not voice_enabled():
+        return
+    already_listening = port_open(VOICE_PORT)
+    if already_listening and voice_ready():
+        log(f"Voice service already ready on {VOICE_PORT}.")
+        return
+    runtime_root = next(
+        (
+            candidate
+            for candidate in VOICE_RUNTIME_CANDIDATES
+            if (candidate / ".venv" / "Scripts" / "python.exe").exists()
+        ),
+        VOICE_RUNTIME_CANDIDATES[0],
+    )
+    pythonw = runtime_root / ".venv" / "Scripts" / "pythonw.exe"
+    python = runtime_root / ".venv" / "Scripts" / "python.exe"
+    executable = pythonw if pythonw.exists() else python
+    if not executable.exists():
+        log("Voice feature is enabled but its isolated runtime is not installed.")
+        return
+    env = os.environ.copy()
+    model_root = VOICE_ASCII_MODELS if VOICE_ASCII_MODELS.exists() else DEFAULT_ATRI_MODELS
+    env["MODELSCOPE_CACHE"] = str(model_root / "voice" / "modelscope")
+    env["HF_HOME"] = str(model_root / "voice" / "huggingface")
+    env.setdefault("ATRI_ASR_PROVIDER", "sensevoice")
+    local_sensevoice = (
+        Path(env["MODELSCOPE_CACHE"])
+        / "models"
+        / "iic--SenseVoiceSmall"
+        / "snapshots"
+        / "master"
+    )
+    env.setdefault(
+        "ATRI_ASR_MODEL",
+        str(local_sensevoice) if (local_sensevoice / "model.pt").exists() else "iic/SenseVoiceSmall",
+    )
+    env.setdefault("ATRI_ASR_DEVICE", "cpu")
+    if not already_listening:
+        log("Starting isolated voice service in background.")
+        popen_hidden(
+            [str(executable), "-m", "atri_voice_service"],
+            cwd=PROJECT_DIR,
+            env=env,
+        )
+    else:
+        log("Voice service is listening; waiting for model warmup.")
+    for _ in range(60):
+        time.sleep(0.5)
+        if voice_ready():
+            log("Voice service is ready.")
+            return
+    log("Voice service did not report ready within timeout.")
+
+
+def voice_ready() -> bool:
+    try:
+        with urllib.request.urlopen(VOICE_HEALTH_URL, timeout=1.2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return bool(payload.get("ok")) and bool(payload.get("ready"))
+    except (OSError, ValueError):
+        return False
 
 
 def port_open(port: int, host: str = "127.0.0.1") -> bool:
@@ -256,8 +408,9 @@ def start_ollama_if_needed() -> None:
     if not found or not found.exists():
         log("Ollama executable not found; skipping local model server.")
         return
-    log("Starting Ollama in background.")
-    popen_hidden([str(found), "serve"])
+    env = ollama_process_env()
+    log(f"Starting Ollama in background. models={env['OLLAMA_MODELS']}")
+    popen_hidden([str(found), "serve"], env=env)
     for _ in range(30):
         time.sleep(0.5)
         if port_open(OLLAMA_PORT):
@@ -424,6 +577,8 @@ def main() -> int:
         return 0
     log("Hidden QQ launcher invoked.")
     start_ollama_if_needed()
+    start_gpt_sovits_if_needed()
+    start_voice_if_needed()
     start_atri_if_needed()
     start_napcat_if_needed()
     return 0

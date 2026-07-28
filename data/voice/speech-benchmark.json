@@ -1,0 +1,67 @@
+{
+  "cases": [
+    {
+      "id": "zh-neutral-short",
+      "language": "zh",
+      "emotion": "neutral",
+      "intensity": 0.45,
+      "text": "主人，今天也请让我陪在你身边。"
+    },
+    {
+      "id": "zh-gentle-question",
+      "language": "zh",
+      "emotion": "gentle",
+      "intensity": 0.65,
+      "text": "你是不是有一点累了，要先陪你休息一会儿吗？"
+    },
+    {
+      "id": "zh-happy-character",
+      "language": "zh",
+      "emotion": "happy",
+      "intensity": 0.75,
+      "text": "嘿嘿，我果然是高性能的呢！"
+    },
+    {
+      "id": "ja-neutral-short",
+      "language": "ja",
+      "emotion": "neutral",
+      "intensity": 0.45,
+      "text": "マスター、今日もあなたのそばにいさせてください。"
+    },
+    {
+      "id": "ja-shy-question",
+      "language": "ja",
+      "emotion": "shy",
+      "intensity": 0.65,
+      "text": "もう少しだけ、そばにいてもいいですか？"
+    },
+    {
+      "id": "ja-happy-character",
+      "language": "ja",
+      "emotion": "happy",
+      "intensity": 0.75,
+      "text": "えへへ、わたしは高性能ですから！"
+    },
+    {
+      "id": "en-neutral-short",
+      "language": "en",
+      "emotion": "neutral",
+      "intensity": 0.45,
+      "text": "Master, please let me stay by your side today."
+    },
+    {
+      "id": "en-gentle-question",
+      "language": "en",
+      "emotion": "gentle",
+      "intensity": 0.65,
+      "text": "You look a little tired. Shall I stay with you for a while?"
+    },
+    {
+      "id": "en-happy-character",
+      "language": "en",
+      "emotion": "happy",
+      "intensity": 0.75,
+      "text": "See? I really am high performance!"
+    }
+  ]
+}

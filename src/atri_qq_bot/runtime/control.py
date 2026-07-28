@@ -77,6 +77,7 @@ def runtime_status(config: BotConfig) -> dict[str, Any]:
         "atri": is_port_listening(int(config.port)),
         "napcat": has_established_port(int(config.port)),
         "ollama": is_port_listening(11434),
+        "voice": is_port_listening(8790),
         "webui": True,
         "bot_qq": config.bot_qq,
         "onebot": f"ws://{config.host}:{config.port}/onebot",

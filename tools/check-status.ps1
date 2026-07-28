@@ -17,7 +17,7 @@ if ($established) {
 Write-Host ""
 
 if ($listen -and $established) {
-    Write-Host "Status OK. Use another QQ account to message 3380609082."
+    Write-Host "Status OK. Use another QQ account to message your bot QQ."
 } else {
     Write-Host "If not connected, open 亚托莉桌宠 and use the desktop pet menu: 启动亚托莉."
 }

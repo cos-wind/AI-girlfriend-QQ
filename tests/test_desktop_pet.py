@@ -1,20 +1,22 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+from PIL import Image
+
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.runtime.control import has_established_port, is_port_listening, restart_background_services
 from atri_qq_bot.runtime.paths import TOOLS_DIR
-from atri_desktop.app import DesktopPetApp
+from atri_desktop.app import COLOR_KEY_RGB, DesktopPetApp, _prepare_color_key_image, _scaled_pet_size
 from atri_desktop.assets import EXPRESSIONS, expression_for_status
 from atri_desktop.controller import DesktopPetController, DesktopPetStatus
 
 
 def _config(tmp_path: Path) -> BotConfig:
     return BotConfig(
-        bot_qq=3380609082,
+        bot_qq=111111111,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -37,7 +39,7 @@ def test_desktop_pet_status_maps_runtime_payload() -> None:
             "onebot": "ws://127.0.0.1:8765/onebot",
             "model": "gpt-4.1-mini",
             "reply_mode": "mention",
-            "bot_qq": 3380609082,
+            "bot_qq": 111111111,
         }
     )
 
@@ -45,7 +47,7 @@ def test_desktop_pet_status_maps_runtime_payload() -> None:
     assert status.napcat is False
     assert status.webui_url == "http://127.0.0.1:8787"
     assert status.onebot.endswith("/onebot")
-    assert status.bot_qq == 3380609082
+    assert status.bot_qq == 111111111
 
 
 def test_desktop_pet_opens_webui_from_runtime_status(monkeypatch, tmp_path) -> None:
@@ -182,8 +184,8 @@ def test_desktop_pet_menu_keeps_single_start_entry(monkeypatch) -> None:
     app._build_menu()
 
     command_labels = [label for kind, label in labels if kind == "command"]
-    assert command_labels.count("启动亚托莉") == 1
-    assert not any("仅启动" in label or "完整" in label or "Python" in label for label in command_labels)
+    assert command_labels.count("鍚姩浜氭墭鑾?) == 1
+    assert not any("浠呭惎鍔? in label or "瀹屾暣" in label or "Python" in label for label in command_labels)
 
 
 def test_desktop_pet_constructor_does_not_auto_start_services(monkeypatch) -> None:
@@ -239,6 +241,35 @@ def test_desktop_pet_expression_assets_exist() -> None:
     for expression in EXPRESSIONS:
         assert expression.path.exists()
         assert expression.path.suffix == ".png"
+        with Image.open(expression.path) as image:
+            assert image.size == (512, 512)
+            assert image.mode == "RGBA"
+            alpha = image.getchannel("A")
+            assert alpha.getextrema() == (0, 255)
+            assert alpha.getpixel((0, 0)) == 0
+            assert alpha.getbbox() is not None
+
+
+def test_desktop_pet_color_key_image_has_no_semitransparent_edge_pixels() -> None:
+    source = Image.new("RGBA", (3, 1))
+    source.putdata(
+        [
+            (0, 0, 0, 0),
+            (200, 150, 100, 95),
+            (200, 150, 100, 96),
+        ]
+    )
+
+    result = _prepare_color_key_image(source)
+
+    assert result.mode == "RGB"
+    assert list(result.get_flattened_data()) == [COLOR_KEY_RGB, COLOR_KEY_RGB, (200, 150, 100)]
+
+
+def test_desktop_pet_render_size_tracks_monitor_dpi() -> None:
+    assert _scaled_pet_size(96) == 96
+    assert _scaled_pet_size(144) == 144
+    assert _scaled_pet_size(192) == 192
 
 
 def test_desktop_pet_expression_tracks_runtime_status() -> None:
@@ -272,7 +303,7 @@ def test_desktop_pet_start_button_ignores_duplicate_clicks() -> None:
     app.start_services()
     app.start_services()
 
-    assert calls == ["after:90000", "start", "亚托莉正在启动中，稍等一下。"]
+    assert calls == ["after:90000", "start", "浜氭墭鑾夋鍦ㄥ惎鍔ㄤ腑锛岀◢绛変竴涓嬨€?]
 
 
 def test_desktop_pet_close_hides_window_before_destroying() -> None:
@@ -432,6 +463,40 @@ def test_hidden_launcher_restarts_when_port_is_stale_python_listener(monkeypatch
 
     assert ("stop", 41) in events
     assert any(item[0] == "popen" and item[1][-2:] == ["-m", "atri_qq_bot"] for item in events if isinstance(item, tuple))
+
+
+def test_hidden_launcher_starts_ollama_with_configured_models_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    ollama = tmp_path / "Programs" / "Ollama" / "ollama.exe"
+    ollama.parent.mkdir(parents=True)
+    ollama.write_text("fake", encoding="utf-8")
+    models_path = tmp_path / "models"
+    events: list[tuple[str, object, object]] = []
+    port_checks = iter([False, True])
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(hidden_launcher, "port_open", lambda port: next(port_checks))
+    monkeypatch.setattr(hidden_launcher, "ollama_models_path", lambda: models_path)
+    monkeypatch.setattr(hidden_launcher, "time", SimpleNamespace(sleep=lambda seconds: None))
+    monkeypatch.setattr(hidden_launcher, "log", lambda message: events.append(("log", message, None)))
+
+    def fake_popen(args, **kwargs):
+        events.append(("popen", [str(item) for item in args], kwargs))
+        return object()
+
+    monkeypatch.setattr(hidden_launcher, "popen_hidden", fake_popen)
+
+    hidden_launcher.start_ollama_if_needed()
+
+    popen_events = [event for event in events if event[0] == "popen"]
+    assert popen_events
+    assert popen_events[0][1] == [str(ollama), "serve"]
+    assert popen_events[0][2]["env"]["OLLAMA_MODELS"] == str(models_path)
+    assert models_path.exists()
 
 
 def test_hidden_launcher_detects_onebot_connection_without_webui(monkeypatch) -> None:

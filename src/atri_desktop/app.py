@@ -18,8 +18,39 @@ from .single_instance import acquire_single_instance, release_single_instance
 
 REFRESH_INTERVAL_MS = 10_000
 TRANSPARENT_COLOR = "#010203"
+COLOR_KEY_RGB = (1, 2, 3)
+COLOR_KEY_ALPHA_THRESHOLD = 96
 PET_SIZE = 96
+DEFAULT_DPI = 96
 WINDOWS_APP_ID = "AtriQQBot.DesktopPet"
+
+
+def _prepare_color_key_image(image: Image.Image) -> Image.Image:
+    rgba = image.convert("RGBA")
+    alpha_mask = rgba.getchannel("A").point(
+        lambda value: 255 if value >= COLOR_KEY_ALPHA_THRESHOLD else 0
+    )
+    keyed = Image.new("RGB", rgba.size, COLOR_KEY_RGB)
+    keyed.paste(rgba.convert("RGB"), mask=alpha_mask)
+    return keyed
+
+
+def _scaled_pet_size(dpi: int) -> int:
+    return max(PET_SIZE, round(PET_SIZE * max(dpi, DEFAULT_DPI) / DEFAULT_DPI))
+
+
+def _window_dpi(root: tk.Tk) -> int:
+    if os.name == "nt":
+        try:
+            dpi = int(ctypes.windll.user32.GetDpiForWindow(root.winfo_id()))
+            if dpi > 0:
+                return dpi
+        except (AttributeError, OSError, tk.TclError, ValueError):
+            pass
+    try:
+        return max(DEFAULT_DPI, round(float(root.winfo_fpixels("1i"))))
+    except (AttributeError, tk.TclError, TypeError, ValueError):
+        return DEFAULT_DPI
 
 
 class DesktopPetApp:
@@ -38,7 +69,9 @@ class DesktopPetApp:
         self.current_status: DesktopPetStatus | None = None
         self.current_expression = DEFAULT_EXPRESSION
         self.drag_offset = (0, 0)
+        self.pet_render_size = _scaled_pet_size(_window_dpi(root))
         self.photo: ImageTk.PhotoImage | None = None
+        self.expression_photos: dict[str, ImageTk.PhotoImage] = {}
 
         self.message_var = tk.StringVar(value=DEFAULT_EXPRESSION.message)
         self.topmost_var = tk.BooleanVar(value=True)
@@ -50,7 +83,7 @@ class DesktopPetApp:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=TRANSPARENT_COLOR)
-        self._apply_transparency()
+        self.uses_color_key = self._apply_transparency()
 
         self._build_ui()
         self._build_menu()
@@ -58,11 +91,13 @@ class DesktopPetApp:
         self._schedule_queue_poll()
         self.refresh_status()
 
-    def _apply_transparency(self) -> None:
+    def _apply_transparency(self) -> bool:
         try:
             self.root.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+            return True
         except tk.TclError:
             self.root.attributes("-alpha", 0.96)
+            return False
 
     def _set_window_icon(self) -> None:
         if not APP_ICON_PATH.exists():
@@ -196,6 +231,15 @@ class DesktopPetApp:
 
     def _finish_drag(self, event: tk.Event) -> None:
         self._keep_on_screen()
+        self._refresh_render_scale()
+
+    def _refresh_render_scale(self) -> None:
+        render_size = _scaled_pet_size(_window_dpi(self.root))
+        if render_size == self.pet_render_size:
+            return
+        self.pet_render_size = render_size
+        self.expression_photos.clear()
+        self._set_expression(self.current_expression)
 
     def _keep_on_screen(self) -> None:
         self.root.update_idletasks()
@@ -211,9 +255,16 @@ class DesktopPetApp:
         self._set_expression(expressions[(index + 1) % len(expressions)])
 
     def _set_expression(self, expression: Expression, message: str | None = None) -> None:
-        image = Image.open(expression.path).convert("RGBA")
-        image.thumbnail((PET_SIZE, PET_SIZE), Image.Resampling.LANCZOS)
-        self.photo = ImageTk.PhotoImage(image)
+        photo = self.expression_photos.get(expression.key)
+        if photo is None:
+            with Image.open(expression.path) as source:
+                image = source.convert("RGBA")
+            image.thumbnail((self.pet_render_size, self.pet_render_size), Image.Resampling.LANCZOS)
+            if self.uses_color_key:
+                image = _prepare_color_key_image(image)
+            photo = ImageTk.PhotoImage(image)
+            self.expression_photos[expression.key] = photo
+        self.photo = photo
         self.pet_label.configure(image=self.photo)
         self.current_expression = expression
         if message is not None:
@@ -476,9 +527,29 @@ def _set_windows_app_id() -> None:
         pass
 
 
+def _set_windows_dpi_awareness() -> None:
+    if os.name != "nt":
+        return
+    try:
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
 def main() -> None:
     if not acquire_single_instance():
         return
+    _set_windows_dpi_awareness()
     _set_windows_app_id()
     root = tk.Tk()
     app: DesktopPetApp | None = None

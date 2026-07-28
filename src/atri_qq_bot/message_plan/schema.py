@@ -6,5 +6,5 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class OutgoingMessage:
-    kind: Literal["text", "image", "face"]
+    kind: Literal["text", "image", "face", "record"]
     content: str

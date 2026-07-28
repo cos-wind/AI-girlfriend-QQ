@@ -1,11 +1,26 @@
+﻿import asyncio
 import json
 import threading
 from pathlib import Path
 
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.runtime.control import runtime_status
+from atri_webui import config_admin
 from atri_webui.memory_admin import MemoryAdmin
+from atri_webui import model_profiles as model_profiles_module
+from atri_webui import server as webui_server
+from atri_webui.model_profiles import (
+    activate_model_profile,
+    local_models_payload,
+    load_model_profiles,
+    model_profiles_payload,
+    scan_ollama_manifest_models,
+    upsert_model_profile,
+)
+from atri_webui.page import render_index
 from atri_webui.sticker_admin import resolve_under, sticker_file_payload
+from atri_webui import voice_admin
+from atri_webui.voice_admin import resolve_voice_audio, save_reference_audio, save_test_audio
 from atri_webui.upload_parser import (
     multipart_file,
     multipart_text,
@@ -31,13 +46,13 @@ def test_memory_admin_summarizes_and_reads_details(tmp_path: Path) -> None:
                                 {
                                     "category": "interest",
                                     "key": "likes-tests",
-                                    "value": "喜欢稳定的回归测试",
+                                    "value": "鍠滄绋冲畾鐨勫洖褰掓祴璇?,
                                 }
                             ],
                             "l2": [],
                             "candidates": [],
                         },
-                        "history": [{"role": "user", "nickname": "主人", "text": "记得测试一下"}],
+                        "history": [{"role": "user", "nickname": "涓讳汉", "text": "璁板緱娴嬭瘯涓€涓?}],
                     }
                 },
             },
@@ -53,11 +68,82 @@ def test_memory_admin_summarizes_and_reads_details(tmp_path: Path) -> None:
 
     assert summary["path"] == str(memory_path)
     assert summary["conversations"] == 1
-    assert summary["items"][0]["kind"] == "private"
+    assert summary["items"][0]["id"] == "person:10001"
+    assert summary["items"][0]["kind"] == "person"
+    assert summary["items"][0]["type"] == "浜虹墿妗ｆ"
     assert summary["items"][0]["memory_counts"]["total"] == 1
-    assert "喜欢稳定的回归测试" in summary["items"][0]["searchable"]
+    assert "鍠滄绋冲畾鐨勫洖褰掓祴璇? in summary["items"][0]["searchable"]
     assert detail["ok"] is True
     assert detail["content"]["message_count"] == 2
+
+
+def test_memory_admin_person_summary_merges_private_and_group_member(
+    tmp_path: Path,
+) -> None:
+    memory_path = tmp_path / "users.json"
+    backup_dir = tmp_path / "backups"
+    memory_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "conversations": {
+                    "private:10001": {
+                        "target": {"user_id": 10001},
+                        "message_count": 2,
+                        "last_user_at": 1000,
+                        "structured_memory": {
+                            "l1": [
+                                {
+                                    "category": "profile_fact",
+                                    "key": "鐢熸棩",
+                                    "value": "8鏈?2鏃?,
+                                }
+                            ],
+                            "l2": [],
+                            "candidates": [],
+                        },
+                    },
+                    "group:20001:user:10001": {
+                        "target": {"group_id": 20001, "user_id": 10001},
+                        "message_count": 3,
+                        "last_user_at": 1200,
+                        "structured_memory": {
+                            "l1": [
+                                {
+                                    "category": "interest",
+                                    "key": "鍏磋叮:鍜栧暋",
+                                    "value": "鍜栧暋",
+                                    "visibility": "group:20001",
+                                }
+                            ],
+                            "l2": [],
+                            "candidates": [],
+                        },
+                        "history": [{"role": "user", "nickname": "浣欏鸡瀵勯暱椋?, "text": "鎴戝枩娆㈠枬鍜栧暋"}],
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    admin = MemoryAdmin(memory_path, backup_dir)
+
+    summary = admin.summary()
+    detail = admin.detail("id=person%3A10001")
+
+    assert [item["id"] for item in summary["items"]] == ["person:10001"]
+    assert summary["items"][0]["messages"] == 5
+    assert summary["items"][0]["related_count"] == 2
+    assert "浣欏鸡瀵勯暱椋? in summary["items"][0]["display_name"]
+    assert detail["ok"] is True
+    assert detail["id"] == "person:10001"
+    assert detail["storage_id"] == "private:10001"
+    assert detail["group_infos"][0]["group_id"] == "20001"
+    assert detail["group_infos"][0]["messages"] == 3
+    values = json.dumps(detail["content"]["structured_memory"], ensure_ascii=False)
+    assert "8鏈?2鏃? in values
+    assert "鍜栧暋" in values
 
 
 def test_memory_admin_backs_up_before_atomic_save(tmp_path: Path) -> None:
@@ -85,6 +171,208 @@ def test_memory_admin_backs_up_before_atomic_save(tmp_path: Path) -> None:
     assert saved["conversations"]["private:10001"]["message_count"] == 2
     assert backed_up == original
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_memory_admin_normalizes_manual_structured_entries(tmp_path: Path) -> None:
+    memory_path = tmp_path / "users.json"
+    backup_dir = tmp_path / "backups"
+    memory_path.write_text(
+        json.dumps(
+            {"version": 2, "conversations": {"private:10001": {"message_count": 1}}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    admin = MemoryAdmin(memory_path, backup_dir)
+
+    admin.save_conversation(
+        "private:10001",
+        {
+            "message_count": 1,
+            "structured_memory": {
+                "l1": [
+                    {
+                        "category": "interest",
+                        "key": "鍏磋叮:鍜栧暋",
+                        "value": "鍜栧暋",
+                        "confidence": 0.8,
+                    }
+                ],
+                "l2": [],
+                "candidates": [],
+            },
+        },
+    )
+
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))
+    entry = saved["conversations"]["private:10001"]["structured_memory"]["l1"][0]
+    assert entry["memory_key"] == "interest:鍏磋叮:鍜栧暋"
+    assert entry["id"] == "l1:interest:鍏磋叮:鍜栧暋"
+    assert entry["source"] == "webui"
+    assert entry["locked"] is True
+
+
+def test_memory_admin_validates_manual_affection_and_proactive_override(tmp_path: Path) -> None:
+    memory_path = tmp_path / "users.json"
+    backup_dir = tmp_path / "backups"
+    memory_path.write_text(
+        json.dumps({"version": 2, "conversations": {"private:10001": {"message_count": 1}}}),
+        encoding="utf-8",
+    )
+    admin = MemoryAdmin(memory_path, backup_dir)
+
+    admin.save_conversation(
+        "private:10001",
+        {"message_count": 1, "affection_score": 120, "proactive_override": "allow"},
+    )
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))["conversations"]["private:10001"]
+
+    assert saved["affection_score"] == 100
+    assert saved["affection_initialized"] is True
+    assert saved["last_affection_idle_decay_at"] > 0
+    assert saved["proactive_override"] == "allow"
+
+
+def test_memory_admin_relationship_patch_preserves_other_memory_fields(tmp_path: Path) -> None:
+    memory_path = tmp_path / "users.json"
+    backup_dir = tmp_path / "backups"
+    original_item = {
+        "target": {"message_type": "private", "user_id": 10001},
+        "message_count": 18,
+        "history": [{"role": "user", "text": "涓嶈鏀硅繖娈靛巻鍙?}],
+        "structured_memory": {"l1": [], "l2": [], "candidates": []},
+        "affection_score": 20,
+    }
+    memory_path.write_text(
+        json.dumps(
+            {"version": 2, "conversations": {"private:10001": original_item}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    admin = MemoryAdmin(memory_path, backup_dir)
+
+    backup, relationship = admin.update_relationship("person:10001", 88.5, "deny")
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))["conversations"]["private:10001"]
+
+    assert relationship == {
+        "affection_score": 88.5,
+        "group_activity_score": None,
+        "proactive_override": "deny",
+    }
+    assert saved["message_count"] == 18
+    assert saved["history"] == original_item["history"]
+    assert saved["structured_memory"] == original_item["structured_memory"]
+    assert saved["affection_score"] == 88.5
+    assert json.loads(backup.read_text(encoding="utf-8"))["conversations"]["private:10001"] == original_item
+
+
+def test_memory_admin_updates_group_activity_without_creating_affection(tmp_path: Path) -> None:
+    memory_path = tmp_path / "users.json"
+    backup_dir = tmp_path / "backups"
+    group_item = {
+        "target": {"message_type": "group", "group_id": 1054646184},
+        "message_count": 120,
+        "group_activity_score": 12,
+        "history": [{"role": "user", "text": "缇ゆ秷鎭?}],
+    }
+    memory_path.write_text(
+        json.dumps(
+            {"version": 2, "conversations": {"group:1054646184": group_item}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    admin = MemoryAdmin(memory_path, backup_dir)
+
+    _, relationship = admin.update_relationship(
+        "group:1054646184",
+        None,
+        "allow",
+        76.5,
+    )
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))["conversations"]["group:1054646184"]
+
+    assert relationship == {
+        "affection_score": None,
+        "group_activity_score": 76.5,
+        "proactive_override": "allow",
+    }
+    assert saved["group_activity_score"] == 76.5
+    assert saved["last_group_activity_at"] > 0
+    assert "affection_score" not in saved
+    assert saved["message_count"] == 120
+    assert saved["history"] == group_item["history"]
+
+
+def test_memory_admin_private_edit_cleans_same_person_group_stale_values(
+    tmp_path: Path,
+) -> None:
+    memory_path = tmp_path / "users.json"
+    backup_dir = tmp_path / "backups"
+    memory_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "conversations": {
+                    "private:10001": {
+                        "structured_memory": {
+                            "l1": [
+                                {
+                                    "category": "interest",
+                                    "key": "鍏磋叮:濂惰尪",
+                                    "value": "濂惰尪",
+                                }
+                            ],
+                            "l2": [],
+                            "candidates": [],
+                        }
+                    },
+                    "group:20001:user:10001": {
+                        "structured_memory": {
+                            "l1": [
+                                {
+                                    "category": "interest",
+                                    "key": "鍏磋叮:濂惰尪",
+                                    "value": "濂惰尪",
+                                }
+                            ],
+                            "l2": [],
+                            "candidates": [],
+                        }
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    admin = MemoryAdmin(memory_path, backup_dir)
+
+    admin.save_conversation(
+        "private:10001",
+        {
+            "structured_memory": {
+                "l1": [
+                    {
+                        "category": "interest",
+                        "key": "鍏磋叮:鍜栧暋",
+                        "value": "鍜栧暋",
+                    }
+                ],
+                "l2": [],
+                "candidates": [],
+            }
+        },
+    )
+
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))
+    group_entries = saved["conversations"]["group:20001:user:10001"][
+        "structured_memory"
+    ]["l1"]
+    private_entries = saved["conversations"]["private:10001"]["structured_memory"]["l1"]
+    assert not group_entries
+    assert private_entries[0]["value"] == "鍜栧暋"
 
 
 def test_memory_admin_serializes_concurrent_writes(tmp_path: Path) -> None:
@@ -147,6 +435,425 @@ def test_memory_admin_rejects_invalid_save_payload(tmp_path: Path) -> None:
         raise AssertionError("expected invalid memory payload to be rejected")
 
 
+def test_local_ollama_manifest_models_are_discovered(tmp_path: Path) -> None:
+    manifest = (
+        tmp_path
+        / "models"
+        / "manifests"
+        / "registry.ollama.ai"
+        / "library"
+        / "qwen2.5"
+        / "7b"
+    )
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+
+    models = scan_ollama_manifest_models(tmp_path)
+    payload = local_models_payload(tmp_path, include_api=False)
+
+    assert models[0]["name"] == "qwen2.5:7b"
+    assert payload["models_path"] == str(tmp_path)
+    assert payload["models"][0]["name"] == "qwen2.5:7b"
+    assert payload["models"][0]["runnable"] is False
+
+
+def test_local_ollama_models_root_accepts_direct_manifest_layout(tmp_path: Path) -> None:
+    manifest = (
+        tmp_path
+        / "manifests"
+        / "registry.ollama.ai"
+        / "library"
+        / "qwen3"
+        / "4b-instruct"
+    )
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    unrelated = tmp_path / "manifests" / "voice-runtime" / ".venv" / "python.exe"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_bytes(b"not a model manifest")
+
+    models = scan_ollama_manifest_models(tmp_path)
+
+    assert [model["name"] for model in models] == ["qwen3:4b-instruct"]
+
+
+def test_model_profiles_payload_includes_provider_catalog(tmp_path: Path) -> None:
+    config = BotConfig(
+        bot_qq=111111111,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="ollama",
+        openai_base_url="http://127.0.0.1:11434/v1",
+        openai_model="qwen2.5:7b",
+        temperature=0.65,
+        max_tokens=260,
+        memory_path=tmp_path / "users.json",
+    )
+
+    payload = model_profiles_payload(config)
+    provider_ids = {provider["id"] for provider in payload["provider_catalog"]}
+
+    assert {"ollama", "deepseek", "openai", "custom"}.issubset(provider_ids)
+
+
+def test_model_profiles_payload_tracks_active_profiles_by_type(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_path = tmp_path / "model_profiles.json"
+    monkeypatch.setattr(model_profiles_module, "MODEL_PROFILE_PATH", profile_path)
+    monkeypatch.setattr(model_profiles_module, "WEBUI_DIR", tmp_path)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "id": "chat-qwen",
+                        "name": "鑱婂ぉ Qwen",
+                        "model_type": "chat",
+                        "provider": "Ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "qwen2.5:7b",
+                        "api_key": "ollama",
+                    },
+                    {
+                        "id": "vision-qwen",
+                        "name": "瑙嗚 Qwen",
+                        "model_type": "vision",
+                        "provider": "Ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "qwen2.5vl:3b",
+                        "api_key": "ollama",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = BotConfig(
+        bot_qq=111111111,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="ollama",
+        openai_base_url="http://127.0.0.1:11434/v1",
+        openai_model="qwen2.5:7b",
+        temperature=0.65,
+        max_tokens=260,
+        toolbox_vision_enabled=True,
+        toolbox_vision_model="qwen2.5vl:3b",
+        toolbox_vision_base_url="http://127.0.0.1:11434/v1",
+        toolbox_vision_api_key="ollama",
+        memory_path=tmp_path / "users.json",
+    )
+
+    payload = model_profiles_payload(config)
+
+    assert payload["active_id"] == "chat-qwen"
+    assert payload["active_ids"] == {"chat": "chat-qwen", "vision": "vision-qwen"}
+    assert payload["current_by_type"]["chat"]["model"] == "qwen2.5:7b"
+    assert payload["current_by_type"]["vision"]["model"] == "qwen2.5vl:3b"
+
+
+def test_activate_vision_profile_does_not_replace_chat_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_path = tmp_path / "model_profiles.json"
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(model_profiles_module, "MODEL_PROFILE_PATH", profile_path)
+    monkeypatch.setattr(model_profiles_module, "WEBUI_DIR", tmp_path)
+    monkeypatch.setattr(config_admin, "ENV_PATH", env_path)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "id": "vision-qwen",
+                        "name": "瑙嗚 Qwen",
+                        "model_type": "vision",
+                        "provider": "Ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "qwen2.5vl:7b",
+                        "api_key": "ollama",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    env_path.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=chat-key",
+                "OPENAI_BASE_URL=http://chat.example/v1",
+                "OPENAI_MODEL=qwen2.5:7b",
+                "TOOLBOX_VISION_MODEL=qwen2.5vl:3b",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    activated = activate_model_profile("vision-qwen")
+    env = config_admin.read_env()
+
+    assert activated["model_type"] == "vision"
+    assert env["OPENAI_API_KEY"] == "chat-key"
+    assert env["OPENAI_BASE_URL"] == "http://chat.example/v1"
+    assert env["OPENAI_MODEL"] == "qwen2.5:7b"
+    assert env["TOOLBOX_VISION_ENABLED"] == "true"
+    assert env["TOOLBOX_VISION_API_KEY"] == "ollama"
+    assert env["TOOLBOX_VISION_BASE_URL"] == "http://127.0.0.1:11434/v1"
+    assert env["TOOLBOX_VISION_MODEL"] == "qwen2.5vl:7b"
+
+
+def test_upsert_vision_profile_prefers_existing_vision_api_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_path = tmp_path / "model_profiles.json"
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(model_profiles_module, "MODEL_PROFILE_PATH", profile_path)
+    monkeypatch.setattr(model_profiles_module, "WEBUI_DIR", tmp_path)
+    monkeypatch.setattr(config_admin, "ENV_PATH", env_path)
+    env_path.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=chat-key",
+                "TOOLBOX_VISION_API_KEY=vision-key",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    profile = upsert_model_profile(
+        {
+            "name": "瑙嗚妯″瀷",
+            "model_type": "vision",
+            "provider": "Ollama",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "model": "qwen2.5vl:7b",
+            "api_key": "",
+        }
+    )
+
+    assert profile["api_key"] == "vision-key"
+
+
+def test_builtin_profile_collision_is_repaired_without_losing_local_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_path = tmp_path / "model_profiles.json"
+    monkeypatch.setattr(model_profiles_module, "MODEL_PROFILE_PATH", profile_path)
+    monkeypatch.setattr(model_profiles_module, "WEBUI_DIR", tmp_path)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "id": "deepseek-official-chat",
+                        "name": "鏈湴 Ollama deepseek-r1:8b",
+                        "model_type": "chat",
+                        "provider": "Ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "deepseek-r1:8b",
+                        "api_key": "ollama",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = load_model_profiles()
+    ids = {profile["id"] for profile in profiles}
+    models = {profile["model"] for profile in profiles}
+    saved = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    assert "deepseek-official-chat" in ids
+    assert "deepseek-r1:8b" in models
+    assert "deepseek-v4-flash" in models
+    assert any(
+        profile["id"] != "deepseek-official-chat"
+        and profile["model"] == "deepseek-r1:8b"
+        for profile in saved["profiles"]
+    )
+
+
+def test_deprecated_deepseek_profile_is_migrated_without_losing_api_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_path = tmp_path / "model_profiles.json"
+    monkeypatch.setattr(model_profiles_module, "MODEL_PROFILE_PATH", profile_path)
+    monkeypatch.setattr(model_profiles_module, "WEBUI_DIR", tmp_path)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "id": "deepseek-official-chat",
+                        "name": "Deepseek-chat",
+                        "model_type": "chat",
+                        "provider": "DeepSeek",
+                        "base_url": "https://api.deepseek.com/v1",
+                        "model": "deepseek-chat",
+                        "api_key": "saved-key",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = load_model_profiles()
+
+    assert profiles[0]["model"] == "deepseek-v4-flash"
+    assert profiles[0]["name"] == "DeepSeek V4 Flash"
+    assert profiles[0]["api_key"] == "saved-key"
+    saved = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert saved["profiles"][0]["model"] == "deepseek-v4-flash"
+
+
+def test_model_page_shows_feedback_for_local_model_actions() -> None:
+    html = render_index()
+
+    assert "id=\"localModelAction\"" in html
+    assert "id=\"modelFillFeedback\"" in html
+    assert "id=\"profileModelType\"" in html
+    assert "loadLocalModels({manual:true})" in html
+    assert ".model-card.selected" in html
+    assert "markLocalModelSelected(model.name)" in html
+    assert "showProfileFillFeedback" in html
+    assert "active_ids" in html
+    assert "current_by_type" in html
+    assert "profile-columns" in html
+    assert "deleteProfileByIndex" in html
+    assert "beginNewModelProfileFromFill" in html
+    assert "testCurrentChatModel" in html
+    assert "model-workspace" in html
+    assert "浠呭彂鐜版ā鍨嬫枃浠? in html
+
+
+def test_voice_page_has_separate_policy_profile_and_preview_controls() -> None:
+    html = render_index()
+
+    assert "onclick=\"showTab(event,'voice')\"" in html
+    assert 'id="voiceAsrEnabled"' in html
+    assert 'id="voiceTtsEnabled"' in html
+    assert '<select id="voiceProfileId"' in html
+    assert 'id="voiceReferenceFile"' in html
+    assert 'id="voicePreviewAudio"' in html
+    assert "async function previewVoice()" in html
+    assert 'id="voiceAsrLexicon"' in html
+    assert "asr_lexicon_text:$('voiceAsrLexicon').value" in html
+    assert 'id="voiceTtsPronunciations"' in html
+    assert "tts_pronunciation_text:$('voiceTtsPronunciations').value" in html
+
+
+def test_advanced_reply_settings_include_voice_probability_control() -> None:
+    html = render_index()
+
+    assert 'id="replyVoiceProbabilityNumber"' in html
+    assert '["REPLY_VOICE_PROBABILITY","璇煶姒傜巼锛?锛?,"voice-probability"]' in html
+    assert 'if(type===\'voice-probability\') continue;' in html
+    assert "async function loadReplyVoiceProbability()" in html
+    assert "async function saveReplyVoiceProbability()" in html
+    assert "/api/voice/behavior" in html
+    assert "reply_voice_probability:probability" in html
+    assert "await saveReplyVoiceProbability();" in html
+
+
+def test_test_page_has_asr_and_tts_acceptance_controls() -> None:
+    html = render_index()
+
+    assert 'id="testAsrFile"' in html
+    assert 'id="testAsrLanguage"' in html
+    assert 'id="testAsrRecordButton"' in html
+    assert 'id="testAsrStopButton"' in html
+    assert 'id="testAsrOut"' in html
+    assert 'id="testTtsText"' in html
+    assert 'id="testTtsLanguage"' in html
+    assert 'id="testTtsProfileA"' in html
+    assert 'id="testTtsProfileB"' in html
+    assert 'id="testTtsAudioA"' in html
+    assert 'id="testTtsAudioB"' in html
+    assert "/api/voice/test-asr" in html
+    assert "async function startAsrRecording()" in html
+    assert "function stopAsrRecording()" in html
+    assert "async function testVoiceRecognition(fileOverride=null)" in html
+    assert "form.append('language'" in html
+    assert "async function testVoiceSynthesis()" in html
+    assert "async function testVoiceComparison()" in html
+
+
+def test_voice_reference_is_saved_inside_profile_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "voice"
+    monkeypatch.setattr(voice_admin, "VOICE_ROOT", root)
+    monkeypatch.setattr(voice_admin, "VOICE_PROFILE_DIR", root / "profiles")
+    voice_admin.voice_profile_store()
+
+    profile = save_reference_audio("atri", "sample.wav", b"RIFFvoice")
+    saved = Path(profile.reference_audio)
+
+    assert saved.read_bytes() == b"RIFFvoice"
+    assert saved.is_relative_to(root)
+    assert resolve_voice_audio(str(saved)) == saved.resolve()
+
+
+def test_voice_test_audio_is_saved_in_cache_with_safe_generated_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(voice_admin, "VOICE_CACHE_DIR", cache)
+
+    saved = save_test_audio("../../user recording.wav", b"RIFFvoice")
+
+    assert saved.parent == cache.resolve()
+    assert saved.name.startswith("asr-test-")
+    assert saved.suffix == ".wav"
+    assert saved.read_bytes() == b"RIFFvoice"
+
+
+def test_webui_test_chat_reports_when_fallback_is_used(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FailingEngine:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        async def _reply_with_guarded_api(self, *args, **kwargs) -> str:
+            raise RuntimeError("backend unavailable")
+
+        def _fallback_reply(self, conversation_id: str, text: str) -> str:
+            return "fallback reply"
+
+    monkeypatch.setattr(webui_server, "AtriReplyEngine", FailingEngine)
+    config = BotConfig(
+        bot_qq=111111111,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.8,
+        max_tokens=100,
+        memory_path=tmp_path / "users.json",
+    )
+
+    result = asyncio.run(webui_server.test_chat(config, "浣犲ソ"))
+
+    assert result["used_ai"] is False
+    assert result["reply"] == "fallback reply"
+    assert "backend unavailable" in result["error"]
+
+
 def test_runtime_status_keeps_webui_contract(monkeypatch) -> None:
     calls: list[int] = []
 
@@ -158,7 +865,7 @@ def test_runtime_status_keeps_webui_contract(monkeypatch) -> None:
     monkeypatch.setattr("atri_qq_bot.runtime.control.has_established_port", lambda port: port == 8765)
 
     config = BotConfig(
-        bot_qq=3380609082,
+        bot_qq=111111111,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -174,9 +881,10 @@ def test_runtime_status_keeps_webui_contract(monkeypatch) -> None:
     assert status["atri"] is True
     assert status["napcat"] is True
     assert status["ollama"] is False
+    assert status["voice"] is False
     assert status["onebot"] == "ws://127.0.0.1:8765/onebot"
     assert status["webui_url"] == "http://127.0.0.1:8787"
-    assert calls == [8765, 11434]
+    assert calls == [8765, 11434, 8790]
 
 
 def test_sticker_admin_payload_and_path_guard(tmp_path: Path, monkeypatch) -> None:

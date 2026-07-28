@@ -10,6 +10,12 @@ TOOLS_DIR = PROJECT_ROOT / "tools"
 
 WEBUI_DIR = DATA_DIR / "webui"
 MODEL_PROFILE_PATH = WEBUI_DIR / "model_profiles.json"
+PROACTIVE_POLICY_PATH = WEBUI_DIR / "proactive_policy.json"
+
+VOICE_ROOT = DATA_DIR / "voice"
+VOICE_PROFILE_DIR = VOICE_ROOT / "profiles"
+VOICE_CACHE_DIR = VOICE_ROOT / "cache"
+VOICE_BEHAVIOR_PATH = WEBUI_DIR / "voice_behavior.json"
 
 STICKER_ROOT = DATA_DIR / "stickers"
 STICKER_DELETED_DIR = STICKER_ROOT / "_deleted"

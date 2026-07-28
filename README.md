@@ -42,7 +42,7 @@
 1. 像平时一样启动 QQ：`C:\Program Files\Tencent\QQNT\QQ.exe`
 2. 后台监听器会在 1 秒内接管启动，拉起可见的 NapCat QQ，同时后台启动 Ollama 和亚托莉服务
 3. 如果 QQ 要扫码登录，请扫码一次
-4. 用另一个 QQ 给 `3380609082` 发私聊消息测试
+4. 用另一个 QQ 给你的机器人 QQ 发私聊消息测试
 
 停止机器人：
 
@@ -51,12 +51,12 @@
 
 NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/onebot`。不要双击 `run.ps1`，Windows 很容易把它当文本文件打开。
 
-这是一个最小可运行的 NapCat / OneBot v11 反向 WebSocket 机器人，用 QQ `3380609082` 接收消息并按"亚托莉"人设回复。
+这是一个最小可运行的 NapCat / OneBot v11 反向 WebSocket 机器人，用配置的机器人 QQ 接收消息并按"亚托莉"人设回复。
 
 ## 当前完成内容
 
 - 监听 NapCat 反向 WebSocket 事件。
-- 默认绑定机器人 QQ：`3380609082`。
+- 默认绑定机器人 QQ：`.env` 中 `BOT_QQ` 配置。
 - 私聊自动回复；群聊默认仅在 @机器人、提到"亚托莉"或"atri"时回复。
 - 支持 OpenAI 兼容接口；没有 API Key 时使用本地人设兜底回复。
 - 私聊、群整体、群内用户分别保留聊天记录和对话特征，便于连续聊天和独立适配。
@@ -77,7 +77,7 @@ NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/
 ## 安装
 
 ```powershell
-cd "D:\Codex project\AI_ATRI"
+cd "C:\Path\To\AI_ATRI"  # 替换为你的实际路径
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
@@ -97,7 +97,7 @@ OPENAI_MODEL=gpt-4.1-mini
 ## 启动机器人服务
 
 ```powershell
-cd "D:\Codex project\AI_ATRI"
+cd "C:\Path\To\AI_ATRI"  # 替换为你的实际路径
 .\.venv\Scripts\Activate.ps1
 python -m atri_qq_bot
 ```
@@ -110,20 +110,20 @@ ws://127.0.0.1:8765/onebot
 
 ## NapCat 配置
 
-在 NapCat 中登录 QQ `3380609082`，添加一个 OneBot v11 反向 WebSocket 连接：
+在 NapCat 中登录你的机器人 QQ，添加一个 OneBot v11 反向 WebSocket 连接：
 
 - 类型：反向 WebSocket / WebSocket Client
 - 地址：`ws://127.0.0.1:8765/onebot`
 - OneBot 版本：v11
 
-然后用另一个 QQ 给 `3380609082` 发私聊消息，应该能收到亚托莉风格回复。
+然后用另一个 QQ 给机器人 QQ 发私聊消息，应该能收到亚托莉风格回复。
 
 ## 配置项
 
 `.env` 中常用配置：
 
 ```env
-BOT_QQ=3380609082
+BOT_QQ=YOUR_BOT_QQ
 HOST=127.0.0.1
 PORT=8765
 REPLY_MODE=mention
@@ -235,7 +235,7 @@ D:\Codex project\AI_ATRI\data\stickers\triggers.json
 ## 测试
 
 ```powershell
-cd "D:\Codex project\AI_ATRI"
+cd "C:\Path\To\AI_ATRI"  # 替换为你的实际路径
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 python -m pytest

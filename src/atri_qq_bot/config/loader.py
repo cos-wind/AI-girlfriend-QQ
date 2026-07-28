@@ -29,14 +29,19 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         modes = ", ".join(sorted(VALID_REPLY_MODES))
         raise ValueError(f"REPLY_MODE must be one of: {modes}")
 
+    openai_base_url = _env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    openai_model = _supported_model_alias(
+        openai_base_url,
+        _env("OPENAI_MODEL", "gpt-4.1-mini"),
+    )
     return BotConfig(
-        bot_qq=_env_int("BOT_QQ", 3380609082),
+        bot_qq=_env_int("BOT_QQ", 0),
         host=_env("HOST", "127.0.0.1"),
         port=_env_int("PORT", 8765),
         reply_mode=reply_mode,
         openai_api_key=_optional_env("OPENAI_API_KEY"),
-        openai_base_url=_env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
-        openai_model=_env("OPENAI_MODEL", "gpt-4.1-mini"),
+        openai_base_url=openai_base_url,
+        openai_model=openai_model,
         temperature=_env_float("TEMPERATURE", 0.8),
         frequency_penalty=_env_float("FREQUENCY_PENALTY", 0.25),
         max_tokens=_env_int("MAX_TOKENS", 350),
@@ -53,6 +58,7 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         sticker_capture_enabled=_env_bool("STICKER_CAPTURE_ENABLED", True),
         sticker_capture_max_bytes=_env_int("STICKER_CAPTURE_MAX_BYTES", 3_000_000),
         memory_path=_env_path("MEMORY_PATH", root / "data" / "memory" / "users.json", root),
+        proactive_v2_enabled=_env_bool("PROACTIVE_V2_ENABLED", False),
         idle_proactive_enabled=_env_bool("IDLE_PROACTIVE_ENABLED", True),
         idle_minutes=_env_int("IDLE_MINUTES", 180),
         idle_cooldown_minutes=_env_int("IDLE_COOLDOWN_MINUTES", 720),
@@ -83,10 +89,42 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         toolbox_video_max_frames=max(1, min(8, _env_int("TOOLBOX_VIDEO_MAX_FRAMES", 4))),
         llm_tools_enabled=_env_bool("LLM_TOOLS_ENABLED", True),
         llm_tool_max_calls=max(1, min(4, _env_int("LLM_TOOL_MAX_CALLS", 2))),
+        human_reply_pipeline_enabled=_env_bool("HUMAN_REPLY_PIPELINE_ENABLED", True),
         web_search_enabled=_env_bool("WEB_SEARCH_ENABLED", True),
         web_search_timeout_seconds=_env_float("WEB_SEARCH_TIMEOUT_SECONDS", 6.0),
         web_search_max_results=max(1, min(8, _env_int("WEB_SEARCH_MAX_RESULTS", 5))),
+        voice_asr_enabled=_env_bool("VOICE_ASR_ENABLED", False),
+        voice_tts_enabled=_env_bool("VOICE_TTS_ENABLED", False),
+        voice_service_url=_env("VOICE_SERVICE_URL", "http://127.0.0.1:8790").rstrip("/"),
+        voice_service_timeout_seconds=max(
+            2.0, _env_float("VOICE_SERVICE_TIMEOUT_SECONDS", 180.0)
+        ),
+        voice_profile=_env("VOICE_PROFILE", "atri"),
+        voice_zh_rescue_profile=_env(
+            "VOICE_ZH_RESCUE_PROFILE",
+            "atri-official-v2pro-curated-gpt-e6",
+        ),
+        voice_group_enabled=_env_bool("VOICE_GROUP_ENABLED", False),
+        voice_reply_to_voice=_env_bool("VOICE_REPLY_TO_VOICE", False),
+        voice_max_chars=max(20, min(500, _env_int("VOICE_MAX_CHARS", 160))),
+        voice_segment_max_chars=max(
+            16,
+            min(60, _env_int("VOICE_SEGMENT_MAX_CHARS", 34)),
+        ),
+        voice_cooldown_seconds=max(0, _env_int("VOICE_COOLDOWN_SECONDS", 30)),
+        voice_input_max_bytes=max(
+            1_000_000, _env_int("VOICE_INPUT_MAX_BYTES", 20_000_000)
+        ),
         webui_enabled=_env_bool("WEBUI_ENABLED", True),
         webui_host=_env("WEBUI_HOST", "127.0.0.1"),
         webui_port=_env_int("WEBUI_PORT", 8787),
     )
+
+
+def _supported_model_alias(base_url: str, model: str) -> str:
+    if "api.deepseek.com" not in str(base_url).casefold():
+        return model
+    return {
+        "deepseek-chat": "deepseek-v4-flash",
+        "deepseek-reasoner": "deepseek-v4-pro",
+    }.get(str(model).strip().casefold(), model)

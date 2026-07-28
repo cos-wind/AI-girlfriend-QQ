@@ -1,0 +1,40 @@
+{
+  "cases": [
+    {
+      "id": "atri-2dipw-zh",
+      "language": "zh",
+      "text": "主人，今天也请让我陪在你身边。",
+      "audio": "data/voice/cache/atri-7c77bd207e6146959d84c3cd360f21ea.wav"
+    },
+    {
+      "id": "atri-2dipw-en",
+      "language": "en",
+      "text": "Master, please let me stay by your side today.",
+      "audio": "data/voice/cache/atri-20ff1224951243989da7f64fc89df225.wav"
+    },
+    {
+      "id": "atri-2dipw-ja",
+      "language": "ja",
+      "text": "マスター、今日もあなたのそばにいさせてください。",
+      "audio": "data/voice/cache/atri-eac8a3e3bf664f2eb562219e698b2ad6.wav"
+    },
+    {
+      "id": "atri-voidshine-zh",
+      "language": "zh",
+      "text": "主人，今天也请让我陪在你身边。",
+      "audio": "data/voice/cache/atri-9e533974dd164c60af3f1b6c301072ce.wav"
+    },
+    {
+      "id": "atri-voidshine-en",
+      "language": "en",
+      "text": "Master, please let me stay by your side today.",
+      "audio": "data/voice/cache/atri-3b7fe151c56b413bbce13ee6254a0c12.wav"
+    },
+    {
+      "id": "atri-voidshine-ja",
+      "language": "ja",
+      "text": "マスター、今日もあなたのそばにいさせてください。",
+      "audio": "data/voice/cache/atri-826b42b331ba4fb7b5cc0c4f478cd418.wav"
+    }
+  ]
+}

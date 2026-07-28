@@ -23,84 +23,127 @@ class MemoryAdmin:
         data = self.load()
         conversations = self.conversations(data)
         items = []
+        for user_id in person_user_ids(conversations):
+            items.append(person_summary_item(conversations, user_id))
         for key, item in sorted(
             conversations.items(),
             key=lambda pair: _safe_float((pair[1] or {}).get("last_user_at") if isinstance(pair[1], dict) else 0),
             reverse=True,
         ):
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or memory_kind(key) != "group":
                 continue
-            counts = memory_counts(item)
-            target = item.get("target") if isinstance(item.get("target"), dict) else {}
-            summary = natural_memory_summary(item)
-            display_name = memory_display_name(key, item)
-            proactive_state, proactive_blocked = group_proactive_state(key, item)
-            items.append(
-                {
-                    "id": key,
-                    "kind": memory_kind(key),
-                    "type": memory_type_label(key),
-                    "display_name": display_name,
-                    "summary": summary,
-                    "messages": item.get("message_count", 0),
-                    "last_user_at": item.get("last_user_at"),
-                    "last_user_at_text": format_timestamp(item.get("last_user_at")),
-                    "last_bot_at": item.get("last_bot_at"),
-                    "affection": item.get("affection_score"),
-                    "affection_label": affection_label(item.get("affection_score")),
-                    "activity": item.get("group_activity_score"),
-                    "activity_label": group_activity_label(item.get("group_activity_score")),
-                    "proactive_state": proactive_state,
-                    "proactive_blocked": proactive_blocked,
-                    "target": target,
-                    "history_count": len(item.get("history") or []),
-                    "memory_counts": counts,
-                    "searchable": " ".join(
-                        [
-                            key,
-                            display_name,
-                            str(target.get("user_id") or ""),
-                            str(target.get("group_id") or ""),
-                            summary,
-                        ]
-                    ),
-                }
+            items.append(memory_summary_item(key, item))
+        items.sort(
+            key=lambda item: (
+                0 if item.get("kind") == "person" else 1,
+                -_safe_float(item.get("last_user_at")),
             )
-        return {"path": str(self.memory_path), "conversations": len(items), "items": items}
+        )
+        return {
+            "path": str(self.memory_path),
+            "conversations": len(items),
+            "raw_conversations": len(conversations),
+            "items": items,
+        }
 
     def detail(self, query: str) -> dict[str, Any]:
         conversation_id = parse_qs(query).get("id", [""])[0]
         data = self.load()
         conversations = self.conversations(data)
+        if conversation_id.startswith("person:"):
+            user_id = conversation_id.split(":", 1)[1]
+            related = person_related_keys(conversations, user_id)
+            if not related:
+                return {"ok": False, "error": "memory not found"}
+            item = person_content(conversations, user_id)
+            return memory_detail_payload(
+                conversation_id,
+                item,
+                display_name=person_display_name(conversations, user_id),
+                storage_id=f"private:{user_id}",
+                related_conversations=related,
+                group_infos=person_group_infos(conversations, user_id),
+            )
         item = conversations.get(conversation_id)
         if not isinstance(item, dict):
             return {"ok": False, "error": "memory not found"}
-        return {
-            "ok": True,
-            "id": conversation_id,
-            "kind": memory_kind(conversation_id),
-            "type": memory_type_label(conversation_id),
-            "display_name": memory_display_name(conversation_id, item),
-            "natural": natural_memory_detail(item),
-            "affection_label": affection_label(item.get("affection_score")),
-            "activity_label": group_activity_label(item.get("group_activity_score")),
-            "memory_counts": memory_counts(item),
-            "history_count": len(item.get("history") or []),
-            "content": item,
-        }
+        return memory_detail_payload(conversation_id, item)
 
     def save_conversation(self, conversation_id: str, content: dict[str, Any]) -> Path:
         with self._lock:
             data = self.load()
             conversations = self.conversations(data)
-            if conversation_id not in conversations:
+            storage_id = storage_memory_id(conversation_id)
+            if storage_id not in conversations and not conversation_id.startswith("person:"):
                 raise ValueError("会话不存在")
             if not isinstance(content, dict):
                 raise ValueError("记忆内容必须是 JSON 对象")
+            if storage_id not in conversations:
+                user_id = storage_id.split(":", 1)[1]
+                conversations[storage_id] = {
+                    "target": {"message_type": "private", "user_id": user_id}
+                }
+            previous = (
+                person_content(conversations, storage_id.split(":", 1)[1])
+                if conversation_id.startswith("person:")
+                else conversations.get(storage_id)
+            )
+            content = normalize_manual_memory_content(storage_id, content)
+            removed_values = removed_person_values(previous, content)
             backup = self.backup("edit")
-            conversations[conversation_id] = content
+            conversations[storage_id] = content
+            if removed_values:
+                remove_values_from_same_person_members(
+                    conversations,
+                    storage_id,
+                    removed_values,
+                )
             self.write(data)
             return backup
+
+    def update_relationship(
+        self,
+        conversation_id: str,
+        affection_score: Any,
+        proactive_override: Any,
+        group_activity_score: Any = None,
+    ) -> tuple[Path, dict[str, Any]]:
+        with self._lock:
+            data = self.load()
+            conversations = self.conversations(data)
+            storage_id = storage_memory_id(conversation_id)
+            is_group = storage_id.startswith("group:") and ":user:" not in storage_id
+            if storage_id not in conversations:
+                if not conversation_id.startswith("person:"):
+                    raise ValueError("会话不存在")
+                user_id = storage_id.split(":", 1)[1]
+                conversations[storage_id] = {
+                    "target": {"message_type": "private", "user_id": user_id}
+                }
+            item = conversations.get(storage_id)
+            if not isinstance(item, dict):
+                raise ValueError("会话不存在")
+            if is_group:
+                activity = as_float(group_activity_score)
+                if activity is None:
+                    raise ValueError("群聊活跃度必须是数字")
+                item["group_activity_score"] = max(0.0, min(100.0, activity))
+                item["last_group_activity_at"] = time.time()
+            else:
+                score = as_float(affection_score)
+                if score is None:
+                    raise ValueError("好感度必须是数字")
+                item["affection_score"] = max(0.0, min(100.0, score))
+                item["affection_initialized"] = True
+                item["last_affection_idle_decay_at"] = time.time()
+            item["proactive_override"] = normalize_proactive_override(proactive_override)
+            backup = self.backup("relationship")
+            self.write(data)
+            return backup, {
+                "affection_score": item.get("affection_score"),
+                "group_activity_score": item.get("group_activity_score"),
+                "proactive_override": item["proactive_override"],
+            }
 
     def delete_conversation(self, conversation_id: str) -> Path:
         with self._lock:
@@ -175,6 +218,20 @@ def save_memory_conversation(conversation_id: str, content: dict[str, Any]) -> P
     return DEFAULT_MEMORY_ADMIN.save_conversation(conversation_id, content)
 
 
+def update_memory_relationship(
+    conversation_id: str,
+    affection_score: Any,
+    proactive_override: Any,
+    group_activity_score: Any = None,
+) -> tuple[Path, dict[str, Any]]:
+    return DEFAULT_MEMORY_ADMIN.update_relationship(
+        conversation_id,
+        affection_score,
+        proactive_override,
+        group_activity_score,
+    )
+
+
 def delete_memory_conversation(conversation_id: str) -> Path:
     return DEFAULT_MEMORY_ADMIN.delete_conversation(conversation_id)
 
@@ -183,7 +240,268 @@ def backup_memory(reason: str) -> Path:
     return DEFAULT_MEMORY_ADMIN.backup(reason)
 
 
+def memory_summary_item(
+    conversation_id: str,
+    item: dict[str, Any],
+    display_name: str | None = None,
+    related_count: int = 1,
+) -> dict[str, Any]:
+    counts = memory_counts(item)
+    target = item.get("target") if isinstance(item.get("target"), dict) else {}
+    summary = natural_memory_summary(item)
+    resolved_name = display_name or memory_display_name(conversation_id, item)
+    proactive_state, proactive_blocked = group_proactive_state(conversation_id, item)
+    return {
+        "id": conversation_id,
+        "kind": memory_kind(conversation_id),
+        "type": memory_type_label(conversation_id),
+        "display_name": resolved_name,
+        "summary": summary,
+        "messages": item.get("message_count", 0),
+        "last_user_at": item.get("last_user_at"),
+        "last_user_at_text": format_timestamp(item.get("last_user_at")),
+        "last_bot_at": item.get("last_bot_at"),
+        "affection": item.get("affection_score"),
+        "affection_label": affection_label(item.get("affection_score")),
+        "activity": item.get("group_activity_score"),
+        "activity_label": group_activity_label(item.get("group_activity_score")),
+        "proactive_override": normalize_proactive_override(item.get("proactive_override")),
+        "proactive_state": proactive_state,
+        "proactive_blocked": proactive_blocked,
+        "target": target,
+        "related_count": related_count,
+        "history_count": len(item.get("history") or []),
+        "memory_counts": counts,
+        "searchable": " ".join(
+            [
+                conversation_id,
+                resolved_name,
+                str(target.get("user_id") or ""),
+                str(target.get("group_id") or ""),
+                summary,
+            ]
+        ),
+    }
+
+
+def person_summary_item(conversations: dict[str, Any], user_id: str) -> dict[str, Any]:
+    item = person_content(conversations, user_id)
+    related = person_related_keys(conversations, user_id)
+    summary = memory_summary_item(
+        f"person:{user_id}",
+        item,
+        display_name=person_display_name(conversations, user_id),
+        related_count=len(related),
+    )
+    summary["searchable"] = f"{summary.get('searchable', '')} {' '.join(related)}"
+    return summary
+
+
+def memory_detail_payload(
+    conversation_id: str,
+    item: dict[str, Any],
+    display_name: str | None = None,
+    storage_id: str | None = None,
+    related_conversations: list[str] | None = None,
+    group_infos: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "ok": True,
+        "id": conversation_id,
+        "kind": memory_kind(conversation_id),
+        "type": memory_type_label(conversation_id),
+        "display_name": display_name or memory_display_name(conversation_id, item),
+        "natural": natural_memory_detail(item),
+        "affection_label": affection_label(item.get("affection_score")),
+        "activity_label": group_activity_label(item.get("group_activity_score")),
+        "proactive_override": normalize_proactive_override(item.get("proactive_override")),
+        "memory_counts": memory_counts(item),
+        "history_count": len(item.get("history") or []),
+        "content": item,
+    }
+    if storage_id:
+        payload["storage_id"] = storage_id
+    if related_conversations is not None:
+        payload["related_conversations"] = related_conversations
+    if group_infos is not None:
+        payload["group_infos"] = group_infos
+    return payload
+
+
+def storage_memory_id(memory_id: str) -> str:
+    if memory_id.startswith("person:"):
+        return "private:" + memory_id.split(":", 1)[1]
+    return memory_id
+
+
+def person_user_ids(conversations: dict[str, Any]) -> list[str]:
+    ids = {
+        user_id
+        for key, item in conversations.items()
+        if isinstance(item, dict)
+        for user_id in [person_user_id(key, item)]
+        if user_id
+    }
+    return sorted(
+        ids,
+        key=lambda user_id: _safe_float(person_content(conversations, user_id).get("last_user_at")),
+        reverse=True,
+    )
+
+
+def person_user_id(conversation_id: str, item: dict[str, Any]) -> str:
+    if memory_kind(conversation_id) not in {"private", "member", "person"}:
+        return ""
+    target = item.get("target") if isinstance(item.get("target"), dict) else {}
+    user_id = str(
+        target.get("user_id")
+        or parse_memory_id_piece(conversation_id, "private")
+        or parse_memory_id_piece(conversation_id, "user")
+        or ""
+    )
+    return user_id.strip()
+
+
+def person_related_keys(conversations: dict[str, Any], user_id: str) -> list[str]:
+    related = [
+        key
+        for key, item in conversations.items()
+        if isinstance(item, dict) and person_user_id(key, item) == str(user_id)
+    ]
+    return sorted(
+        related,
+        key=lambda key: (
+            0 if key == f"private:{user_id}" else 1,
+            -_safe_float(
+                conversations.get(key, {}).get("last_user_at")
+                if isinstance(conversations.get(key), dict)
+                else 0
+            ),
+            key,
+        ),
+    )
+
+
+def person_content(conversations: dict[str, Any], user_id: str) -> dict[str, Any]:
+    related = person_related_keys(conversations, user_id)
+    private_id = f"private:{user_id}"
+    base = conversations.get(private_id) if isinstance(conversations.get(private_id), dict) else {}
+    merged = dict(base)
+    merged["target"] = {"message_type": "private", "user_id": user_id}
+    merged["message_count"] = sum_int(conversations, related, "message_count")
+    merged["bot_reply_count"] = sum_int(conversations, related, "bot_reply_count")
+    merged["last_user_at"] = max_float(conversations, related, "last_user_at")
+    merged["last_bot_at"] = max_float(conversations, related, "last_bot_at")
+    merged["history"] = merged_history(conversations, related)
+    merged["structured_memory"] = merged_structured_memory(conversations, related)
+    merged["related_conversations"] = related
+    return merged
+
+
+def person_group_infos(conversations: dict[str, Any], user_id: str) -> list[dict[str, Any]]:
+    infos: list[dict[str, Any]] = []
+    for key in person_related_keys(conversations, user_id):
+        if memory_kind(key) != "member":
+            continue
+        item = conversations.get(key)
+        if not isinstance(item, dict):
+            continue
+        target = item.get("target") if isinstance(item.get("target"), dict) else {}
+        group_id = str(target.get("group_id") or parse_memory_id_piece(key, "group") or "")
+        history = item.get("history") if isinstance(item.get("history"), list) else []
+        infos.append(
+            {
+                "id": key,
+                "group_id": group_id,
+                "nickname": latest_nickname(history),
+                "display_name": memory_display_name(key, item),
+                "messages": item.get("message_count", 0),
+                "last_user_at": item.get("last_user_at"),
+                "last_user_at_text": format_timestamp(item.get("last_user_at")),
+                "memory_counts": memory_counts(item),
+                "summary": natural_memory_summary(item),
+            }
+        )
+    return infos
+
+
+def person_display_name(conversations: dict[str, Any], user_id: str) -> str:
+    for key in person_related_keys(conversations, user_id):
+        item = conversations.get(key)
+        if not isinstance(item, dict):
+            continue
+        history = item.get("history") if isinstance(item.get("history"), list) else []
+        nickname = latest_nickname(history)
+        if nickname:
+            return f"{nickname}（QQ {user_id} / 统一人物档案）"
+    return f"QQ {user_id}（统一人物档案）"
+
+
+def merged_structured_memory(
+    conversations: dict[str, Any],
+    related: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "candidates": []}
+    for bucket in ("l1", "l2", "candidates"):
+        seen: set[str] = set()
+        for key in related:
+            item = conversations.get(key)
+            if not isinstance(item, dict):
+                continue
+            structured = item.get("structured_memory")
+            if not isinstance(structured, dict):
+                continue
+            for entry in structured.get(bucket, []):
+                if not isinstance(entry, dict):
+                    continue
+                identity = str(
+                    entry.get("memory_key")
+                    or f"{entry.get('category')}:{entry.get('key')}:{entry.get('value')}"
+                )
+                if identity in seen:
+                    continue
+                copied = dict(entry)
+                copied.setdefault("source_conversation", key)
+                result[bucket].append(copied)
+                seen.add(identity)
+    return result
+
+
+def merged_history(conversations: dict[str, Any], related: list[str]) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for key in related:
+        item = conversations.get(key)
+        if not isinstance(item, dict):
+            continue
+        for entry in item.get("history") or []:
+            if isinstance(entry, dict):
+                copied = dict(entry)
+                copied.setdefault("source_conversation", key)
+                history.append(copied)
+    history.sort(key=lambda entry: as_float(entry.get("at")) or 0.0)
+    return history[-300:]
+
+
+def sum_int(conversations: dict[str, Any], keys: list[str], field: str) -> int:
+    return sum(
+        int((conversations.get(key) or {}).get(field) or 0)
+        for key in keys
+        if isinstance(conversations.get(key), dict)
+    )
+
+
+def max_float(conversations: dict[str, Any], keys: list[str], field: str) -> float:
+    values = [
+        as_float((conversations.get(key) or {}).get(field)) or 0.0
+        for key in keys
+        if isinstance(conversations.get(key), dict)
+    ]
+    return max(values or [0.0])
+
+
 def memory_kind(conversation_id: str) -> str:
+    if conversation_id.startswith("person:"):
+        return "person"
     if conversation_id.startswith("private:"):
         return "private"
     if ":user:" in conversation_id:
@@ -196,6 +514,7 @@ def memory_kind(conversation_id: str) -> str:
 def memory_type_label(conversation_id: str) -> str:
     kind = memory_kind(conversation_id)
     return {
+        "person": "人物档案",
         "private": "私聊",
         "member": "群内用户",
         "group": "群聊",
@@ -266,7 +585,11 @@ def natural_memory_detail(item: dict[str, Any]) -> str:
     history = item.get("history") if isinstance(item.get("history"), list) else []
 
     profile_lines = natural_memory_values(
-        [m for m in l1 if str(m.get("category") or "") in {"profile_fact", "interest"}],
+        [
+            m
+            for m in l1
+            if str(m.get("category") or "") in {"profile_fact", "interest", "preference", "habit"}
+        ],
         limit=6,
     )
     if profile_lines:
@@ -332,12 +655,163 @@ def natural_memory_values(memories: list[dict[str, Any]], limit: int = 5) -> lis
 def memory_category_label(category: str) -> str:
     return {
         "interest": "兴趣：",
+        "preference": "偏好：",
         "profile_fact": "资料：",
+        "habit": "习惯：",
         "communication_style": "说话习惯：",
         "schedule": "日程：",
         "event": "事件：",
         "important_interaction": "互动：",
     }.get(category, "")
+
+
+def normalize_manual_memory_content(conversation_id: str, content: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(content)
+    is_group = conversation_id.startswith("group:") and ":user:" not in conversation_id
+    if is_group:
+        normalized["group_activity_score"] = clamp_float(
+            normalized.get("group_activity_score"), 0.0, 100.0, 0.0
+        )
+        normalized["last_group_activity_at"] = time.time()
+    else:
+        normalized["affection_score"] = clamp_float(
+            normalized.get("affection_score"), 0.0, 100.0, 0.0
+        )
+        normalized["affection_initialized"] = True
+        normalized["last_affection_idle_decay_at"] = time.time()
+    normalized["proactive_override"] = normalize_proactive_override(
+        normalized.get("proactive_override")
+    )
+    structured = normalized.get("structured_memory")
+    if not isinstance(structured, dict):
+        structured = {}
+    normalized["structured_memory"] = structured
+    default_visibility = default_memory_visibility(conversation_id)
+    now = time.time()
+    for layer in ("l1", "l2", "candidates"):
+        entries = structured.get(layer)
+        if not isinstance(entries, list):
+            structured[layer] = []
+            continue
+        normalized_entries = []
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            entry = dict(raw)
+            category = clean_plain(str(entry.get("category") or "profile_fact")) or "profile_fact"
+            key = clean_plain(str(entry.get("key") or entry.get("memory_key") or category))
+            value = clean_plain(str(entry.get("value") or ""))
+            entry["category"] = category
+            entry["key"] = key
+            entry["value"] = value
+            memory_key = f"{category}:{key}"
+            entry["memory_key"] = memory_key
+            entry["id"] = str(entry.get("id") or memory_id(layer, memory_key))
+            entry["source"] = "webui"
+            entry["source_type"] = entry.get("source_type") or "manual"
+            entry["locked"] = True
+            entry["visibility"] = entry.get("visibility") or default_visibility
+            entry["updated_at"] = now
+            entry.setdefault("created_at", now)
+            if layer == "l1":
+                entry["layer"] = "L1"
+                entry["confidence"] = clamp_float(entry.get("confidence"), 0.0, 1.0, 0.85)
+            elif layer == "l2":
+                entry["layer"] = "L2"
+                entry["confidence"] = clamp_float(entry.get("confidence"), 0.0, 1.0, 0.75)
+                entry["activity"] = clamp_float(entry.get("activity"), 0.0, 1.0, 1.0)
+                entry.setdefault("state", "active")
+            else:
+                entry["confidence"] = clamp_float(entry.get("confidence"), 0.0, 1.0, 0.75)
+                entry["evidence_count"] = max(1, int(as_float(entry.get("evidence_count")) or 1))
+            normalized_entries.append(entry)
+        structured[layer] = normalized_entries
+    return normalized
+
+
+def normalize_proactive_override(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower()
+    return normalized if normalized in {"auto", "allow", "deny"} else "auto"
+
+
+def default_memory_visibility(conversation_id: str) -> str:
+    if conversation_id.startswith("group:") and ":user:" in conversation_id:
+        group_id = parse_memory_id_piece(conversation_id, "group")
+        return f"group:{group_id}" if group_id else "public"
+    if conversation_id.startswith("group:"):
+        group_id = parse_memory_id_piece(conversation_id, "group")
+        return f"group:{group_id}" if group_id else "public"
+    return "private"
+
+
+def memory_id(layer: str, key: str) -> str:
+    safe = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff:-]+", "_", key)
+    return f"{layer}:{safe[:80]}"
+
+
+def clamp_float(value: Any, low: float, high: float, default: float) -> float:
+    number = as_float(value)
+    if number is None:
+        number = default
+    return max(low, min(high, number))
+
+
+def removed_person_values(previous: Any, current: dict[str, Any]) -> set[str]:
+    if not isinstance(previous, dict):
+        return set()
+    before = positive_person_values(previous)
+    after = positive_person_values(current)
+    return before - after
+
+
+def positive_person_values(item: dict[str, Any]) -> set[str]:
+    structured = item.get("structured_memory") if isinstance(item.get("structured_memory"), dict) else {}
+    values: set[str] = set()
+    for bucket in ("l1", "candidates"):
+        for entry in structured.get(bucket, []):
+            if not isinstance(entry, dict) or not is_positive_person_entry(entry):
+                continue
+            value = clean_plain(str(entry.get("value") or ""))
+            if value:
+                values.add(value)
+    return values
+
+
+def is_positive_person_entry(entry: dict[str, Any]) -> bool:
+    category = str(entry.get("category") or "")
+    key = str(entry.get("key") or "")
+    if category not in {"interest", "preference", "habit", "profile_fact"}:
+        return False
+    return "讨厌" not in key and "不喜欢" not in key
+
+
+def remove_values_from_same_person_members(
+    conversations: dict[str, Any],
+    conversation_id: str,
+    values: set[str],
+) -> None:
+    if not conversation_id.startswith("private:") or not values:
+        return
+    user_id = conversation_id.split(":", 1)[1]
+    for key, item in conversations.items():
+        if not key.endswith(f":user:{user_id}") or not isinstance(item, dict):
+            continue
+        structured = item.get("structured_memory")
+        if not isinstance(structured, dict):
+            continue
+        for bucket in ("l1", "candidates"):
+            entries = structured.get(bucket)
+            if not isinstance(entries, list):
+                continue
+            structured[bucket] = [
+                entry
+                for entry in entries
+                if not (
+                    isinstance(entry, dict)
+                    and is_positive_person_entry(entry)
+                    and clean_plain(str(entry.get("value") or "")) in values
+                )
+            ]
 
 
 def memory_counts(item: dict[str, Any]) -> dict[str, int]:

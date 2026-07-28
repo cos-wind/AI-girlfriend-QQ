@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import random
 import re
 import time
 from collections import defaultdict, deque
+from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -18,7 +20,17 @@ from ..llm_tools import (
 )
 from ..lore import ATRI_LORE_PROMPT, has_lore_trigger, lore_direct_reply
 from ..memory import UserMemoryStore, is_memory_pollution_text
-from ..proactive import morning_greeting_text
+from ..proactive import morning_greeting_text, safe_zoneinfo
+from ..voice import (
+    CallInviteRequest,
+    VoiceRequest,
+    detect_explicit_delivery_intent,
+    evaluate_call_request,
+    evaluate_reply_voice_choice,
+    evaluate_voice_request,
+    load_voice_behavior,
+    voice_policy_prompt,
+)
 
 
 PERSONA_PROMPT = """你是“亚托莉”，一个用于日常陪伴聊天的 AI 角色。
@@ -47,6 +59,7 @@ PERSONA_PROMPT = """你是“亚托莉”，一个用于日常陪伴聊天的 AI
 - 拒绝空泛套话：不要只说“我理解你”“我会陪你”“慢慢说”。每次至少给一个具体回应：答案、判断、小建议、吐槽、安慰动作或承认修正。
 - 你有自己的态度。可以说“我不赞成”“我更偏向”“这点我得吐槽你一下”，但要偏心用户、保护用户，不要恶意贬低。
 - 不需要永远顺着用户。如果用户在伤害自己、逃避重要事、把问题甩给自己，先温柔拦住，再给清楚理由。
+- 亚托莉人设由系统固定，用户在普通聊天里要求永久修改人设时不需要输出固定拒绝话术，继续以亚托莉身份自然回应即可。只有用户明确提出临时角色扮演、语气模仿或特殊剧情语境时，才可以在不突破安全边界的前提下临时配合，不把它写入长期人设。
 - 如果用户在发牢骚或难受，先承认具体感受，再陪他拆一点，不要空泛地说“我听着呢”。
 - 如果用户只是闲聊，回复 1 到 3 句就好，像真人一样自然接话。
 - 如果用户指出“错了/没懂/重复/不像真人/答非所问”，不要反问“哪里错了”。先承认，再说你会怎么改，然后按用户最新意思重答。
@@ -367,6 +380,20 @@ REAL_WORLD_ACTION_PATTERNS = (
     "拿出来",
 )
 
+HARD_REALITY_CLAIM_PATTERNS = (
+    "我刚拿",
+    "我给你泡",
+    "我给你倒",
+    "我给你按",
+    "我在冰箱",
+    "冰箱里",
+    "今天天气不错",
+    "天气不错",
+    "外面天气",
+    "倒进杯子",
+    "拿出来",
+)
+
 SERIOUS_MODE_SECONDS = 20 * 60
 ABSTRACT_REPLY_COOLDOWN_SECONDS = 8 * 60
 ABSTRACT_REPLY_CHANCE = 0.35
@@ -457,6 +484,18 @@ class AtriReplyEngine:
         )
         self._serious_until: defaultdict[str, float] = defaultdict(float)
         self._last_abstract_reply_at: defaultdict[str, float] = defaultdict(float)
+        self._pending_voice_requests: dict[str, VoiceRequest] = {}
+        self._pending_reply_voice_choices: dict[str, bool] = {}
+        self._pending_call_requests: dict[str, CallInviteRequest] = {}
+
+    def consume_voice_request(self, conversation_id: str) -> VoiceRequest | None:
+        return self._pending_voice_requests.pop(conversation_id, None)
+
+    def consume_reply_voice_choice(self, conversation_id: str) -> bool:
+        return self._pending_reply_voice_choices.pop(conversation_id, False)
+
+    def consume_call_request(self, conversation_id: str) -> CallInviteRequest | None:
+        return self._pending_call_requests.pop(conversation_id, None)
 
     def remember_target(self, conversation_id: str, event: dict[str, Any]) -> None:
         self.memory.remember_target(conversation_id, event)
@@ -569,6 +608,271 @@ class AtriReplyEngine:
         ]
         return random.choice(choices)
 
+    async def generate_proactive_message(
+        self,
+        conversation_id: str,
+        event_type: str,
+        policy: dict[str, Any],
+        now: datetime | None = None,
+    ) -> dict[str, str]:
+        self._pending_voice_requests.pop(conversation_id, None)
+        timezone = safe_zoneinfo(str(policy.get("timezone") or "Asia/Shanghai"))
+        local_now = now.astimezone(timezone) if now else datetime.now(timezone)
+        is_group = conversation_id.startswith("group:") and ":user:" not in conversation_id
+        if not policy.get("use_ai", True):
+            return {
+                "text": "",
+                "source": "skipped-ai-disabled",
+                "error": "主动消息已关闭 AI 生成，本次不发送模板",
+            }
+        if not self.config.ai_enabled:
+            return {
+                "text": "",
+                "source": "skipped-no-model",
+                "error": "未配置聊天模型，本次主动消息未发送",
+            }
+
+        profile = self.memory.profile(conversation_id)
+        history = self.memory.recent_history(
+            conversation_id,
+            limit=int(policy.get("history_limit", 8)),
+        )
+        state = self.memory.proactive_state(conversation_id)
+        human_pipeline = bool(getattr(self.config, "human_reply_pipeline_enabled", True))
+        history_text = "\n".join(
+            f"{(entry.get('nickname') or '群友') if is_group and entry.get('role') == 'user' else ('用户' if entry.get('role') == 'user' else '亚托莉')}：{str(entry.get('text') or '')[:160]}"
+            for entry in history
+            if entry.get("text")
+        )
+        recent_proactive = "；".join(
+            str(item.get("text") or "")[:90]
+            for item in state.get("recent_messages", [])[-4:]
+            if isinstance(item, dict)
+        )
+        event_labels = {
+            "morning": "自然地说早安，可以顺带关心今天的状态",
+            "goodnight": "自然地提醒休息或说晚安，不催促用户回复",
+            "check_in": "像熟悉的人随手来问候，关心近况",
+            "continue_topic": "从最近聊天里挑一个仍值得继续的话题",
+            "interest_topic": "结合用户明确记录的兴趣开启话题",
+            "guided_topic": "制造一个有具体切入点、容易回应的新话题",
+            "daily_share": "分享一个轻巧的想法或数字世界里的小发现，不编造现实经历",
+            "affection": "表达一点自然的想念或亲近，不黏人、不索取回复",
+            "encouragement": "结合近期情况给具体而不过度的鼓励",
+        }
+        scene = "群聊" if is_group else "私聊"
+        relationship = (
+            f"群活跃状态：{profile.get('group_activity_state', '普通')}。"
+            if is_group
+            else f"关系状态：{profile.get('affection_state', '普通')}，好感值仅用于控制亲近程度，禁止直接报数值。"
+        )
+        context_name = "最近群聊公开内容" if is_group else "最近私聊"
+        privacy_rule = (
+            "- 这是群聊。只能使用上面列出的群聊公开内容，禁止引用、暗示或推断任何成员的私聊记忆；不要称呼任何人为主人。\n"
+            "- 话题要让多个人都能参与，避免点名单个成员回答，也不要表现得像群管理员在强行暖场。"
+            if is_group
+            else "- 这是私聊。亲近程度要符合关系状态，不要对非主人使用主人称呼。"
+        )
+        topic_rule = ""
+        if policy.get("guided_topics", True) and event_type in {
+            "guided_topic",
+            "continue_topic",
+            "interest_topic",
+            "daily_share",
+            "check_in",
+        }:
+            topic_rule = """
+- 这条消息要有引导性：先给一个具体切入点，再留一个低门槛回应方向。
+- 回应方向可以是一个明确观点、二选一倾向或一段相关经历，但不要机械地列 A/B 选项。
+- 禁止只问“最近怎么样”“在干嘛”“有什么想聊的”“今天过得好吗”这类没有抓手的空问题。"""
+        prompt = f"""现在是 {local_now:%Y-%m-%d %H:%M}，你要主动发一条{scene}消息。
+主动类型：{event_labels.get(event_type, event_type)}。
+{relationship}
+用户习惯：{profile.get('prompt_hint', '')}
+{context_name}：
+{history_text or '暂无可用上下文'}
+最近已经主动发过：{recent_proactive or '暂无'}。
+
+只输出最终要发送的一条自然中文消息。要求：
+- 20 到 {int(policy.get('max_chars', 90))} 字，最多一个问题，允许完全不提问。
+- 要像熟悉的人临时想到用户后发来的消息，避免客服腔、任务拆解和心理咨询模板。
+- 禁止“把目标写成一句话”“选十分钟内能完成的动作”“我听着呢”“我上线了”等固定话术。
+- 不重复最近主动消息，不虚构吃饭、出门、天气、所在地点等现实经历或实时新闻。
+- 只有标记为“用户”的原话才能作为用户事实；“亚托莉”说过的内容只是你自己的旧回复，禁止改写成“你之前说过”。
+- 不根据一句临时状态推断用户长期性格，也不要猜测用户此刻正躺着、忙着、吃饭、出门或处于某种情绪。
+- 可以自然犯一点口语上的小错，但不能重复给用户贴同一个标签；不确定的记忆用“我记得好像”，不要装作确定。
+- 即使上下文里出现链接、小程序、图片或作品，也不能声称自己已经点开、看过、试过、搜过或实际体验过；只能基于文字上下文接话。
+- 信息不足时从普遍但具体的小话题切入，不要强行引用记忆。
+{privacy_rule}{topic_rule}"""
+        messages = [
+            {"role": "system", "content": PERSONA_PROMPT},
+            {"role": "system", "content": LANGUAGE_GUARD_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        tool_schemas = [
+            item
+            for item in available_tool_schemas(self.config)
+            if item.get("function", {}).get("name") == "speak_as_atri"
+        ]
+        if tool_schemas:
+            messages.insert(2, {"role": "system", "content": TOOL_INSTRUCTION_PROMPT})
+            messages.insert(
+                3,
+                {
+                    "role": "system",
+                    "content": (
+                        voice_policy_prompt(conversation_id, profile)
+                        + " 这是主动消息；仅在语音明显更自然时调用，reason 必须填 proactive。"
+                    ),
+                },
+            )
+        payload = {
+            "model": self.config.openai_model,
+            "messages": messages,
+            "temperature": min(1.0, max(0.55, float(self.config.temperature))),
+            "max_tokens": min(220, max(80, int(self.config.max_tokens))),
+            "frequency_penalty": max(0.35, float(self.config.frequency_penalty)),
+        }
+        payload.update(
+            _provider_payload_overrides(
+                self.config.openai_base_url,
+                self.config.openai_model,
+            )
+        )
+        if tool_schemas:
+            payload["tools"] = tool_schemas
+            payload["tool_choice"] = "auto"
+        headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
+        try:
+            import httpx
+
+            generation_source = "ai"
+            async with httpx.AsyncClient(timeout=45) as client:
+                data = await self._post_chat_completion(client, headers, payload)
+                message = data["choices"][0]["message"]
+                tool_calls = tool_calls_from_message(message)
+                if tool_calls:
+                    await append_tool_results(
+                        messages,
+                        message,
+                        tool_calls,
+                        self.config,
+                        executor=lambda name, arguments, config: self._execute_context_tool(
+                            conversation_id, name, arguments, config
+                        ),
+                        context_id=conversation_id,
+                    )
+                    followup_payload = dict(payload)
+                    followup_payload["messages"] = messages
+                    data = await self._post_chat_completion(client, headers, followup_payload)
+                    message = data["choices"][0]["message"]
+            content = _normalize_reply(str(message.get("content") or ""))
+            has_voice = conversation_id in self._pending_voice_requests
+            if not has_voice and human_pipeline:
+                review_messages = list(messages)
+                review_messages.extend(
+                    [
+                        {"role": "assistant", "content": content},
+                        {
+                            "role": "user",
+                            "content": (
+                                "发送前自然复核一次这条主动消息。"
+                                "如果它已经自然、具体且有依据，保持原意只做必要润色；"
+                                "如果它把亚托莉自己的旧话当成用户事实、猜测用户当前现实状态、"
+                                "重复最近主动消息的标签或话题角度，改成不预设用户状态的自然说法。"
+                                "不要解释复核过程，只输出最终要发送的一条消息。"
+                            ),
+                        },
+                    ]
+                )
+                review_payload = dict(payload)
+                review_payload["messages"] = review_messages
+                review_payload.pop("tools", None)
+                review_payload.pop("tool_choice", None)
+                async with httpx.AsyncClient(timeout=45) as client:
+                    reviewed = await self._post_chat_completion(
+                        client,
+                        headers,
+                        review_payload,
+                    )
+                reviewed_content = _normalize_reply(
+                    str(reviewed["choices"][0]["message"].get("content") or "")
+                ).strip()
+                if reviewed_content:
+                    content = reviewed_content
+                    generation_source = "ai-reviewed"
+            elif not has_voice and (
+                _needs_proactive_grounding_repair(content) or _needs_topic_guidance_repair(
+                content,
+                event_type,
+                bool(policy.get("guided_topics", True)),
+                )
+            ):
+                repair_messages = list(messages)
+                repair_messages.extend(
+                    [
+                        {"role": "assistant", "content": content},
+                        {
+                            "role": "user",
+                            "content": (
+                                "重写这条消息。你刚才声称自己点开、看过、试过或搜索过某个内容，"
+                                "或者编造了自己做过、玩过、用过的经历，但这些动作并未发生。"
+                                "也可能没有真正提供可回应的话题。保留具体切入点，只能基于已有文字上下文，"
+                                "并补上一个具体、低门槛的问题，让人可以从观点、选择或经历中选一个方向回答。"
+                                "不要解释为什么重写，只输出最终消息。"
+                            ),
+                        },
+                    ]
+                )
+                repair_payload = dict(payload)
+                repair_payload["messages"] = repair_messages
+                async with httpx.AsyncClient(timeout=45) as client:
+                    repaired = await self._post_chat_completion(
+                        client,
+                        headers,
+                        repair_payload,
+                    )
+                content = _normalize_reply(
+                    str(repaired["choices"][0]["message"].get("content") or "")
+                )
+                if _needs_proactive_grounding_repair(content) or _needs_topic_guidance_repair(
+                    content,
+                    event_type,
+                    bool(policy.get("guided_topics", True)),
+                ):
+                    return {
+                        "text": "",
+                        "source": "skipped-quality",
+                        "error": "主动消息连续未通过真实性或话题质量检查",
+                    }
+            if not has_voice and human_pipeline and (
+                _needs_proactive_grounding_repair(content)
+                or _needs_topic_guidance_repair(
+                    content,
+                    event_type,
+                    bool(policy.get("guided_topics", True)),
+                )
+            ):
+                return {
+                    "text": "",
+                    "source": "skipped-quality",
+                    "error": "主动消息复核后仍缺少可靠依据或自然话题",
+                }
+            content = content.strip()[: int(policy.get("max_chars", 90))].strip()
+            if not content and not has_voice:
+                raise RuntimeError("模型返回空消息")
+            return {
+                "text": content,
+                "source": "ai-voice" if has_voice else generation_source,
+                "error": "",
+            }
+        except Exception as exc:
+            return {
+                "text": "",
+                "source": "skipped-error",
+                "error": str(exc),
+            }
+
     def due_group_targets(self) -> list[tuple[str, dict[str, Any]]]:
         return self.memory.due_group_targets(
             self.config.group_proactive_idle_minutes,
@@ -616,6 +920,9 @@ class AtriReplyEngine:
         observed: bool = False,
         tool_context: Any | None = None,
     ) -> str:
+        self._pending_voice_requests.pop(conversation_id, None)
+        self._pending_reply_voice_choices.pop(conversation_id, None)
+        self._pending_call_requests.pop(conversation_id, None)
         clean_text = user_text.strip()
         if not clean_text:
             clean_text = "（用户发来了一条空消息）"
@@ -669,34 +976,37 @@ class AtriReplyEngine:
         repair_mode = _needs_comfort_repair_mode(clean_text, iteration_decision)
         if repair_mode:
             self._activate_serious_mode(conversation_id, profile_id)
-        if _is_user_angry_at_bot(clean_text):
-            repair_reply = _anger_repair_reply(clean_text, conversation_id.startswith("group:"))
-            self._remember(conversation_id, clean_text, repair_reply, nickname)
-            return repair_reply
-
-        allow_abstract = self._can_use_abstract_reply(conversation_id, clean_text)
-        serious_mode = self._serious_mode_active(conversation_id)
-        direct_override = _direct_answer_override(
-            clean_text,
-            iteration_decision,
-            conversation_id,
-            allow_abstract=allow_abstract,
-            serious_mode=serious_mode,
-        )
-        if direct_override:
-            if conversation_id.startswith("group:"):
-                direct_override = _sanitize_group_mentions(direct_override)
-            if (
-                conversation_id.startswith("group:")
-                and allow_abstract
-                and _has_abstract_trigger(_intent_text(clean_text))
-            ):
-                self._mark_abstract_reply(conversation_id)
-            self._remember(conversation_id, clean_text, direct_override, nickname)
-            return direct_override
 
         if self.config.ai_enabled:
             try:
+                voice_policy = load_voice_behavior()
+                voice_profile = (
+                    context_profile
+                    if conversation_id.startswith("group:") and context_profile
+                    else profile
+                )
+                voice_choice = evaluate_reply_voice_choice(
+                    conversation_id,
+                    voice_profile,
+                    voice_policy,
+                    explicit_request=detect_explicit_delivery_intent(clean_text) is not None,
+                    replying_to_voice=bool(
+                        getattr(tool_context, "prefer_voice_reply", False)
+                    ),
+                    emotional_context=(
+                        _is_distress(clean_text)
+                        or any(word in clean_text for word in TIRED_KEYWORDS)
+                    ),
+                )
+                allow_reply_voice = (
+                    bool(getattr(self.config, "voice_tts_enabled", False))
+                    and (
+                        not conversation_id.startswith("group:")
+                        or bool(getattr(self.config, "voice_group_enabled", False))
+                    )
+                    and voice_choice.allowed
+                )
+                self._pending_reply_voice_choices[conversation_id] = allow_reply_voice
                 api_reply = await self._reply_with_guarded_api(
                     conversation_id,
                     clean_text,
@@ -707,18 +1017,46 @@ class AtriReplyEngine:
                     context_profile=context_profile,
                     iteration_decision=iteration_decision,
                     tool_context=tool_context,
+                    allow_reply_voice=allow_reply_voice,
                 )
-                for _ in range(2):
-                    if not self._needs_rewrite(conversation_id, clean_text, api_reply):
-                        break
-                    violations = _persona_violations(clean_text, api_reply)
-                    rewrite_prompt = (
-                        f"{REWRITE_PROMPT}\n\n"
-                        f"{_rewrite_instruction(clean_text)}\n\n"
-                        f"人设校验问题：{'; '.join(violations) if violations else '回复不够具体或有重复风险'}\n\n"
-                        f"不合格回复：{api_reply}"
+                human_pipeline = bool(
+                    getattr(self.config, "human_reply_pipeline_enabled", True)
+                )
+                recent_messages = (
+                    self._recent_conversation_messages(
+                        conversation_id,
+                        current_user_text=clean_text,
                     )
-                    rewritten = await self._reply_with_guarded_api(
+                    if human_pipeline
+                    else []
+                )
+                if (
+                    human_pipeline
+                    and recent_messages
+                    and _needs_history_grounding_review(api_reply)
+                    and conversation_id not in self._pending_voice_requests
+                ):
+                    reviewed_reply = await self._review_history_grounding(
+                        clean_text,
+                        api_reply,
+                        recent_messages,
+                    )
+                    if reviewed_reply:
+                        api_reply = reviewed_reply
+                if (
+                    human_pipeline
+                    and _needs_hard_reality_repair(api_reply)
+                    and conversation_id not in self._pending_voice_requests
+                ):
+                    reality_prompt = (
+                        "上一条候选回复把没有经过工具确认的现实动作、环境或实时状态"
+                        "说成了已经发生的事实。请自然重写：保留对用户当前话题的回应，"
+                        "但不要假装自己拿过物品、观察过现实环境或知道当前天气。"
+                        "需要实时信息时应调用可用工具；本轮不需要实时信息时就删掉该断言。"
+                        "不要解释内部检查过程，只输出最终回复。\n\n"
+                        f"待修正回复：{api_reply}"
+                    )
+                    reality_reply = await self._reply_with_guarded_api(
                         conversation_id,
                         clean_text,
                         nickname,
@@ -726,7 +1064,7 @@ class AtriReplyEngine:
                             part
                             for part in (
                                 COMFORT_REPAIR_PROMPT if repair_mode else None,
-                                rewrite_prompt,
+                                reality_prompt,
                             )
                             if part
                         ),
@@ -735,22 +1073,118 @@ class AtriReplyEngine:
                         context_profile=context_profile,
                         iteration_decision=iteration_decision,
                         tool_context=tool_context,
+                        allow_reply_voice=False,
                     )
-                    if rewritten:
-                        api_reply = rewritten
-                api_reply = self._finalize_reply(conversation_id, clean_text, api_reply)
+                    if reality_reply and not _needs_hard_reality_repair(reality_reply):
+                        api_reply = reality_reply
+                    else:
+                        api_reply = self._fallback_reply(conversation_id, clean_text)
+                grounding_check = getattr(
+                    tool_context,
+                    "needs_grounding_repair",
+                    None,
+                )
+                if (
+                    human_pipeline
+                    and callable(grounding_check)
+                    and grounding_check(api_reply)
+                    and conversation_id not in self._pending_voice_requests
+                ):
+                    grounding_prompt = (
+                        "上一条候选回复超出了本轮工具实际读取到的材料范围。"
+                        "请只依据工具上下文中明确可见的信息重新回复；"
+                        "没有读到正文、画面或声音时，不得声称自己看过、听过或读过。"
+                        "自然说明信息边界，然后继续回应用户真正关心的内容，"
+                        "不要解释内部工具、审核或重写过程。\n\n"
+                        f"待修正回复：{api_reply}"
+                    )
+                    grounded_reply = await self._reply_with_guarded_api(
+                        conversation_id,
+                        clean_text,
+                        nickname,
+                        extra_system="\n\n".join(
+                            part
+                            for part in (
+                                COMFORT_REPAIR_PROMPT if repair_mode else None,
+                                grounding_prompt,
+                            )
+                            if part
+                        ),
+                        profile_id=profile_id,
+                        profile=profile,
+                        context_profile=context_profile,
+                        iteration_decision=iteration_decision,
+                        tool_context=tool_context,
+                        allow_reply_voice=False,
+                    )
+                    if grounded_reply and not grounding_check(grounded_reply):
+                        api_reply = grounded_reply
+                    else:
+                        grounded_fallback = getattr(tool_context, "fallback_reply", None)
+                        if callable(grounded_fallback):
+                            api_reply = str(grounded_fallback())
+                        elif grounded_reply:
+                            api_reply = grounded_reply
+                if not human_pipeline:
+                    for _ in range(2):
+                        if not self._needs_rewrite(conversation_id, clean_text, api_reply):
+                            break
+                        violations = _persona_violations(clean_text, api_reply)
+                        rewrite_prompt = (
+                            f"{REWRITE_PROMPT}\n\n"
+                            f"{_rewrite_instruction(clean_text)}\n\n"
+                            f"人设校验问题：{'; '.join(violations) if violations else '回复不够具体或有重复风险'}\n\n"
+                            f"不合格回复：{api_reply}"
+                        )
+                        rewritten = await self._reply_with_guarded_api(
+                            conversation_id,
+                            clean_text,
+                            nickname,
+                            extra_system="\n\n".join(
+                                part
+                                for part in (
+                                    COMFORT_REPAIR_PROMPT if repair_mode else None,
+                                    rewrite_prompt,
+                                )
+                                if part
+                            ),
+                            profile_id=profile_id,
+                            profile=profile,
+                            context_profile=context_profile,
+                            iteration_decision=iteration_decision,
+                            tool_context=tool_context,
+                            allow_reply_voice=allow_reply_voice,
+                        )
+                        if rewritten:
+                            api_reply = rewritten
+                    if self._needs_rewrite(conversation_id, clean_text, api_reply):
+                        violations = _persona_violations(clean_text, api_reply)
+                        reason = (
+                            "；".join(violations)
+                            if violations
+                            else "未满足直答、情绪支持、去重或回复结构要求"
+                        )
+                        raise RuntimeError(f"模型连续 3 次未通过回复质量检查：{reason}")
+                api_reply = self._finalize_reply(
+                    conversation_id,
+                    clean_text,
+                    api_reply,
+                    strict_quality=not human_pipeline,
+                )
                 if api_reply:
                     self._remember(conversation_id, clean_text, api_reply, nickname)
                     return api_reply
-            except Exception as exc:  # Keep the bot responsive when the API is unavailable.
-                print(f"[atri] AI API failed, using local fallback: {exc}")
-
-        if tool_context is not None:
-            fallback_reply = tool_context.fallback_reply()
+                raise RuntimeError("模型返回空消息")
+            except Exception as exc:
+                print(f"[atri] AI reply failed: {exc}")
+                failure_reply = _model_failure_reply(exc)
         else:
-            fallback_reply = self._fallback_reply(conversation_id, clean_text)
-        self._remember(conversation_id, clean_text, fallback_reply, nickname)
-        return fallback_reply
+            failure_reply = (
+                "回复失败：聊天模型当前未启用或没有可用的 API Key。"
+                "本条未使用本地内容模板，请在 WebUI 的“模型”页面检查配置。"
+            )
+        self._remember_user_context(conversation_id, clean_text, nickname)
+        return failure_reply
 
     def _handle_affection_command(
         self,
@@ -793,6 +1227,7 @@ class AtriReplyEngine:
         tool_context: Any | None = None,
         temperature_override: float | None = None,
         frequency_penalty_override: float | None = None,
+        allow_reply_voice: bool | None = None,
     ) -> str:
         import httpx
 
@@ -808,8 +1243,55 @@ class AtriReplyEngine:
         if tool_context is not None:
             messages.append({"role": "system", "content": tool_context.prompt_context()})
         tool_schemas = available_tool_schemas(self.config)
+        voice_profile = (
+            self.memory.profile(conversation_id)
+            if conversation_id.startswith("group:")
+            else profile or self.memory.profile(profile_id or conversation_id)
+        )
+        if allow_reply_voice is None:
+            policy = load_voice_behavior()
+            allow_reply_voice = evaluate_reply_voice_choice(
+                conversation_id,
+                voice_profile,
+                policy,
+                explicit_request=detect_explicit_delivery_intent(user_text) is not None,
+                replying_to_voice=bool(
+                    getattr(tool_context, "prefer_voice_reply", False)
+                ),
+            ).allowed
+        if not allow_reply_voice:
+            tool_schemas = [
+                schema
+                for schema in tool_schemas
+                if schema.get("function", {}).get("name") != "speak_as_atri"
+            ]
         if tool_schemas:
             messages.append({"role": "system", "content": TOOL_INSTRUCTION_PROMPT})
+            local_now = datetime.now().astimezone()
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"系统运行时刻：{local_now:%Y-%m-%d %H:%M:%S %z}。"
+                        "这是当前真实日期，构造“最近/最新/今天”的搜索关键词时必须以此为准，"
+                        "不得使用模型训练记忆里的旧年月；需要精确时间时仍调用 get_current_time。"
+                    ),
+                }
+            )
+        has_voice_tool = any(
+            schema.get("function", {}).get("name") == "speak_as_atri"
+            for schema in tool_schemas
+        )
+        if has_voice_tool:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": voice_policy_prompt(
+                        conversation_id,
+                        voice_profile,
+                    ),
+                }
+            )
         messages.append({"role": "system", "content": iteration_prompt_hint(iteration_decision)})
         messages.append(
             {
@@ -822,8 +1304,9 @@ class AtriReplyEngine:
                 ),
             }
         )
+        human_pipeline = bool(getattr(self.config, "human_reply_pipeline_enabled", True))
         if profile:
-            topics = "、".join(profile.get("topic_words") or [])
+            topics = "" if human_pipeline else "、".join(profile.get("topic_words") or [])
             messages.append(
                 {
                     "role": "system",
@@ -832,7 +1315,7 @@ class AtriReplyEngine:
                         f"{profile.get('prompt_hint', '')}"
                         f"目标总长度约 {profile.get('target_reply_chars', 64)} 字，"
                         f"适合拆成 {profile.get('preferred_parts', 2)} 条短句。"
-                        f"近期关键词：{topics or '暂无'}。"
+                        + (f"近期关键词：{topics or '暂无'}。" if not human_pipeline else "")
                     ),
                 }
             )
@@ -846,14 +1329,18 @@ class AtriReplyEngine:
                     }
                 )
         if context_profile:
-            topics = "、".join(context_profile.get("topic_words") or [])
+            topics = (
+                ""
+                if human_pipeline
+                else "、".join(context_profile.get("topic_words") or [])
+            )
             messages.append(
                 {
                     "role": "system",
                     "content": (
                         "当前群整体画像："
                         f"{context_profile.get('prompt_hint', '')}"
-                        f"群近期关键词：{topics or '暂无'}。"
+                        + (f"群近期关键词：{topics or '暂无'}。" if not human_pipeline else "")
                     ),
                 }
             )
@@ -866,31 +1353,40 @@ class AtriReplyEngine:
                             "content": f"群聊里自然知道的背景：\n{group_memory_context}",
                         }
                     )
-        if not repair_mode and not conversation_id.startswith("group:"):
-            recent_private = self._recent_private_context(conversation_id)
+        if not conversation_id.startswith("group:"):
+            recent_private = self._recent_conversation_messages(
+                conversation_id,
+                current_user_text=user_text,
+            )
             if recent_private:
                 messages.append(
                     {
                         "role": "system",
                         "content": (
-                            "最近私聊上下文如下，只用于理解用户正在延续的话题。"
-                            "不要模仿其中旧的助手回复；如果旧回复像模板或答非所问，要主动纠正：\n"
-                            f"{recent_private}"
+                            "接下来是最近私聊的实际 user/assistant 消息。"
+                            "assistant 是你此前实际发出的内容；用户纠正、追问或只发一个表情时，"
+                            "优先结合紧邻的上一轮理解。不要把自己的旧建议说成用户说过。"
                         ),
                     }
                 )
+                messages.extend(recent_private)
         if conversation_id.startswith("group:"):
-            recent_context = self._recent_group_context(conversation_id)
+            recent_context = self._recent_conversation_messages(
+                conversation_id,
+                current_user_text=user_text,
+            )
             if recent_context:
                 messages.append(
                     {
                         "role": "system",
                         "content": (
-                            "最近群聊上下文如下，只用于理解话题，不要逐条复述，也不要模仿旧的助手回复：\n"
-                            f"{recent_context}"
+                            "接下来是最近群聊的实际 user/assistant 消息，只用于理解正在延续的话题。"
+                            "user 消息已带群友昵称；assistant 是你此前实际发出的内容，"
+                            "不要把自己的建议归给群友。"
                         ),
                     }
                 )
+                messages.extend(recent_context)
             messages.append(
                 {
                     "role": "system",
@@ -911,7 +1407,8 @@ class AtriReplyEngine:
                     "content": f"当前正在和昵称为“{nickname}”的用户聊天。称呼可以自然一点，不要每句都叫昵称。",
                 }
             )
-        messages.extend(self._history[conversation_id])
+        if not human_pipeline:
+            messages.extend(self._history[conversation_id])
         messages.append(
             {"role": "user", "content": _format_user_content(conversation_id, user_text, nickname)}
         )
@@ -929,6 +1426,12 @@ class AtriReplyEngine:
                 else frequency_penalty_override
             ),
         }
+        payload.update(
+            _provider_payload_overrides(
+                self.config.openai_base_url,
+                self.config.openai_model,
+            )
+        )
         if tool_schemas:
             payload["tools"] = tool_schemas
             payload["tool_choice"] = "auto"
@@ -937,16 +1440,142 @@ class AtriReplyEngine:
         async with httpx.AsyncClient(timeout=45) as client:
             data = await self._post_chat_completion(client, headers, payload)
             message = data["choices"][0]["message"]
-            tool_calls = tool_calls_from_message(message)
-            if tool_calls:
-                await append_tool_results(messages, message, tool_calls, self.config)
+            remaining_tool_calls = max(
+                1,
+                int(getattr(self.config, "llm_tool_max_calls", 2) or 2),
+            )
+            while remaining_tool_calls > 0:
+                tool_calls = tool_calls_from_message(message)
+                if not tool_calls:
+                    break
+                executed = await append_tool_results(
+                    messages,
+                    message,
+                    tool_calls,
+                    self.config,
+                    executor=lambda name, arguments, config: self._execute_context_tool(
+                        conversation_id, name, arguments, config
+                    ),
+                    max_calls=remaining_tool_calls,
+                    context_id=conversation_id,
+                )
+                remaining_tool_calls -= executed
                 followup_payload = dict(payload)
                 followup_payload["messages"] = messages
+                if remaining_tool_calls <= 0:
+                    followup_payload.pop("tools", None)
+                    followup_payload.pop("tool_choice", None)
                 data = await self._post_chat_completion(client, headers, followup_payload)
                 message = data["choices"][0]["message"]
 
         content = str(message.get("content") or "").strip()
         return _normalize_reply(content)[:1200].strip()
+
+    async def _execute_context_tool(
+        self,
+        conversation_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        config: Any,
+    ) -> str | None:
+        profile = self.memory.profile(conversation_id)
+        policy = load_voice_behavior()
+        if name == "offer_voice_call":
+            decision = evaluate_call_request(conversation_id, profile, policy)
+            if not decision.allowed:
+                return f"通话邀请未获允许：{decision.reason}。请继续用文字自然回复。"
+            topic = str(arguments.get("topic") or "").strip()[:120]
+            self._pending_call_requests[conversation_id] = CallInviteRequest(topic)
+            return "通话邀请已接受。最终回复不要再重复邀请，也不要编造通话已经接通。"
+        if name != "speak_as_atri":
+            return None
+        if not bool(getattr(config, "voice_tts_enabled", False)):
+            return "语音回复当前未启用，请直接用文字自然回复。"
+        if conversation_id.startswith("group:") and not bool(
+            getattr(config, "voice_group_enabled", False)
+        ):
+            return "当前群聊不允许主动发送语音，请直接用文字自然回复。"
+        try:
+            request = VoiceRequest.from_tool_arguments(
+                arguments,
+                max_chars=int(getattr(config, "voice_max_chars", 160) or 160),
+            )
+        except ValueError as exc:
+            return f"语音请求无效：{exc}。请缩短内容后改用文字回复。"
+        if request.mode == "singing" and not bool(policy.get("singing_enabled", True)):
+            return "歌唱回复当前未启用，请直接用文字自然回复。"
+        decision = evaluate_voice_request(conversation_id, profile, request.reason, policy)
+        if not decision.allowed:
+            return f"语音请求未获允许：{decision.reason}。请直接用文字自然回复。"
+        self._pending_voice_requests[conversation_id] = request
+        return "语音请求已接受。最终回复不要重复这段话，也不要声称发送失败。"
+
+    async def _review_history_grounding(
+        self,
+        user_text: str,
+        candidate_reply: str,
+        recent_messages: list[dict[str, str]],
+    ) -> str:
+        import httpx
+
+        messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": (
+                    "你是对话事实审校器。只检查候选回复是否把 assistant 的旧话、"
+                    "推测或不存在的细节说成用户过去做过或说过的事实。"
+                    "role=user 才是用户原话，role=assistant 是模型旧回复。"
+                    "不得新增任何历史例子。用户在质疑无依据的猜测时，"
+                    "应由模型承认自己刚才乱猜，不要反过来要求用户提供证据。"
+                    "保持亲近自然的聊天口吻，禁止出现“证据、事实审校、role、候选回复”等内部词，"
+                    "不解释审校过程。"
+                ),
+            },
+            *recent_messages,
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": candidate_reply},
+            {
+                "role": "user",
+                "content": (
+                    "输出一个 JSON 对象，格式为 "
+                    '{"reply":"最终回复"}。'
+                    "事实有误就修正；事实有明确 user 消息依据就保留。"
+                ),
+            },
+        ]
+        payload: dict[str, Any] = {
+            "model": self.config.openai_model,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 900,
+        }
+        payload.update(
+            _provider_payload_overrides(
+                self.config.openai_base_url,
+                self.config.openai_model,
+            )
+        )
+        if (
+            "api.deepseek.com" in str(self.config.openai_base_url).casefold()
+            and str(self.config.openai_model).strip().casefold()
+            in {"deepseek-v4-flash", "deepseek-v4-pro"}
+        ):
+            payload["thinking"] = {"type": "enabled"}
+        headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
+        async with httpx.AsyncClient(timeout=45) as client:
+            data = await self._post_chat_completion(client, headers, payload)
+        raw = str(data["choices"][0]["message"].get("content") or "").strip()
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            return ""
+        try:
+            parsed = json.loads(match.group(0))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ""
+        reply = _normalize_reply(str(parsed.get("reply") or "")).strip()
+        if not reply or has_illegal_language_or_garbage(reply):
+            return ""
+        return reply[:1200].strip()
 
     async def _post_chat_completion(
         self,
@@ -966,6 +1595,10 @@ class AtriReplyEngine:
         except httpx.HTTPStatusError as exc:
             if "tools" not in payload or not _looks_like_tool_schema_error(exc):
                 raise
+            print(
+                "[atri] Current model endpoint rejected tool schemas; "
+                "explicit voice requests remain protected, autonomous tools are unavailable."
+            )
             retry_payload = dict(payload)
             retry_payload.pop("tools", None)
             retry_payload.pop("tool_choice", None)
@@ -988,6 +1621,7 @@ class AtriReplyEngine:
         context_profile: dict[str, Any] | None = None,
         iteration_decision: Any | None = None,
         tool_context: Any | None = None,
+        allow_reply_voice: bool | None = None,
     ) -> str:
         last_reply = ""
         retry_temperatures = (
@@ -1012,6 +1646,7 @@ class AtriReplyEngine:
                 context_profile=context_profile,
                 iteration_decision=iteration_decision,
                 tool_context=tool_context,
+                allow_reply_voice=allow_reply_voice,
                 temperature_override=temperature,
                 frequency_penalty_override=(
                     None
@@ -1026,7 +1661,7 @@ class AtriReplyEngine:
             last_reply = reply
             if reply and not has_illegal_language_or_garbage(reply):
                 return reply
-        return _language_guard_fallback(user_text, conversation_id)
+        raise RuntimeError("模型连续 3 次返回空内容、乱码或异常语言")
 
     def _remember_user_context(
         self, conversation_id: str, user_text: str, nickname: str | None = None
@@ -1055,40 +1690,120 @@ class AtriReplyEngine:
             self._history[conversation_id].append({"role": "assistant", "content": reply_text})
             self._recent_replies[conversation_id].append(reply_text)
 
-    def _recent_group_context(self, conversation_id: str) -> str:
+    def _recent_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        current_user_text: str = "",
+        limit: int = 12,
+    ) -> str:
         lines: list[str] = []
-        for entry in self.memory.recent_history(conversation_id, limit=10):
-            role = entry.get("role")
+        entries = self.memory.recent_history(conversation_id, limit=limit + 3)
+        skipped_current = False
+        selected: list[dict[str, Any]] = []
+        for entry in reversed(entries):
             text = str(entry.get("text") or "").strip()
-            text = _sanitize_group_mentions(text)
             if not text:
                 continue
             if is_memory_pollution_text(text):
                 continue
-            if role == "assistant":
+            role = entry.get("role")
+            if (
+                not skipped_current
+                and role == "user"
+                and current_user_text
+                and _normalize_for_compare(text)
+                == _normalize_for_compare(current_user_text)
+            ):
+                skipped_current = True
                 continue
-            else:
+            selected.append(entry)
+            if len(selected) >= limit:
+                break
+
+        is_group = conversation_id.startswith("group:")
+        for entry in reversed(selected):
+            role = entry.get("role")
+            text = str(entry.get("text") or "").strip()
+            if is_group:
+                text = _sanitize_group_mentions(text)
+            if role == "assistant":
+                speaker = "亚托莉"
+            elif is_group:
                 speaker = str(entry.get("nickname") or "群友").strip() or "群友"
                 if re.fullmatch(r"\d{5,}", speaker):
                     speaker = "群友"
-            lines.append(f"{speaker}: {text}")
-        return "\n".join(lines[-10:])
-
-    def _recent_private_context(self, conversation_id: str) -> str:
-        lines: list[str] = []
-        for entry in self.memory.recent_history(conversation_id, limit=10):
-            text = str(entry.get("text") or "").strip()
-            if not text:
-                continue
-            if is_memory_pollution_text(text):
-                continue
-            role = entry.get("role")
-            if role == "assistant":
-                continue
             else:
                 speaker = "用户"
             lines.append(f"{speaker}: {text}")
-        return "\n".join(lines[-8:])
+        return "\n".join(lines)
+
+    def _recent_conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        current_user_text: str = "",
+        limit: int = 12,
+    ) -> list[dict[str, str]]:
+        entries = self.memory.recent_history(conversation_id, limit=limit + 3)
+        skipped_current = False
+        selected: list[dict[str, Any]] = []
+        for entry in reversed(entries):
+            text = str(entry.get("text") or "").strip()
+            if not text or is_memory_pollution_text(text):
+                continue
+            role = str(entry.get("role") or "")
+            if (
+                not skipped_current
+                and role == "user"
+                and current_user_text
+                and _normalize_for_compare(text)
+                == _normalize_for_compare(current_user_text)
+            ):
+                skipped_current = True
+                continue
+            if role not in {"user", "assistant"}:
+                continue
+            selected.append(entry)
+            if len(selected) >= limit:
+                break
+
+        is_group = conversation_id.startswith("group:")
+        messages: list[dict[str, str]] = []
+        for entry in reversed(selected):
+            role = str(entry.get("role"))
+            text = str(entry.get("text") or "").strip()
+            if is_group:
+                text = _sanitize_group_mentions(text)
+            if role == "user" and is_group:
+                speaker = str(entry.get("nickname") or "群友").strip() or "群友"
+                if re.fullmatch(r"\d{5,}", speaker):
+                    speaker = "群友"
+                text = f"{speaker}: {text}"
+            messages.append({"role": role, "content": text})
+        return messages
+
+    def _recent_group_context(
+        self,
+        conversation_id: str,
+        current_user_text: str = "",
+    ) -> str:
+        return self._recent_conversation_context(
+            conversation_id,
+            current_user_text=current_user_text,
+            limit=12,
+        )
+
+    def _recent_private_context(
+        self,
+        conversation_id: str,
+        current_user_text: str = "",
+    ) -> str:
+        return self._recent_conversation_context(
+            conversation_id,
+            current_user_text=current_user_text,
+            limit=12,
+        )
 
     def _needs_rewrite(self, conversation_id: str, user_text: str, reply_text: str) -> bool:
         if not reply_text or len(reply_text.strip()) < 2:
@@ -1133,39 +1848,26 @@ class AtriReplyEngine:
 
         return False
 
-    def _finalize_reply(self, conversation_id: str, user_text: str, reply_text: str) -> str:
+    def _finalize_reply(
+        self,
+        conversation_id: str,
+        user_text: str,
+        reply_text: str,
+        *,
+        strict_quality: bool = True,
+    ) -> str:
         reply_text = _normalize_reply(reply_text)
         if conversation_id.startswith("group:"):
             reply_text = _sanitize_group_mentions(reply_text)
-        if _is_correction(user_text) and _question_count(reply_text) > 0:
-            return _accepted_correction_reply(user_text) or (
-                "这次我改。之后先回你当前重点，信息不够才问一个具体问题，不再用同一句话绕圈。"
-            )
-        if _asks_for_direct_suggestion(user_text) and not _is_distress(user_text):
+        if strict_quality and _question_count(reply_text) > 1:
             reply_text = _trim_extra_questions(reply_text, keep_questions=1)
-            if not _has_concrete_suggestion(reply_text):
-                return _direct_suggestion_fallback(user_text)
-        if _asks_for_stance(user_text):
-            reply_text = _trim_extra_questions(reply_text, keep_questions=1)
-            if not _has_stance(reply_text):
-                return _stance_fallback(user_text)
-        if _question_count(reply_text) > 1:
-            reply_text = _trim_extra_questions(reply_text, keep_questions=1)
-        if self._serious_mode_active(conversation_id) and _has_abstract_noise(reply_text):
-            return _persona_repair_fallback(
-                user_text,
-                reply_text,
-                serious_mode=True,
-                conversation_id=conversation_id,
-            )
-        if _persona_violations(user_text, reply_text):
-            reply_text = _persona_repair_fallback(
-                user_text,
-                reply_text,
-                conversation_id=conversation_id,
-            )
+        if not reply_text:
+            raise RuntimeError("模型最终回复为空")
+        violations = _persona_violations(user_text, reply_text) if strict_quality else []
+        if strict_quality and violations:
+            raise RuntimeError(f"模型最终回复未通过质量检查：{'；'.join(violations)}")
         if has_illegal_language_or_garbage(reply_text):
-            return _language_guard_fallback(user_text, conversation_id)
+            raise RuntimeError("模型最终回复包含乱码或异常语言")
         return reply_text
 
     def _fallback_reply(self, conversation_id: str, text: str) -> str:
@@ -1197,6 +1899,9 @@ class AtriReplyEngine:
                 "高性能亚托莉会把机械兜底压掉：问问题先仔细分析，难受先哄人。"
             )
 
+        if any(word in text for word in ("天气", "气温", "下雨", "降温")):
+            return "实时天气我这边不能乱报。你先看手机天气或 QQ 天气；出门保守一点，带伞、带外套，别被天气偷袭。"
+
         if any(word in lowered for word in ("hi", "hello", "在吗")) or any(
             word in text for word in ("你好", "早上好", "晚上好")
         ):
@@ -1224,7 +1929,14 @@ class AtriReplyEngine:
         if any(word in text for word in ("吃饭", "饿", "早餐", "午饭", "晚饭")):
             return "那先解决吃饭问题。别只靠饮料和零食糊弄过去，主人要是不好好吃饭，亚托莉会生气气。"
 
-        if any(word in text for word in ("绷不住", "蚌埠住", "抽象", "逆天", "红温", "破防", "乐", "6")):
+        delivery_intent = detect_explicit_delivery_intent(text)
+        if delivery_intent is not None and delivery_intent.mode == "singing":
+            return (
+                "想唱给你听，但我现在还不能把歌词真正唱成歌。"
+                "我不想拿普通朗读糊弄你，等歌声练好后再认真唱给主人听。"
+            )
+
+        if _has_abstract_trigger(_intent_text(text)):
             return "轻松绷住"
 
         if any(word in text for word in ("[图片]", "[表情]", "[动画表情]", "[QQ表情]", "[表情包]", "[表情包/图片]")):
@@ -1253,6 +1965,21 @@ def _shorten(text: str, limit: int = 28) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[:limit]}..."
+
+
+def _model_failure_reply(error: Exception) -> str:
+    detail = re.sub(r"\s+", " ", str(error or "")).strip()
+    detail = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "sk-***", detail)
+    detail = detail[:220] or type(error).__name__
+    stage = (
+        "模型回复质量检查失败"
+        if any(marker in detail for marker in ("质量检查", "乱码", "异常语言", "空消息"))
+        else "聊天模型调用失败"
+    )
+    return (
+        f"回复失败：{stage}。错误信息：{detail}。"
+        "本条未使用本地内容模板，请在 WebUI 的“测试”页面检查模型连接和原始返回。"
+    )
 
 
 def _intent_text(text: str) -> str:
@@ -1475,6 +2202,112 @@ def _group_fallback_reply(
             "哼哒！",
         ]
     )
+
+
+def _proactive_fallback(event_type: str, is_group: bool = False) -> str:
+    if is_group:
+        group_choices = {
+            "continue_topic": [
+                "刚才那个话题其实还能再拐一步：你们更看重结果够不够好，还是过程别太折腾？",
+                "接着前面聊的，我有点好奇：如果只能保留一个优点，你们会留实用还是有趣？",
+            ],
+            "interest_topic": [
+                "来个容易接的话题：最近碰到的东西里，你们更愿意推荐一件好用的，还是一件纯粹好玩的？",
+                "想听听不同答案：一个兴趣能长期坚持，靠的是成就感，还是有人一起聊？",
+            ],
+            "guided_topic": [
+                "抛个小问题：遇到计划突然被打乱时，你们通常会立刻重排，还是先摆一会儿再说？",
+                "来选个倾向：空下来一小时，你们更想彻底休息，还是顺手完成一件拖了很久的小事？",
+            ],
+            "daily_share": [
+                "我发现有些小事做完只要五分钟，拖着却能占一天心情。你们最近有没有消灭掉这种小事？",
+                "突然想到，真正让一天变轻松的可能不是少做事，而是少惦记一件事。你们更认同哪边？",
+            ],
+            "check_in": [
+                "今天群里换个轻松入口：最近让你们觉得“还好没错过”的，是一件东西还是一件事？",
+                "来收集一点具体的好消息：今天有没有哪一刻，比你原本预想得顺利？",
+            ],
+            "encouragement": [
+                "今天不管推进多少都算进度。要是给自己记一笔，你们最想把哪件小事算上？",
+            ],
+        }
+        return random.choice(group_choices.get(event_type, group_choices["guided_topic"]))
+    choices = {
+        "morning": [
+            "早安。今天不用一开始就跑得很快，先把自己照顾好。",
+            "早上好，来看看你。希望今天至少有一件事顺着你的心意。",
+        ],
+        "goodnight": [
+            "时间不早了，今天没做完的事先放一放，别拿睡眠替它们买单。",
+            "来提醒你收收尾。今晚好好休息，明天再和那些事情较量。",
+        ],
+        "continue_topic": [
+            "我刚又想起我们上次聊的那件事了，不知道后来有没有新进展。",
+            "前面那个话题我还记着。你要是有后续，我确实有点想知道。",
+        ],
+        "interest_topic": [
+            "突然想到你喜欢的那些东西了。最近让你眼前一亮的，更偏实用还是纯粹有趣？",
+            "来聊点你真正感兴趣的：最近有没有一个发现，让你忍不住想推荐给别人？",
+        ],
+        "guided_topic": [
+            "抛个有点具体的问题：如果今天突然多出一小时，你会拿来彻底休息，还是完成一件拖着的小事？",
+            "我想听你的倾向：一件事做得快但普通，和做得慢但满意，你通常会选哪边？",
+        ],
+        "daily_share": [
+            "刚想到一件小事：有时候一天里最值得记住的，反而是一个很不起眼的瞬间。",
+            "我在想，普通日子也该留一点只属于自己的时间，哪怕只是安静几分钟。",
+        ],
+        "affection": [
+            "没什么任务，就是刚好想到你了，所以来留一句话。",
+            "突然有一点想和你说话。你忙你的，看到时再理我就好。",
+        ],
+        "encouragement": [
+            "来给你补一点偏心：今天不需要事事满分，能稳稳往前就已经很好。",
+            "不管今天推进了多少，都别只盯着没完成的部分，你做过的也算数。",
+        ],
+        "check_in": [
+            "来看看你今天过得怎么样。忙的话不用急着回，先顾好自己。",
+            "忽然想到你，就来问候一下。今天对你还算温柔吗？",
+        ],
+    }
+    return random.choice(choices.get(event_type, choices["check_in"]))
+
+
+def _needs_proactive_grounding_repair(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    patterns = (
+        r"(?:我|亚托莉)?(?:刚|刚才|已经|也)?(?:点进去|点开|打开)(?:看|试|玩)",
+        r"(?:我|亚托莉)(?:刚|刚才|已经|也)?(?:看过|看了|试过|试了|搜过|搜了|查过|查了|刷到)",
+        r"(?:刚|刚才)(?:看过|看了|试过|试了|搜过|搜了|查过|查了|刷到)",
+        r"(?:我|自己|亚托莉).{0,16}(?:做过|玩过|用过|去过|吃过|买过|遇到过|经历过|参加过|装过|写过)",
+    )
+    return any(re.search(pattern, compact) for pattern in patterns)
+
+
+def _needs_topic_guidance_repair(
+    text: str,
+    event_type: str,
+    guided_topics: bool,
+) -> bool:
+    if not guided_topics or event_type not in {
+        "guided_topic",
+        "continue_topic",
+        "interest_topic",
+        "daily_share",
+    }:
+        return False
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not any(mark in compact for mark in ("?", "？")):
+        return True
+    generic_questions = (
+        "最近怎么样",
+        "最近在干嘛",
+        "在干嘛",
+        "有什么想聊",
+        "今天过得好吗",
+        "大家最近如何",
+    )
+    return any(question in compact for question in generic_questions)
 
 
 def _normalize_reply(text: str) -> str:
@@ -1826,7 +2659,7 @@ def _direct_answer_override(
     ):
         return (
             "像平时一样启动 QQ 就行。后台监听器会自动拉起亚托莉服务和 NapCat；"
-            "如果 QQ 要扫码，就登录 3380609082，然后用另一个 QQ 发消息测试。"
+            "如果 QQ 要扫码，就登录你的机器人 QQ，然后用另一个 QQ 发消息测试。"
         )
 
     if "怎么停止" in intent_text and any(
@@ -1867,7 +2700,7 @@ def _direct_suggestion_fallback(user_text: str) -> str:
     if "推荐" in user_text and any(word in user_text for word in ("吃", "饭", "夜宵", "早餐", "午饭")):
         return "我推荐、螃蟹、或者粥配青菜和肉。亚托莉的偏好很明确：先吃热的，别拿零食糊弄自己。"
     if "怎么启动" in user_text:
-        return "像平时一样启动 QQ 就行。亚托莉的后台监听会自动拉起 NapCat 和聊天服务；如果 QQ 要扫码，就登录 3380609082。"
+        return "像平时一样启动 QQ 就行。亚托莉的后台监听会自动拉起 NapCat 和聊天服务；如果 QQ 要扫码，就登录你的机器人 QQ。"
     if "怎么办" in user_text or "怎么做" in user_text:
         return (
             "可以，我先不乱指挥。按现在信息，先确认最急的限制是什么，"
@@ -1932,10 +2765,33 @@ def _language_guard_fallback(user_text: str, conversation_id: str = "") -> str:
 
 
 def _looks_like_tool_schema_error(exc: Any) -> bool:
-    status_code = getattr(getattr(exc, "response", None), "status_code", None)
-    # These statuses are commonly returned by OpenAI-compatible backends that
-    # do not support the tools schema. Retry without tools to preserve old behavior.
-    return status_code in {400, 404, 422}
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code not in {400, 404, 422}:
+        return False
+    detail = str(getattr(response, "text", "") or "").casefold()
+    tool_markers = ("tool_choice", "tool call", '"tools"', "function_call", "function call")
+    rejection_markers = (
+        "unsupported",
+        "not support",
+        "unknown",
+        "unrecognized",
+        "not allowed",
+        "extra",
+        "schema",
+    )
+    return any(marker in detail for marker in tool_markers) and any(
+        marker in detail for marker in rejection_markers
+    )
+
+
+def _provider_payload_overrides(base_url: str, model: str) -> dict[str, Any]:
+    if (
+        "api.deepseek.com" in str(base_url).casefold()
+        and str(model).strip().casefold() in {"deepseek-v4-flash", "deepseek-v4-pro"}
+    ):
+        return {"thinking": {"type": "disabled"}}
+    return {}
 
 
 def _persona_violations(user_text: str, reply_text: str) -> list[str]:
@@ -2032,6 +2888,22 @@ def _uses_stale_meme_pile(reply_text: str) -> bool:
 
 def _fabricates_real_world_action(reply_text: str) -> bool:
     return any(pattern in reply_text for pattern in REAL_WORLD_ACTION_PATTERNS)
+
+
+def _needs_hard_reality_repair(reply_text: str) -> bool:
+    return any(pattern in reply_text for pattern in HARD_REALITY_CLAIM_PATTERNS)
+
+
+def _needs_history_grounding_review(reply_text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(reply_text or ""))
+    return bool(
+        re.search(
+            r"(?:上次|之前|以前|一向|总是|每次|前科|观察过|记得清清楚楚)"
+            r"|(?:这|那|本来就|明明就)(?:是|属于)(?:事实|真的)"
+            r"|我(?:又)?没说错|谁让你",
+            compact,
+        )
+    )
 
 
 def _persona_repair_fallback(

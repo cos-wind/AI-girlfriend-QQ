@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "source": "ATRI",
+      "zh": "亚托莉",
+      "en": "Atri",
+      "ja": "アトリ"
+    },
+    {
+      "source": "GPT-SoVITS",
+      "zh": "GPT SoVITS",
+      "en": "GPT So VITS",
+      "ja": "ジーピーティー ソヴィッツ"
+    },
+    {
+      "source": "NapCat",
+      "zh": "Nap Cat",
+      "en": "Nap Cat",
+      "ja": "ナップキャット"
+    },
+    {
+      "source": "QQ",
+      "zh": "Q Q",
+      "en": "Q Q",
+      "ja": "キューキュー"
+    },
+    {
+      "source": "余弦寄长风",
+      "zh": "余 弦 寄 长 风",
+      "en": "Yu Xian Ji Chang Feng",
+      "ja": "余弦寄長風"
+    },
+    {
+      "source": "原神",
+      "zh": "原 神",
+      "en": "Genshin",
+      "ja": "原神"
+    },
+    {
+      "source": "精神满满",
+      "zh": "京 神 满 满",
+      "en": "full of energy",
+      "ja": "元気いっぱい"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "id": "atri-singing-svc",
+  "model_root": "D:\\AtriModels\\voice\\singing",
+  "working_directory": "D:\\AtriModels\\voice\\singing\\runtime",
+  "timeout_seconds": 900,
+  "separator": [
+    "D:\\AtriModels\\voice\\singing\\runtime\\.venv\\Scripts\\python.exe",
+    "separate.py",
+    "--source",
+    "{source}",
+    "--vocal-output",
+    "{vocal}",
+    "--instrumental-output",
+    "{instrumental}"
+  ],
+  "converter": [
+    "D:\\AtriModels\\voice\\singing\\runtime\\.venv\\Scripts\\python.exe",
+    "convert.py",
+    "--source",
+    "{vocal}",
+    "--reference",
+    "{reference}",
+    "--output",
+    "{converted}",
+    "--pitch-shift",
+    "{pitch_shift}"
+  ],
+  "mixer": [
+    "D:\\AtriModels\\voice\\singing\\runtime\\.venv\\Scripts\\python.exe",
+    "mix.py",
+    "--vocal",
+    "{converted}",
+    "--instrumental",
+    "{instrumental}",
+    "--output",
+    "{output}"
+  ]
+}

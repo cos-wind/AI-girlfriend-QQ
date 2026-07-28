@@ -11,4 +11,6 @@ def outgoing_to_onebot_message(message: OutgoingMessage) -> str | list[dict[str,
     if message.kind == "face":
         face_id: int | str = int(message.content) if message.content.isdigit() else message.content
         return [{"type": "face", "data": {"id": face_id}}]
+    if message.kind == "record":
+        return [{"type": "record", "data": {"file": message.content, "cache": 0}}]
     return [{"type": "image", "data": {"file": message.content, "cache": 0}}]

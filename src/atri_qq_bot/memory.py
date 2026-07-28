@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -55,7 +57,9 @@ IMPLICIT_INTEREST_HINTS = _memory_core.IMPLICIT_INTEREST_HINTS
 class UserMemoryStore:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._loaded_file_state: tuple[int, int] | None = None
         self._data = self._load()
+        self._loaded_file_state = self._current_file_state()
         self._session_l3: dict[str, list[dict[str, Any]]] = {}
 
     def observe_user(
@@ -69,6 +73,8 @@ class UserMemoryStore:
         update_affection: bool | None = None,
         update_group_activity: bool | None = None,
         addressed_to_bot: bool = False,
+        visibility: str = "private",
+        source_context: str | None = None,
     ) -> None:
         if is_memory_pollution_text(text):
             return
@@ -104,6 +110,10 @@ class UserMemoryStore:
         item["last_user_at"] = now
         if not _is_group_conversation(conversation_id):
             item["last_affection_idle_decay_at"] = now
+        item.pop("next_proactive_at", None)
+        item.pop("next_proactive_event_type", None)
+        item["proactive_awaiting_reply"] = False
+        item["proactive_ignored_streak"] = 0
         item["emoji_count"] = int(item.get("emoji_count", 0)) + _emoji_count(text)
         item["question_count"] = int(item.get("question_count", 0)) + text.count("?") + text.count("？")
         style_flags = _style_flags(text)
@@ -119,7 +129,14 @@ class UserMemoryStore:
         affection_event = _classify_affection_event(text)
         if update_affection:
             _update_affection(item, affection_event, is_owner)
-        _remember_structured_from_user(item, text, now, affection_event)
+        _remember_structured_from_user(
+            item,
+            text,
+            now,
+            affection_event,
+            visibility=visibility,
+            source_context=source_context,
+        )
         self._save()
 
     def observe_bot(
@@ -197,6 +214,15 @@ class UserMemoryStore:
             update_affection=addressed_to_bot,
             update_group_activity=False,
             addressed_to_bot=addressed_to_bot,
+            visibility=f"group:{group_id}",
+            source_context=f"group:{group_id}",
+        )
+        self.remember_person_profile_from_group(
+            group_id,
+            user_id,
+            text,
+            now=now,
+            is_owner=is_owner,
         )
         if addressed_to_bot:
             self.observe_affection_event(
@@ -206,6 +232,31 @@ class UserMemoryStore:
                 is_owner=is_owner,
             )
         return group_conversation_id, member_conversation_id
+
+    def remember_person_profile_from_group(
+        self,
+        group_id: int | str,
+        user_id: int | str,
+        text: str,
+        now: float | None = None,
+        is_owner: bool = False,
+    ) -> None:
+        if is_memory_pollution_text(text):
+            return
+        now = now or time.time()
+        item = self._conversation(f"private:{user_id}")
+        _ensure_structured_memory(item)
+        _initialize_affection(item, is_owner)
+        affection_event = _classify_affection_event(text)
+        _remember_structured_from_user(
+            item,
+            text,
+            now,
+            affection_event,
+            visibility=f"group:{group_id}",
+            source_context=f"group:{group_id}",
+        )
+        self._save()
 
     def observe_affection_event(
         self,
@@ -276,7 +327,7 @@ class UserMemoryStore:
 
     def profile(self, conversation_id: str, now: float | None = None) -> dict[str, Any]:
         now = now or time.time()
-        item = self._conversation(conversation_id, save=False)
+        item = self._profile_item(conversation_id)
         _ensure_structured_memory(item)
         if _decay_event_memories(item, now):
             self._save()
@@ -344,21 +395,21 @@ class UserMemoryStore:
             for rule in (item.get("accepted_iteration_rules") or [])[-4:]
             if isinstance(rule, dict) and rule.get("rule")
         ]
-        rejected_rules = [
-            rule.get("rule")
-            for rule in (item.get("rejected_iteration_rules") or [])[-4:]
-            if isinstance(rule, dict) and rule.get("rule")
-        ]
         if accepted_rules:
             adaptation_styles.append(
                 f"已采纳长期对话规则：{'；'.join(accepted_rules)}。这些规则要优先执行。"
             )
-        if rejected_rules:
-            adaptation_styles.append(
-                f"已驳回或保留判断的修正：{'；'.join(rejected_rules)}。不要为了迁就而破坏人设、边界或防刷屏。"
-            )
         last_iteration = item.get("last_iteration_decision")
-        if isinstance(last_iteration, dict):
+        last_iteration_at = (
+            _as_float(last_iteration.get("at"))
+            if isinstance(last_iteration, dict)
+            else None
+        )
+        if (
+            isinstance(last_iteration, dict)
+            and last_iteration_at is not None
+            and now - last_iteration_at <= 30 * 60
+        ):
             action = last_iteration.get("action")
             reason = last_iteration.get("reason")
             if action == "accept":
@@ -408,6 +459,25 @@ class UserMemoryStore:
             "prompt_hint": f"{length_style}{pace_style}{emoji_style}{''.join(adaptation_styles)}",
         }
 
+    def _profile_item(self, conversation_id: str) -> dict[str, Any]:
+        item = self._conversation(conversation_id, save=False)
+        member = _group_member_identity(conversation_id)
+        if not member:
+            return item
+
+        group_id, user_id = member
+        canonical = self._data.get("conversations", {}).get(f"private:{user_id}")
+        if not isinstance(canonical, dict):
+            return item
+
+        merged = dict(item)
+        merged["structured_memory"] = _merge_group_safe_structured_memory(
+            item,
+            canonical,
+            f"group:{group_id}",
+        )
+        return merged
+
     def recall_context(
         self,
         conversation_id: str,
@@ -445,6 +515,7 @@ class UserMemoryStore:
         cooldown_minutes: int,
         now: float | None = None,
     ) -> list[tuple[str, dict[str, Any]]]:
+        self._reload_if_changed()
         now = now or time.time()
         due: list[tuple[str, dict[str, Any]]] = []
         idle_seconds = idle_minutes * 60
@@ -454,12 +525,17 @@ class UserMemoryStore:
             target = item.get("target") or {}
             if target.get("message_type") != "private" or not target.get("user_id"):
                 continue
+            override = _proactive_override(item.get("proactive_override"))
+            if override == "deny":
+                continue
 
             if _decay_private_affection_for_idle(item, now):
                 self._save()
             multiplier = _private_nudge_multiplier(
                 float(item.get("affection_score", DEFAULT_AFFECTION))
             )
+            if multiplier is None and override == "allow":
+                multiplier = PRIVATE_NUDGE_NORMAL_MULTIPLIER
             if multiplier is None:
                 continue
 
@@ -487,6 +563,7 @@ class UserMemoryStore:
         max_silence_days: int | None = None,
         now: float | None = None,
     ) -> list[tuple[str, dict[str, Any]]]:
+        self._reload_if_changed()
         now = now or time.time()
         due: list[tuple[str, dict[str, Any]]] = []
         idle_seconds = idle_minutes * 60
@@ -506,6 +583,8 @@ class UserMemoryStore:
                 continue
             target = item.get("target") or {}
             if target.get("message_type") != "group" or not target.get("group_id"):
+                continue
+            if _proactive_override(item.get("proactive_override")) == "deny":
                 continue
 
             last_user_at = _as_float(item.get("last_user_at"))
@@ -547,6 +626,145 @@ class UserMemoryStore:
         item["last_bot_at"] = item["last_idle_nudge_at"]
         self._save()
 
+    def proactive_candidates(
+        self,
+        owner_qqs: Iterable[int],
+        owner_only: bool,
+        include_groups: bool = False,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        self._reload_if_changed()
+        owner_ids = [int(value) for value in owner_qqs if int(value) > 0]
+        candidates: dict[int, tuple[str, dict[str, Any]]] = {
+            user_id: (
+                f"private:{user_id}",
+                {"message_type": "private", "user_id": user_id},
+            )
+            for user_id in owner_ids
+        }
+        if not owner_only:
+            for conversation_id, item in self._data.get("conversations", {}).items():
+                target = item.get("target") or {}
+                if target.get("message_type") != "private" or not target.get("user_id"):
+                    continue
+                user_id = int(target["user_id"])
+                candidates[user_id] = (conversation_id, dict(target))
+
+        groups: list[tuple[str, dict[str, Any]]] = []
+        if include_groups:
+            for conversation_id, item in self._data.get("conversations", {}).items():
+                if not conversation_id.startswith("group:") or ":user:" in conversation_id:
+                    continue
+                target = item.get("target") or {}
+                if target.get("message_type") == "group" and target.get("group_id"):
+                    groups.append((conversation_id, dict(target)))
+        return list(candidates.values()) + groups
+
+    def proactive_state(
+        self,
+        conversation_id: str,
+        is_owner: bool = False,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        now = now or time.time()
+        item = self._conversation(conversation_id)
+        _ensure_structured_memory(item)
+        is_group = conversation_id.startswith("group:") and ":user:" not in conversation_id
+        changed = False
+        if is_group:
+            before_activity = item.get("group_activity_score")
+            _decay_group_activity(item, now)
+            changed = item.get("group_activity_score") != before_activity
+        else:
+            before_affection = item.get("affection_score")
+            _initialize_affection(item, is_owner)
+            changed = _decay_private_affection_for_idle(item, now)
+            changed = changed or item.get("affection_score") != before_affection
+        if changed:
+            self._save()
+        return {
+            "affection_score": float(item.get("affection_score", DEFAULT_AFFECTION)),
+            "group_activity_score": float(item.get("group_activity_score", GROUP_ACTIVITY_DEFAULT)),
+            "message_count": int(item.get("message_count", 0)),
+            "last_user_at": _as_float(item.get("last_user_at")),
+            "last_bot_at": _as_float(item.get("last_bot_at")),
+            "message_type": "group" if is_group else "private",
+            "next_at": _as_float(item.get("next_proactive_at")),
+            "next_event_type": item.get("next_proactive_event_type"),
+            "last_at": _as_float(item.get("last_proactive_at")),
+            "last_event_type": item.get("last_proactive_event_type"),
+            "last_source": item.get("last_proactive_source"),
+            "daily_date": item.get("proactive_daily_date"),
+            "daily_count": int(item.get("proactive_daily_count", 0)),
+            "ignored_streak": int(item.get("proactive_ignored_streak", 0)),
+            "awaiting_reply": bool(item.get("proactive_awaiting_reply", False)),
+            "event_dates": dict(item.get("proactive_event_dates") or {}),
+            "recent_messages": list(item.get("recent_proactive_messages") or [])[-8:],
+            "proactive_override": _proactive_override(item.get("proactive_override")),
+        }
+
+    def set_proactive_plan(
+        self,
+        conversation_id: str,
+        scheduled_at: float,
+        event_type: str,
+    ) -> None:
+        item = self._conversation(conversation_id)
+        item["next_proactive_at"] = float(scheduled_at)
+        item["next_proactive_event_type"] = str(event_type)
+        self._save()
+
+    def clear_proactive_plan(self, conversation_id: str) -> None:
+        item = self._conversation(conversation_id)
+        changed = False
+        for key in ("next_proactive_at", "next_proactive_event_type"):
+            if key in item:
+                item.pop(key, None)
+                changed = True
+        if changed:
+            self._save()
+
+    def note_proactive_unanswered(self, conversation_id: str) -> int:
+        item = self._conversation(conversation_id)
+        if item.get("proactive_awaiting_reply"):
+            item["proactive_ignored_streak"] = min(
+                8,
+                int(item.get("proactive_ignored_streak", 0)) + 1,
+            )
+            item["proactive_awaiting_reply"] = False
+            self._save()
+        return int(item.get("proactive_ignored_streak", 0))
+
+    def mark_proactive_sent(
+        self,
+        conversation_id: str,
+        event_type: str,
+        text: str,
+        source: str,
+        local_date: str,
+        now: float | None = None,
+    ) -> None:
+        sent_at = now or time.time()
+        item = self._conversation(conversation_id)
+        count = int(item.get("proactive_daily_count", 0))
+        if item.get("proactive_daily_date") != local_date:
+            count = 0
+        item["proactive_daily_date"] = local_date
+        item["proactive_daily_count"] = count + 1
+        item["last_proactive_at"] = sent_at
+        item["last_proactive_event_type"] = str(event_type)
+        item["last_proactive_source"] = str(source)
+        item["proactive_awaiting_reply"] = True
+        item["last_bot_at"] = sent_at
+        item.pop("next_proactive_at", None)
+        item.pop("next_proactive_event_type", None)
+        dates = dict(item.get("proactive_event_dates") or {})
+        dates[str(event_type)] = local_date
+        item["proactive_event_dates"] = dates
+        recent = list(item.get("recent_proactive_messages") or [])
+        recent.append({"at": sent_at, "event_type": str(event_type), "text": str(text)[:240], "source": str(source)})
+        item["recent_proactive_messages"] = recent[-8:]
+        self._save()
+
     def due_morning_targets(
         self,
         owner_qqs: Iterable[int],
@@ -555,6 +773,7 @@ class UserMemoryStore:
         timezone_name: str,
         now: datetime | None = None,
     ) -> list[tuple[str, dict[str, Any]]]:
+        self._reload_if_changed()
         timezone = safe_zoneinfo(timezone_name)
         now = now.astimezone(timezone) if now else datetime.now(timezone)
         hour, minute = parse_hhmm(scheduled_time)
@@ -611,12 +830,27 @@ class UserMemoryStore:
         return candidates
 
     def _conversation(self, conversation_id: str, save: bool = True) -> dict[str, Any]:
+        self._reload_if_changed()
         conversations = self._data.setdefault("conversations", {})
         if conversation_id not in conversations:
             conversations[conversation_id] = {}
             if save:
                 self._save()
         return conversations[conversation_id]
+
+    def _current_file_state(self) -> tuple[int, int] | None:
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _reload_if_changed(self) -> None:
+        current_state = self._current_file_state()
+        if current_state == self._loaded_file_state:
+            return
+        self._data = self._load()
+        self._loaded_file_state = self._current_file_state()
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -633,12 +867,74 @@ class UserMemoryStore:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(".tmp")
-        tmp_path.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp_path.replace(self.path)
+        tmp_path = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(
+                json.dumps(self._data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            for attempt in range(4):
+                try:
+                    tmp_path.replace(self.path)
+                    break
+                except PermissionError:
+                    if attempt >= 3:
+                        raise
+                    time.sleep(0.025 * (attempt + 1))
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        self._loaded_file_state = self._current_file_state()
+
+
+def _group_member_identity(conversation_id: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"group:([^:]+):user:([^:]+)", str(conversation_id or ""))
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _merge_group_safe_structured_memory(
+    member_item: dict[str, Any],
+    canonical_item: dict[str, Any],
+    group_scope: str,
+) -> dict[str, list[dict[str, Any]]]:
+    merged: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "candidates": []}
+    member_memory = _ensure_structured_memory(member_item)
+    canonical_memory = _ensure_structured_memory(canonical_item)
+    for bucket in ("l1", "l2", "candidates"):
+        seen: set[str] = set()
+        for entry in canonical_memory.get(bucket, []):
+            if not isinstance(entry, dict) or not _entry_visible_in_group(entry, group_scope):
+                continue
+            key = str(entry.get("memory_key") or entry.get("id") or id(entry))
+            if key not in seen:
+                merged[bucket].append(dict(entry))
+                seen.add(key)
+        for entry in member_memory.get(bucket, []):
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("memory_key") or entry.get("id") or id(entry))
+            if key not in seen:
+                merged[bucket].append(dict(entry))
+                seen.add(key)
+    return merged
+
+
+def _entry_visible_in_group(entry: dict[str, Any], group_scope: str) -> bool:
+    visibility = entry.get("visibility")
+    if visibility == "public" or visibility == group_scope:
+        return True
+    if isinstance(visibility, list) and (
+        "public" in visibility or group_scope in visibility
+    ):
+        return True
+    return False
+
+
+def _proactive_override(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower()
+    return normalized if normalized in {"auto", "allow", "deny"} else "auto"
 
 
 _running_average = _memory_core._running_average

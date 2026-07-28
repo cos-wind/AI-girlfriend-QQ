@@ -10,7 +10,7 @@
 
 ```text
 云服务器 / NAS
-├─ NapCat QQ，登录 3380609082
+├─ NapCat QQ，登录你的机器人 QQ
 ├─ 亚托莉服务，监听 ws://127.0.0.1:8765/onebot
 └─ 模型接口：云端 Ollama 或 OpenAI 兼容 API
 ```
@@ -34,7 +34,7 @@ sudo nano /opt/atri-qq-bot/.env
 至少检查这些项：
 
 ```env
-BOT_QQ=3380609082
+BOT_QQ=YOUR_BOT_QQ
 OWNER_QQ=你的QQ号
 OPENAI_BASE_URL=http://127.0.0.1:11434/v1
 OPENAI_MODEL=qwen2.5:7b

@@ -13,3 +13,7 @@ data/runtime/
 data/webui/
 data/stickers/_chat_history/
 data/stickers/_deleted/
+data/voice/cache/
+data/voice/profiles/
+data/voice/references/
+data/voice/singing-pipeline.json

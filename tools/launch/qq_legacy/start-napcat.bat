@@ -1,10 +1,10 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title NapCat QQ 3380609082
+title NapCat QQ %QQ_UIN%
 
-set "QQ_UIN=3380609082"
-set "NAPCAT_DIR=D:\Tools\NapCat\OneKey\NapCat.44498.Shell\versions\9.9.26-44498\resources\app\napcat"
+set "QQ_UIN=YOUR_BOT_QQ"
+set "NAPCAT_DIR=C:\Path\To\NapCat"  :: TODO: set your NapCat path
 set "BOT_WS=ws://127.0.0.1:8765/onebot"
 
 echo ========================================

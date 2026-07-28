@@ -225,7 +225,6 @@ MEMORY_TOPIC_BLOCKLIST = {
     "动画表情",
     "QQ表情",
     "表情包",
-    "3380609082",
     "别处理你那破任务了",
     "你别处理这任务了",
 }
@@ -585,10 +584,12 @@ def _remember_structured_from_user(
     text: str,
     now: float,
     affection_event: dict[str, Any] | None = None,
+    visibility: str = "private",
+    source_context: str | None = None,
 ) -> None:
     memory = _ensure_structured_memory(item)
     _apply_user_corrections(memory, text, now)
-    style_candidate = _actionable_style_candidate(text, now)
+    style_candidate = _actionable_style_candidate(text, now, visibility, source_context)
     style_memory_id = _upsert_l1_candidate(memory, style_candidate, now) if style_candidate else None
     if _is_negative_quality_complaint(text):
         if style_memory_id:
@@ -603,13 +604,13 @@ def _remember_structured_from_user(
 
     new_ids: list[str] = [style_memory_id] if style_memory_id else []
     current_affection = float(item.get("affection_score", DEFAULT_AFFECTION))
-    for event in _extract_l2_events(text, now):
+    for event in _extract_l2_events(text, now, visibility, source_context):
         _attach_affection_metadata(event, affection_event, current_affection)
         memory_id = _upsert_l2(memory, event, now)
         if memory_id:
             new_ids.append(memory_id)
 
-    for candidate in _extract_l1_candidates(text, now):
+    for candidate in _extract_l1_candidates(text, now, visibility, source_context):
         _attach_affection_metadata(candidate, affection_event, current_affection)
         memory_id = _upsert_l1_candidate(memory, candidate, now)
         if memory_id:
@@ -617,7 +618,12 @@ def _remember_structured_from_user(
 
     _link_related_memories(memory, new_ids)
 
-def _actionable_style_candidate(text: str, now: float) -> dict[str, Any] | None:
+def _actionable_style_candidate(
+    text: str,
+    now: float,
+    visibility: str = "private",
+    source_context: str | None = None,
+) -> dict[str, Any] | None:
     stripped = str(text or "").strip()
     if not stripped:
         return None
@@ -630,6 +636,8 @@ def _actionable_style_candidate(text: str, now: float) -> dict[str, Any] | None:
         0.8,
         "explicit",
         now,
+        visibility=visibility,
+        source_context=source_context,
     )
 
 def _style_rule_value(text: str) -> str:
@@ -647,9 +655,15 @@ def _style_rule_value(text: str) -> str:
         return _shorten(text, 80)
     return _shorten(text, 80)
 
-def _extract_l1_candidates(text: str, now: float) -> list[dict[str, Any]]:
+def _extract_l1_candidates(
+    text: str,
+    now: float,
+    visibility: str = "private",
+    source_context: str | None = None,
+) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     stripped = text.strip()
+    negative_values = _negative_preference_values(stripped)
 
     birthday = re.search(
         r"(?:我的)?生日(?:是|在|：|:)?\s*((?:[0-9]{4}年)?[0-9]{1,2}月[0-9]{1,2}[日号]?|[0-9]{1,2}[./-][0-9]{1,2})",
@@ -657,33 +671,92 @@ def _extract_l1_candidates(text: str, now: float) -> list[dict[str, Any]]:
     )
     if birthday:
         candidates.append(
-            _candidate("profile_fact", "生日", birthday.group(1), 0.8, "explicit", now)
+            _candidate(
+                "profile_fact",
+                "生日",
+                birthday.group(1),
+                0.8,
+                "explicit",
+                now,
+                visibility=visibility,
+                source_context=source_context,
+            )
         )
 
     nickname = re.search(r"(?:我叫|叫我|以后叫我|你可以叫我)\s*([^，。！？!?]{1,12})", stripped)
     if nickname:
         value = _clean_value(nickname.group(1))
         if value and "亚托莉" not in value:
-            candidates.append(_candidate("profile_fact", "称呼", value, 0.8, "explicit", now))
+            candidates.append(
+                _candidate(
+                    "profile_fact",
+                    "称呼",
+                    value,
+                    0.8,
+                    "explicit",
+                    now,
+                    visibility=visibility,
+                    source_context=source_context,
+                )
+            )
 
     for pattern, key_prefix in (
-        (r"我(?:真的|很|超|也|平时)?(?:喜欢|爱)(?:吃|喝)\s*([^，。！？!?]{1,18})", "喜欢的食物"),
-        (r"我(?:真的|很|超|也|平时)?(?:喜欢|爱)(?:看|玩|做)\s*([^，。！？!?]{1,18})", "兴趣爱好"),
-        (r"我(?:真的|很|超|也|平时)?(?:喜欢|爱)\s*([^，。！？!?]{1,18})", "偏好"),
-        (r"我(?:不喜欢|讨厌)(?:吃|喝|看|玩|做)?\s*([^，。！？!?]{1,18})", "讨厌"),
+        (r"我(?:真的|很|超|也|平时|经常|常常|一直|其实)*(?:喜欢|爱)(?:吃|喝)\s*([^，。！？!?]{1,18})", "喜欢的食物"),
+        (r"我(?:真的|很|超|也|平时|经常|常常|一直|其实)*(?:喜欢|爱)(?:看|玩|做)\s*([^，。！？!?]{1,18})", "兴趣爱好"),
+        (r"我(?:真的|很|超|也|平时|经常|常常|一直|其实)*(?:喜欢|爱)\s*([^，。！？!?]{1,18})", "偏好"),
+        (r"(?:我)?(?:真的|很|超|也|平时|经常|常常|一直|其实)*(?:不喜欢|不爱|讨厌|不喝|不吃)(?:吃|喝|看|玩|做)?\s*([^，。！？!?]{1,18})", "讨厌"),
     ):
         for match in re.finditer(pattern, stripped):
             value = _clean_value(match.group(1))
-            if _valid_preference_value(value):
+            if _valid_preference_value(value) and not _conflicts_with_values(
+                value, negative_values
+            ):
                 candidates.append(
-                    _candidate("preference", f"{key_prefix}:{value}", value, 0.8, "explicit", now)
+                    _candidate(
+                        "preference",
+                        f"{key_prefix}:{value}",
+                        value,
+                        0.8,
+                        "explicit",
+                        now,
+                        visibility=visibility,
+                        source_context=source_context,
+                    )
                 )
 
     identity = re.search(r"(?:我是|我的专业是|我的职业是)\s*([^，。！？!?]{2,18})", stripped)
     if identity:
         value = _clean_value(identity.group(1))
         if value and not any(noise in value for noise in ("机器人", "亚托莉")):
-            candidates.append(_candidate("profile_fact", "身份/专业", value, 0.8, "explicit", now))
+            candidates.append(
+                _candidate(
+                    "profile_fact",
+                    "身份/专业",
+                    value,
+                    0.8,
+                    "explicit",
+                    now,
+                    visibility=visibility,
+                    source_context=source_context,
+                )
+            )
+
+    habit = re.search(r"我(?:平时|经常|常常|一般|每天|习惯|通常)\s*([^，。！？!?]{2,24})", stripped)
+    if habit:
+        value = _clean_value(habit.group(1))
+        if _valid_preference_value(value):
+            candidates.append(
+                _candidate(
+                    "habit",
+                    f"习惯:{value}",
+                    value,
+                    0.75,
+                    "explicit",
+                    now,
+                    visibility=visibility,
+                    source_context=source_context,
+                )
+            )
 
     if any(word in stripped for word in ("短句", "直接", "别绕", "不要套话", "有逻辑")) and not _contains_any(stripped, ACTIONABLE_STYLE_HINTS):
         candidates.append(
@@ -694,23 +767,41 @@ def _extract_l1_candidates(text: str, now: float) -> list[dict[str, Any]]:
                 0.8,
                 "explicit",
                 now,
+                visibility=visibility,
+                source_context=source_context,
             )
         )
 
     for word in IMPLICIT_INTEREST_HINTS:
         if word in stripped and not any(word in str(c.get("value")) for c in candidates):
-            candidates.append(_candidate("interest", f"兴趣:{word}", word, 0.6, "implicit", now))
+            candidates.append(
+                _candidate(
+                    "interest",
+                    f"兴趣:{word}",
+                    word,
+                    0.6,
+                    "implicit",
+                    now,
+                    visibility=visibility,
+                    source_context=source_context,
+                )
+            )
 
     return candidates
 
-def _extract_l2_events(text: str, now: float) -> list[dict[str, Any]]:
+def _extract_l2_events(
+    text: str,
+    now: float,
+    visibility: str = "private",
+    source_context: str | None = None,
+) -> list[dict[str, Any]]:
     stripped = text.strip()
     if not any(hint in stripped for hint in EVENT_HINTS):
         return []
     if not TIME_HINT_PATTERN.search(stripped) and "持续" not in stripped and "以后" not in stripped:
         return []
     key = _event_key(stripped)
-    return [
+    events = [
         {
             "layer": "L2",
             "category": "event",
@@ -724,8 +815,12 @@ def _extract_l2_events(text: str, now: float) -> list[dict[str, Any]]:
             "last_mentioned_at": now,
             "state": "active",
             "associations": [],
+            "visibility": visibility,
         }
     ]
+    if source_context:
+        events[0]["source_context"] = source_context
+    return events
 
 def _candidate(
     category: str,
@@ -734,8 +829,10 @@ def _candidate(
     confidence: float,
     source_type: str,
     now: float,
+    visibility: str = "private",
+    source_context: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    candidate = {
         "category": category,
         "key": key,
         "value": _shorten(value, 120),
@@ -746,7 +843,11 @@ def _candidate(
         "updated_at": now,
         "last_mentioned_at": now,
         "sources": [{"at": now, "text": _shorten(value, 120), "type": source_type}],
+        "visibility": visibility,
     }
+    if source_context:
+        candidate["source_context"] = source_context
+    return candidate
 
 def _upsert_l1_candidate(
     memory: dict[str, Any],
@@ -756,6 +857,10 @@ def _upsert_l1_candidate(
     key = f"{candidate['category']}:{candidate['key']}"
     existing = _find_memory(memory["l1"], key)
     if existing:
+        if existing.get("locked"):
+            existing["last_mentioned_at"] = now
+            _append_source(existing, candidate, now)
+            return existing["id"]
         existing["confidence"] = min(1.0, max(float(existing.get("confidence", 0.0)), float(candidate["confidence"])) + 0.05)
         existing["evidence_count"] = int(existing.get("evidence_count", 1)) + 1
         existing["updated_at"] = now
@@ -765,6 +870,10 @@ def _upsert_l1_candidate(
 
     pending = _find_memory(memory["candidates"], key)
     if pending:
+        if pending.get("locked"):
+            pending["last_mentioned_at"] = now
+            _append_source(pending, candidate, now)
+            return pending["id"]
         pending["confidence"] = min(1.0, max(float(pending.get("confidence", 0.0)), float(candidate["confidence"])))
         pending["evidence_count"] = int(pending.get("evidence_count", 1)) + 1
         pending["updated_at"] = now
@@ -793,7 +902,13 @@ def _upsert_l1_candidate(
             "last_mentioned_at": now,
             "associations": [],
         }
-        for meta_key in ("sentiment", "importance", "affection_snapshot"):
+        for meta_key in (
+            "sentiment",
+            "importance",
+            "affection_snapshot",
+            "visibility",
+            "source_context",
+        ):
             if meta_key in pending:
                 promoted[meta_key] = pending[meta_key]
         memory["l1"].append(promoted)
@@ -809,12 +924,18 @@ def _upsert_l2(memory: dict[str, Any], event: dict[str, Any], now: float) -> str
     key = f"{event['category']}:{event['key']}"
     existing = _find_memory(memory["l2"], key)
     if existing:
+        if existing.get("locked"):
+            existing["last_mentioned_at"] = now
+            return existing["id"]
         existing["value"] = event["value"]
         existing["activity"] = 1.0
         existing["confidence"] = max(float(existing.get("confidence", 0.0)), float(event.get("confidence", 0.8)))
         existing["updated_at"] = now
         existing["last_mentioned_at"] = now
         existing["state"] = "active"
+        for meta_key in ("visibility", "source_context"):
+            if meta_key in event:
+                existing[meta_key] = event[meta_key]
         return existing["id"]
     event = dict(event)
     event["id"] = _memory_id("l2", key)
@@ -831,13 +952,14 @@ def _find_memory(items: list[dict[str, Any]], memory_key: str) -> dict[str, Any]
 
 def _append_source(entry: dict[str, Any], candidate: dict[str, Any], now: float) -> None:
     sources = list(entry.get("sources") or [])
-    sources.append(
-        {
-            "at": now,
-            "text": _shorten(str(candidate.get("value") or ""), 120),
-            "type": candidate.get("source_type", "explicit"),
-        }
-    )
+    source = {
+        "at": now,
+        "text": _shorten(str(candidate.get("value") or ""), 120),
+        "type": candidate.get("source_type", "explicit"),
+    }
+    if candidate.get("source_context"):
+        source["source_context"] = candidate["source_context"]
+    sources.append(source)
     entry["sources"] = sources[-6:]
 
 def _memory_id(layer: str, key: str) -> str:
@@ -857,6 +979,14 @@ def _link_related_memories(memory: dict[str, Any], memory_ids: list[str]) -> Non
         item["associations"] = sorted(associations)[-8:]
 
 def _apply_user_corrections(memory: dict[str, Any], text: str, now: float) -> None:
+    for value in _negative_preference_values(text):
+        _remove_positive_preference_memory(memory, value)
+        _upsert_l1_candidate(
+            memory,
+            _candidate("preference", f"讨厌:{value}", value, 0.85, "explicit", now),
+            now,
+        )
+
     if not any(word in text for word in ("不是", "不对", "我不喜欢", "别再", "不要记", "记错")):
         return
     for entry in memory.get("l1", []):
@@ -864,6 +994,48 @@ def _apply_user_corrections(memory: dict[str, Any], text: str, now: float) -> No
         if value and value in text:
             entry["confidence"] = max(0.0, float(entry.get("confidence", 0.6)) - 0.1)
             entry["updated_at"] = now
+
+def _negative_preference_values(text: str) -> list[str]:
+    stripped = str(text or "").strip()
+    values: list[str] = []
+    pattern = re.compile(
+        r"(?:我)?(?:真的|很|超|也|平时|经常|常常|一直|其实)*"
+        r"(?:不喜欢|不爱|讨厌|不喝|不吃|别再(?:说|提|记|推荐|给我)?|不要(?:说|提|记|推荐)?)"
+        r"(?:吃|喝|看|玩|做)?\s*([^，。！？!?；;]{1,18})"
+    )
+    for match in pattern.finditer(stripped):
+        value = _clean_value(match.group(1))
+        value = re.sub(r"^成", "", value).strip()
+        value = re.sub(
+            r"^(?:我)?(?:真的|很|超|也|平时|经常|常常|一直|其实)*(?:爱|喜欢)(?:吃|喝|看|玩|做)?",
+            "",
+            value,
+        ).strip()
+        value = re.sub(r"^(?:我)?(?:喝|吃|看|玩|做)", "", value).strip()
+        value = re.sub(r"(了|啦|呀|呢|吧)$", "", value).strip()
+        if _valid_preference_value(value) and value not in values:
+            values.append(value)
+    return values
+
+def _conflicts_with_values(value: str, blocked_values: list[str]) -> bool:
+    return any(
+        blocked and (blocked in value or value in blocked)
+        for blocked in blocked_values
+    )
+
+def _remove_positive_preference_memory(memory: dict[str, Any], value: str) -> None:
+    def conflicts(entry: dict[str, Any]) -> bool:
+        category = str(entry.get("category") or "")
+        key = str(entry.get("key") or "")
+        entry_value = str(entry.get("value") or "")
+        if category not in {"interest", "preference"}:
+            return False
+        if "讨厌" in key or "不喜欢" in key:
+            return False
+        return bool(value and (value in entry_value or entry_value in value or value in key))
+
+    for bucket in ("l1", "candidates"):
+        memory[bucket] = [entry for entry in memory.get(bucket, []) if not conflicts(entry)]
 
 def _decay_event_memories(item: dict[str, Any], now: float) -> bool:
     memory = _ensure_structured_memory(item)
@@ -998,6 +1170,8 @@ def _natural_predicate(key: str, value: str) -> str:
         return f"喜欢{value}"
     if "讨厌" in key:
         return f"不喜欢{value}"
+    if "习惯" in key or "habit" in key:
+        return f"平时习惯{value}"
     if "身份" in key or "专业" in key:
         return f"提到过自己是{value}"
     if "回复方式" in key or "communication" in key:

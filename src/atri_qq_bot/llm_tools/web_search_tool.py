@@ -28,24 +28,35 @@ async def search_web(arguments: dict[str, Any] | None = None, config: Any | None
         or DEFAULT_SEARCH_TIMEOUT_SECONDS
     )
 
+    errors: list[str] = []
     try:
         import httpx
 
-        url = _bing_news_rss_url(query)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
-                    )
-                },
-            )
-            response.raise_for_status()
-        return format_search_results(query, parse_bing_news_rss(response.text, max_results))
+            for source_name, url in (
+                ("Google News", _google_news_rss_url(query)),
+                ("Bing News", _bing_news_rss_url(query)),
+            ):
+                try:
+                    response = await client.get(url, headers=_request_headers())
+                    response.raise_for_status()
+                    results = parse_news_rss(response.text, max_results)
+                    if results:
+                        return format_search_results(query, results, source_name=source_name)
+                    errors.append(f"{source_name}: 没有结果")
+                except Exception as exc:
+                    errors.append(f"{source_name}: {_short_error(exc)}")
     except Exception as exc:
-        return f"搜索失败：{_short_error(exc)}。不要编造实时信息，可以说明现在没有拿到可靠搜索结果。"
+        errors.append(_short_error(exc))
+    detail = "；".join(errors)[:300] or "未知错误"
+    return f"搜索失败：{detail}。不要编造实时信息，可以说明现在没有拿到可靠搜索结果。"
+
+
+def _google_news_rss_url(query: str) -> str:
+    return (
+        "https://news.google.com/rss/search"
+        f"?q={quote_plus(query)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    )
 
 
 def _bing_news_rss_url(query: str) -> str:
@@ -53,6 +64,10 @@ def _bing_news_rss_url(query: str) -> str:
 
 
 def parse_bing_news_rss(text: str, max_results: int = DEFAULT_SEARCH_MAX_RESULTS) -> list[dict[str, str]]:
+    return parse_news_rss(text, max_results)
+
+
+def parse_news_rss(text: str, max_results: int = DEFAULT_SEARCH_MAX_RESULTS) -> list[dict[str, str]]:
     root = ET.fromstring(text)
     results: list[dict[str, str]] = []
     for item in root.findall(".//item"):
@@ -75,7 +90,11 @@ def parse_bing_news_rss(text: str, max_results: int = DEFAULT_SEARCH_MAX_RESULTS
     return results
 
 
-def format_search_results(query: str, results: list[dict[str, str]]) -> str:
+def format_search_results(
+    query: str,
+    results: list[dict[str, str]],
+    source_name: str = "新闻 RSS",
+) -> str:
     searched_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     if not results:
         return (
@@ -87,6 +106,7 @@ def format_search_results(query: str, results: list[dict[str, str]]) -> str:
     lines = [
         f"搜索时间：{searched_at} Asia/Shanghai",
         f"搜索关键词：{query}",
+        f"聚合来源：{source_name}",
         "搜索结果如下。回答时要结合发布时间判断时效性，无法确认发布时间时不要声称一定最新：",
     ]
     for index, result in enumerate(results, start=1):
@@ -129,3 +149,12 @@ def _short_error(exc: Exception) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     text = re.sub(r"\s+", " ", text)
     return _shorten(text, 160)
+
+
+def _request_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+        )
+    }

@@ -41,6 +41,33 @@ class ToolAnalysisResult:
     limitations: list[str] = field(default_factory=list)
     read_level: str = "full_content"
 
+    def needs_grounding_repair(self, reply_text: str) -> bool:
+        text = re.sub(r"\s+", "", str(reply_text or ""))
+        if not text or self.read_level == "full_content":
+            return False
+        if self.read_level == "partial_content":
+            return any(
+                claim in text
+                for claim in ("看完整个", "看完视频", "读完全文", "完整内容里")
+            )
+        unread_content_claims = (
+            "点开看了",
+            "点进去看",
+            "看完视频",
+            "视频里说",
+            "视频里讲",
+            "画面里",
+            "镜头里",
+            "听完了",
+            "听起来",
+            "旋律",
+            "音色",
+            "字幕里",
+            "全文里",
+            "文档里写",
+        )
+        return any(claim in text for claim in unread_content_claims)
+
     def prompt_context(self) -> str:
         source_text = "；".join(self.sources[:6]) or "用户消息"
         finding_text = "\n".join(f"- {item}" for item in self.findings[:8]) or "- 暂无可用正文"

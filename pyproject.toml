@@ -8,6 +8,7 @@ dependencies = [
   "httpx>=0.27.0",
   "imageio-ffmpeg>=0.5.1",
   "Pillow>=10.0.0",
+  "pypinyin>=0.53.0,<1.0",
   "pypdf>=4.0.0",
   "python-dotenv>=1.0.1",
   "websockets>=12.0",
@@ -20,6 +21,9 @@ dev = [
 
 [project.gui-scripts]
 atri-desktop-pet = "atri_desktop.app:main"
+
+[project.scripts]
+atri-voice-service = "atri_voice_service.server:main"
 
 [build-system]
 requires = ["setuptools>=69.0"]
