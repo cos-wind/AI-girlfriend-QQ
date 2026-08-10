@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>基于 OneBot/NapCat 协议的 AI 陪伴机器人</strong><br>
-  Function Calling · 情绪记忆 · 联网搜索 · 桌宠 · Web 管理面板
+  RAG 记忆检索 · Function Calling · 联网搜索 · 语音/歌声 · 工具箱 · 桌宠 · Web 管理面板
 </p>
 
 ---
@@ -11,25 +11,32 @@
 
 | 分支 | 版本 | 说明 |
 |------|------|------|
-| `v0.3` | **v0.3** (当前) | ✅ 新增语音模块 + 天气工具 + 主动规划 v2 + WebUI 增强 |
+| `main` / `v0.3` | **v0.3** (当前) | ✅ 默认分支，内容与 `v0.3` 同步，始终为最新版本 |
 | `v0.2` | **v0.2** | 重构为包结构 + LLM Function Calling 工具系统 |
 | `v0.1-original` | **v0.1** | 原始扁平文件版本，仅作存档 |
 
 ### v0.3 相比 v0.2 新增功能
 
+- **RAG 记忆检索** — 分层记忆 + 语义召回：
+  - `memory_parts/core.py` — L1/L2/L3 分层记忆（强化确认、活跃度衰减、沉睡）
+  - `retrieval/` — SQLite FTS5 索引（默认）+ 可选 bge-m3 向量化，`recall_context` 检索注入
+  - 后台异步提取，WebUI 可编辑带回写优先级
+- **LLM Agent 工具系统** — `llm_tools/`：
+  - Function Calling：`get_current_time`、`search_web`（Bing/Google News/arXiv/GitHub + 首条原文 grounding）
+  - Agent 协议 (`agent_protocol.py`)：多步工具协商，`web_page_tool` 自动读网页正文
 - **语音模块** — 完整 TTS/ASR 管线：
-  - `atri_voice_service/` — 独立 FastAPI HTTP 语音合成服务（GPT-SoVITS / Edge-TTS 双引擎）
-  - `atri_qq_bot/voice/` — QQ 端语音决策与发送（6 层决策链：配置→LLM Function Calling→请求消费→合成→质量门→发送）
+  - `atri_voice_service/` — 独立 HTTP 语音合成服务（GPT-SoVITS / Edge-TTS 双引擎）
+  - `atri_qq_bot/voice/` — QQ 端语音决策与发送（6 层决策链）
   - SenseVoice ASR 语音识别，支持热词优化和口音矫正
   - 质量门控：MOS 评分 + 时长校验，低质量自动降级为文字
-  - 流式语音回复（SSML），支持说话中被打断和响应式沉默检测
+  - 流式语音回复（SSML），支持说话中被打断
   - 语音训练脚本：GPT-SoVITS v2Pro LoRA 微调管线
-  - 说话人音色库管理（VoiceProfileStore）
-- **LLM 天气工具** (`src/atri_qq_bot/llm_tools/weather_tool.py`) — 通过 Function Calling 查询实时天气
-- **主动规划 v2** (`src/atri_qq_bot/proactive/planner.py + policy.py`) — 重构后的空闲关怀引擎，支持分层活动检测和多策略规划
-- **WebUI 增强** — 新增通话页面 (`call_page.py`) 和语音管理页面 (`voice_admin.py`)
-- **架构加固** — 迭代自纠错引擎优化、6 层架构梳理、OneBot v11 协议完整实现
-- **安全清理** — 所有硬编码 QQ 号和本地路径已替换为环境变量或占位符，适合开源发布
+- **歌声合成** — `atri_voice_service/singing*` + `tools/voice/`：人声分离、乐理分段、工程混音、质量门、全流程脚本
+- **工具箱 (Toolbox)** — 文档/表格/网页/图片/视频材料解析：PDF 抽取、OCR、本地视觉模型识图、视频关键帧分析、表格概览
+- **主动规划 v2** — 分层活动检测与多策略空闲关怀，群聊冷场插话
+- **WebUI 增强** — 配置、记忆、表情、语音/歌声、模型档案、Minecraft 桥接管理面板
+- **架构加固** — 迭代自纠错、OneBot v11 完整实现、桌面宠物启动链（`.venv pythonw` 无终端接管）
+- **安全清理** — 所有硬编码 QQ 号和本地路径已替换为占位符/环境变量，适合开源发布
 
 ---
 
@@ -62,6 +69,7 @@ NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/
 - 支持群聊低频冷场主动发言，默认冷场 90 分钟后才轻量插一句，单日单群最多 3 次。
 - 回复会自动拆成多条短句发送，模拟流式输出，避免长段刷屏。
 - 会记录用户聊天习惯，自动调整回复长短、节奏和表情频率。
+- 记忆分层沉淀：重要信息强化确认后进入长期记忆，长期无互动的记忆自动降权沉睡；支持语义检索召回历史相关记忆。
 - 支持自迭代纠错：用户指出错误时会自主判断，合理就认错改正，笼统就认一半并重答，越界或破坏人设的要求会傲娇拒绝。
 - 支持本地表情包：按情绪匹配图片，也支持自定义触发词。
 - 支持自动归档聊天记录里的图片/表情包，并从本地表情库主动发送。
@@ -70,7 +78,8 @@ NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/
 - 支持每天早上 7:30 主动发送元气早安，带防重复和补发窗口。
 - 内置亚托莉原作设定摘要和梗库，回复前会做人设校验。
 - 已接入桌面原 QQ 图标联动启动：点击原有 `QQ.lnk` 后，后台监听器会接管并恢复 QQ 界面，亚托莉和模型服务在后台启动，不新增桌面图标，不弹终端窗口。
-- 🔧 **Function Calling 工具系统**：LLM 自主调用 `get_current_time`（时间查询）和 `search_web`（联网搜索），不需要时不产生任何 token 开销。
+- 🔧 **LLM Agent 工具系统**：模型可自主调用时间查询、联网搜索（自动读原文）、网页正文抓取，不需要时不产生任何 token 开销。
+- 🧠 **语音与歌声**：可选语音回复（TTS/ASR）、歌声合成（人声分离 + 工程混音），由独立语音服务承载。
 
 ## 安装
 
