@@ -34,10 +34,13 @@ $PidFile = Join-Path $RuntimeDir "voice-service.pid"
 
 function Get-ListeningProcessId {
     param([int]$Port)
-    foreach ($Line in (& netstat -ano -p tcp 2>$null)) {
-        if ($Line -match "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
-            return [int]$Matches[1]
-        }
+    $Connection = Get-NetTCPConnection `
+        -LocalPort $Port `
+        -State Listen `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($Connection) {
+        return [int]$Connection.OwningProcess
     }
     return $null
 }
@@ -107,6 +110,13 @@ $env:ATRI_TTS_QUALITY_RETRIES = "1"
 $env:ATRI_SINGING_ENABLED = "true"
 $env:ATRI_SINGING_PIPELINE_MANIFEST = Join-Path $ProjectDir "data\voice\singing-pipeline.json"
 $env:ATRI_SINGING_MAXIMUM_JOBS = "50"
+$CompatPath = Join-Path $ProjectDir "tools\voice\compat"
+$ExistingPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($ExistingPythonPath)) {
+    $CompatPath
+} else {
+    $CompatPath + [IO.Path]::PathSeparator + $ExistingPythonPath
+}
 
 $Executable = if (Test-Path -LiteralPath $Pythonw) { $Pythonw } else { $Python }
 $Process = Start-Process `

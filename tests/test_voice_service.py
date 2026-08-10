@@ -1,9 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
 import math
+import os
 import struct
+import subprocess
 import sys
 import types
 import wave
@@ -63,10 +65,10 @@ from tools.voice.separate_singing_stems import _resolve_output_paths
 
 def test_parse_sensevoice_output_extracts_text_language_and_emotion() -> None:
     text, language, emotion = parse_sensevoice_output(
-        "<|zh|><|SAD|><|Speech|><|withitn|>浠婂ぉ鏈変竴鐐圭疮銆?
+        "<|zh|><|SAD|><|Speech|><|withitn|>今天有一点累。"
     )
 
-    assert text == "浠婂ぉ鏈変竴鐐圭疮銆?
+    assert text == "今天有一点累。"
     assert language == "zh"
     assert emotion == "sad"
 
@@ -78,15 +80,15 @@ def test_original_voice_library_indexes_labels_and_loose_named_clips(tmp_path: P
     labelled = dataset / "line.wav"
     labelled.write_bytes(b"RIFFvoice")
     (root / ".speaker.list").write_text(
-        "./dataset/ATRI/line.wav|ATRI|JP|銇娿伅銈堛亞銇斻仏銇勩伨銇橽n",
+        "./dataset/ATRI/line.wav|ATRI|JP|おはようございます\n",
         encoding="utf-8",
     )
-    loose = root / "鏃╀笂濂?mp3"
+    loose = root / "早上好.mp3"
     loose.write_bytes(b"voice")
     library = OriginalVoiceLibrary(root, tmp_path / "cache", refresh_seconds=1)
 
-    japanese = library.match("銇娿伅銈堛亞銇斻仏銇勩伨銇欍€?, "ja")
-    chinese = library.match("鏃╀笂濂斤紒", "zh")
+    japanese = library.match("おはようございます。", "ja")
+    chinese = library.match("早上好！", "zh")
 
     assert japanese is not None and japanese.path == labelled
     assert chinese is not None and chinese.path == loose
@@ -102,12 +104,12 @@ def test_original_voice_library_handles_flattened_speaker_list_paths(tmp_path: P
     source = root / "ATR_b101_008.wav"
     source.write_bytes(b"RIFFvoice")
     (root / ".speaker.list").write_text(
-        "./dataset/ATRI/ATR_b101_008.wav|ATRI|JP|銈淬儨銈淬儨\n",
+        "./dataset/ATRI/ATR_b101_008.wav|ATRI|JP|ゴボゴボ\n",
         encoding="utf-8",
     )
     library = OriginalVoiceLibrary(root, tmp_path / "cache")
 
-    match = library.match("銈淬儨銈淬儨", "ja")
+    match = library.match("ゴボゴボ", "ja")
 
     assert match is not None and match.path == source
 
@@ -115,11 +117,11 @@ def test_original_voice_library_handles_flattened_speaker_list_paths(tmp_path: P
 def test_original_voice_library_keeps_single_cjk_interjection(tmp_path: Path) -> None:
     root = tmp_path / "library"
     root.mkdir()
-    source = root / "鐤?mp3"
+    source = root / "疼.mp3"
     source.write_bytes(b"voice")
     library = OriginalVoiceLibrary(root, tmp_path / "cache")
 
-    match = library.match("鐤硷紒", "zh")
+    match = library.match("疼！", "zh")
 
     assert match is not None and match.path == source
 
@@ -128,16 +130,16 @@ def test_original_voice_library_prefers_handcrafted_contextual_reply(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "library"
-    handcrafted = root / "鎵嬫悡闊抽绱犳潗"
+    handcrafted = root / "手搓音频素材"
     duplicate = root / "other"
     handcrafted.mkdir(parents=True)
     duplicate.mkdir()
-    preferred = handcrafted / "鏃╀笂濂?mp3"
+    preferred = handcrafted / "早上好.mp3"
     preferred.write_bytes(b"handcrafted")
-    (duplicate / "鏃╀笂濂?mp3").write_bytes(b"duplicate")
+    (duplicate / "早上好.mp3").write_bytes(b"duplicate")
     library = OriginalVoiceLibrary(root, tmp_path / "cache")
 
-    match = library.match("鏃╀笂濂藉憖锛屼富浜猴紒", "zh")
+    match = library.match("早上好呀，主人！", "zh")
 
     assert match is not None and match.path == preferred
     assert match.source == "handcrafted"
@@ -146,13 +148,13 @@ def test_original_voice_library_prefers_handcrafted_contextual_reply(
 def test_original_voice_library_maps_equivalent_morning_greeting(
     tmp_path: Path,
 ) -> None:
-    root = tmp_path / "library" / "鎵嬫悡闊抽绱犳潗"
+    root = tmp_path / "library" / "手搓音频素材"
     root.mkdir(parents=True)
-    source = root / "鏃╀笂濂?mp3"
+    source = root / "早上好.mp3"
     source.write_bytes(b"handcrafted")
     library = OriginalVoiceLibrary(root.parent, tmp_path / "cache")
 
-    match = library.match("鏃╁畨", "zh")
+    match = library.match("早安", "zh")
 
     assert match is not None and match.path == source
     assert match.source == "handcrafted"
@@ -162,33 +164,33 @@ def test_original_voice_library_maps_equivalent_morning_greeting(
 def test_original_voice_library_contextual_fallback_broadens_handcrafted_match(
     tmp_path: Path,
 ) -> None:
-    root = tmp_path / "library" / "鎵嬫悡闊抽绱犳潗"
+    root = tmp_path / "library" / "手搓音频素材"
     root.mkdir(parents=True)
-    source = root / "鏃╀笂濂?mp3"
+    source = root / "早上好.mp3"
     source.write_bytes(b"handcrafted")
-    (root / "鐤?mp3").write_bytes(b"pain")
+    (root / "疼.mp3").write_bytes(b"pain")
     library = OriginalVoiceLibrary(root.parent, tmp_path / "cache")
 
-    match = library.match_contextual("鏃╀笂濂藉憖锛屼粖澶╀篃瑕佺簿绁炴弧婊″摝锛?, "zh")
+    match = library.match_contextual("早上好呀，今天也要精神满满哦！", "zh")
 
     assert match is not None and match.path == source
     assert match.source == "handcrafted"
     assert library.match_contextual("Good morning, Master!", "en").path == source
-    assert library.match_contextual("銇娿伅銈堛亞銆併優銈广偪銉硷紒", "ja").path == source
-    assert library.match_contextual("姣斿澶稿じ浠婂ぉ鐨勫ご鍍?, "zh") is None
-    assert library.match_contextual("鏈夌殑浜嬫儏闇€瑕佹參鎱㈠鐞?, "zh") is None
+    assert library.match_contextual("おはよう、マスター！", "ja").path == source
+    assert library.match_contextual("比如夸夸今天的头像", "zh") is None
+    assert library.match_contextual("有的事情需要慢慢处理", "zh") is None
 
 
 def test_original_voice_library_only_uses_singing_folder_for_singing(tmp_path: Path) -> None:
     root = tmp_path / "library"
-    singing = root / "姝屽敱"
+    singing = root / "歌唱"
     singing.mkdir(parents=True)
-    (root / "鏃╀笂濂?mp3").write_bytes(b"speech")
-    song = singing / "鏃╀笂濂?mp3"
+    (root / "早上好.mp3").write_bytes(b"speech")
+    song = singing / "早上好.mp3"
     song.write_bytes(b"song")
     library = OriginalVoiceLibrary(root, tmp_path / "cache")
 
-    match = library.match("鏃╀笂濂?, "zh", singing_only=True)
+    match = library.match("早上好", "zh", singing_only=True)
 
     assert match is not None and match.path == song
 
@@ -196,28 +198,28 @@ def test_original_voice_library_only_uses_singing_folder_for_singing(tmp_path: P
 def test_singing_provider_never_uses_ordinary_spoken_clip(tmp_path: Path) -> None:
     root = tmp_path / "library"
     root.mkdir()
-    (root / "鏃╀笂濂?mp3").write_bytes(b"speech")
+    (root / "早上好.mp3").write_bytes(b"speech")
     library = OriginalVoiceLibrary(root, tmp_path / "cache")
     provider = OriginalSingingProvider(library)
 
-    with pytest.raises(Exception, match="姝屽０绱犳潗"):
+    with pytest.raises(Exception, match="歌声素材"):
         asyncio.run(
             provider.synthesize(
-                VoiceRequest("鏃╀笂濂?, language="zh", mode="singing")
+                VoiceRequest("早上好", language="zh", mode="singing")
             )
         )
 
 
 def test_singing_provider_returns_matching_complete_song_clip(tmp_path: Path) -> None:
-    root = tmp_path / "library" / "姝屽敱"
+    root = tmp_path / "library" / "歌唱"
     root.mkdir(parents=True)
-    source = root / "鍟﹀暒鍟?mp3"
+    source = root / "啦啦啦.mp3"
     source.write_bytes(b"song")
     library = OriginalVoiceLibrary(root.parent, tmp_path / "cache")
     provider = OriginalSingingProvider(library)
 
     result = asyncio.run(
-        provider.synthesize(VoiceRequest("鍟﹀暒鍟?, language="zh", mode="singing"))
+        provider.synthesize(VoiceRequest("啦啦啦", language="zh", mode="singing"))
     )
 
     assert result.source == "original_clip"
@@ -235,10 +237,10 @@ def test_conversation_speech_pipeline_rejects_singing_requests(tmp_path: Path) -
         resources=InferenceResourceManager(),
     )
 
-    with pytest.raises(ProviderError, match="鏃ュ父璇煶"):
+    with pytest.raises(ProviderError, match="日常语音"):
         asyncio.run(
             pipeline.synthesize(
-                VoiceRequest("鍞变竴棣栨瓕", mode="singing"),
+                VoiceRequest("唱一首歌", mode="singing"),
                 "atri",
                 SpeechSynthesisOptions(
                     prefer_original=False,
@@ -270,7 +272,7 @@ def test_conversation_speech_pipeline_exposes_rejected_quality_report(
 
     class FakeAsr:
         async def transcribe(self, path: Path, language: str) -> TranscriptionResult:
-            return TranscriptionResult("鍠?, language)
+            return TranscriptionResult("喂", language)
 
     pipeline = ConversationSpeechPipeline(
         VoiceServiceConfig(original_library_dir=tmp_path),
@@ -281,10 +283,10 @@ def test_conversation_speech_pipeline_exposes_rejected_quality_report(
         resources=InferenceResourceManager(),
     )
 
-    with pytest.raises(ProviderError, match="璐ㄩ噺鏍囧噯") as error:
+    with pytest.raises(ProviderError, match="质量标准") as error:
         asyncio.run(
             pipeline.synthesize(
-                VoiceRequest("鏅氬畨", language="zh"),
+                VoiceRequest("晚安", language="zh"),
                 "atri",
                 SpeechSynthesisOptions(
                     prefer_original=False,
@@ -297,15 +299,15 @@ def test_conversation_speech_pipeline_exposes_rejected_quality_report(
 
     assert error.value.quality_report["rejected"] is True
     assert pipeline.last_quality == error.value.quality_report
-    assert pipeline.status()["quality_gate"]["last_report"]["transcribed"] == "鍠?
+    assert pipeline.status()["quality_gate"]["last_report"]["transcribed"] == "喂"
 
 
 def test_conversation_speech_pipeline_uses_contextual_original_after_tts_failure(
     tmp_path: Path,
 ) -> None:
-    root = tmp_path / "library" / "鎵嬫悡闊抽绱犳潗"
+    root = tmp_path / "library" / "手搓音频素材"
     root.mkdir(parents=True)
-    original = root / "鏃╀笂濂?mp3"
+    original = root / "早上好.mp3"
     original.write_bytes(b"official")
     profiles = VoiceProfileStore(tmp_path / "profiles")
     profiles.save(VoiceProfile(id="atri", display_name="ATRI"))
@@ -318,7 +320,7 @@ def test_conversation_speech_pipeline_uses_contextual_original_after_tts_failure
             *,
             variation: int = 0,
         ) -> SynthesisResult:
-            raise ProviderError("GPT-SoVITS 鏆傛椂澶辫触", retryable=True)
+            raise ProviderError("GPT-SoVITS 暂时失败", retryable=True)
 
     pipeline = ConversationSpeechPipeline(
         VoiceServiceConfig(original_library_dir=root.parent),
@@ -331,7 +333,7 @@ def test_conversation_speech_pipeline_uses_contextual_original_after_tts_failure
 
     result = asyncio.run(
         pipeline.synthesize(
-            VoiceRequest("鏃╀笂濂藉憖锛屼粖澶╀篃瑕佺簿绁炴弧婊″摝", language="zh"),
+            VoiceRequest("早上好呀，今天也要精神满满哦", language="zh"),
             "atri",
             SpeechSynthesisOptions(
                 prefer_original=True,
@@ -345,7 +347,7 @@ def test_conversation_speech_pipeline_uses_contextual_original_after_tts_failure
 
     assert result.source == "original_context_fallback"
     assert result.audio_path.read_bytes() == b"official"
-    assert result.quality["requested_text"] == "鏃╀笂濂藉憖锛屼粖澶╀篃瑕佺簿绁炴弧婊″摝"
+    assert result.quality["requested_text"] == "早上好呀，今天也要精神满满哦"
 
 
 def test_conversation_speech_pipeline_accepts_safe_best_effort_rescue(
@@ -368,7 +370,7 @@ def test_conversation_speech_pipeline_accepts_safe_best_effort_rescue(
 
     class NearAsr:
         async def transcribe(self, path: Path, language: str) -> TranscriptionResult:
-            return TranscriptionResult("浣犱咯杩欐槸杞洖鐐规垜鎴戝摢鍎夸篃涓嶅幓", language)
+            return TranscriptionResult("你俩这是轮回点我我哪儿也不去", language)
 
     pipeline = ConversationSpeechPipeline(
         VoiceServiceConfig(original_library_dir=tmp_path / "library"),
@@ -381,7 +383,7 @@ def test_conversation_speech_pipeline_accepts_safe_best_effort_rescue(
 
     result = asyncio.run(
         pipeline.synthesize(
-            VoiceRequest("浣犱咯杩欐槸杞暘鐐规垜鎴戝摢鍎夸篃涓嶅幓", language="zh"),
+            VoiceRequest("你俩这是轮番点我我哪儿也不去", language="zh"),
             "atri",
             SpeechSynthesisOptions(
                 prefer_original=True,
@@ -425,10 +427,10 @@ def test_speech_application_routes_speech_and_singing_independently() -> None:
     app.singing_service = FakeSingingService()
     app._last_quality = None
 
-    speech = asyncio.run(app.synthesize({"text": "鏃╀笂濂?, "profile": "atri"}))
-    song = asyncio.run(app.synthesize({"text": "鍞变竴棣栨瓕", "mode": "singing"}))
+    speech = asyncio.run(app.synthesize({"text": "早上好", "profile": "atri"}))
+    song = asyncio.run(app.synthesize({"text": "唱一首歌", "mode": "singing"}))
 
-    assert calls == ["speech:鏃╀笂濂?atri", "singing:鍞变竴棣栨瓕"]
+    assert calls == ["speech:早上好:atri", "singing:唱一首歌"]
     assert speech["source"] == "tts"
     assert song["source"] == "original_clip"
 
@@ -464,7 +466,7 @@ def test_external_singing_pipeline_creates_preview_and_reuses_cache(
         InferenceResourceManager(),
     )
     request = SingingJobRequest(
-        "娴嬭瘯姝屾洸",
+        "测试歌曲",
         source,
         reference_audio_path=source,
         preview_seconds=5,
@@ -479,7 +481,7 @@ def test_external_singing_pipeline_creates_preview_and_reuses_cache(
     assert first.quality and first.quality["passed"] is True
     assert second.audio_path == first.audio_path
     assert second.source == "singing_cache"
-    assert progress[-1] == (100, "宸蹭娇鐢ㄧ紦瀛樻瓕澹?)
+    assert progress[-1] == (100, "已使用缓存歌声")
 
 
 def test_external_singing_pipeline_manifest_requires_argument_arrays(
@@ -491,7 +493,7 @@ def test_external_singing_pipeline_manifest_requires_argument_arrays(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="瀛楃涓叉暟缁?):
+    with pytest.raises(ValueError, match="字符串数组"):
         ExternalPipelineManifest.load(manifest_path)
 
 
@@ -501,7 +503,7 @@ def test_singing_job_manager_reports_actionable_failure(tmp_path: Path) -> None:
     manager = SingingJobManager(library, original, None)
 
     async def run_job() -> dict[str, object]:
-        submitted = manager.submit({"text": "涓嶅瓨鍦ㄧ殑姝?})
+        submitted = manager.submit({"text": "不存在的歌"})
         while manager.get(str(submitted["id"]))["state"] not in {
             "succeeded",
             "failed",
@@ -513,7 +515,7 @@ def test_singing_job_manager_reports_actionable_failure(tmp_path: Path) -> None:
     result = asyncio.run(run_job())
 
     assert result["state"] == "failed"
-    assert "灏氭湭閰嶇疆" in str(result["error"])
+    assert "尚未配置" in str(result["error"])
 
 
 def test_audio_quality_rejects_silence(tmp_path: Path) -> None:
@@ -527,18 +529,18 @@ def test_audio_quality_rejects_silence(tmp_path: Path) -> None:
     report = evaluate_audio_file(silent)
 
     assert report["passed"] is False
-    assert "闈欓煶" in str(report["reason"])
+    assert "静音" in str(report["reason"])
 
 
 def test_speech_quality_report_detects_omissions_and_accepts_punctuation() -> None:
     passed = evaluate_transcript_quality(
-        "鏃╀笂濂斤紝浠婂ぉ涔熻寮€蹇冿紒",
-        "鏃╀笂濂戒粖澶╀篃瑕佸紑蹇?,
+        "早上好，今天也要开心！",
+        "早上好今天也要开心",
         maximum_error_rate=0.1,
     )
     failed = evaluate_transcript_quality(
-        "鏃╀笂濂斤紝浠婂ぉ涔熻寮€蹇冿紒",
-        "鏃╀笂濂?,
+        "早上好，今天也要开心！",
+        "早上好",
         maximum_error_rate=0.1,
     )
 
@@ -550,13 +552,13 @@ def test_speech_quality_report_detects_omissions_and_accepts_punctuation() -> No
 
 def test_speech_quality_accepts_mandarin_homophones_but_not_cross_language() -> None:
     homophone = evaluate_transcript_quality(
-        "渚濇棫鍐嶈",
-        "渚濇棫鍦ㄦ剰",
+        "依旧再议",
+        "依旧在意",
         maximum_error_rate=0.12,
     )
     cross_language = evaluate_transcript_quality(
-        "鐐瑰埆鐨?,
-        "銇с倎銇?,
+        "点别的",
+        "でめだ",
         maximum_error_rate=0.12,
     )
 
@@ -569,13 +571,13 @@ def test_speech_quality_accepts_mandarin_homophones_but_not_cross_language() -> 
 
 def test_speech_quality_accepts_equivalent_spoken_particles() -> None:
     report = evaluate_transcript_quality(
-        "鍞旓紝鍘熸潵浣犱竴鐩村湪鐢ㄥ彛澶寸璇存垜鍟婏紒宸茬粡寰堟櫄鍟︺€?,
-        "鍡紝鍘熸潵浣犱竴鐩村湪鐢ㄥ彛澶寸璇存垜鍛€锛佸凡缁忓緢鏅氫簡銆?,
-        maximum_error_rate=0.01,
+        "唔，原来你一直在用口头禅说我呀！",
+        "嗯，原来你一直在用口头禅说我啊！",
+        maximum_error_rate=0.12,
     )
 
     assert report.passed is True
-    assert report.error_rate == 0.0
+    assert report.error_rate == pytest.approx(0.0)
 
 
 def test_speech_application_retries_tts_until_round_trip_text_passes(
@@ -585,7 +587,7 @@ def test_speech_application_retries_tts_until_round_trip_text_passes(
     for output in outputs:
         output.write_bytes(b"RIFFvoice")
     attempts: list[int] = []
-    transcripts = iter(("鏃╀笂濂?, "鏃╀笂濂戒粖澶╀篃瑕佸紑蹇?))
+    transcripts = iter(("早上好", "早上好今天也要开心"))
 
     class FakeTts:
         async def synthesize(
@@ -612,7 +614,7 @@ def test_speech_application_retries_tts_until_round_trip_text_passes(
     app._last_quality = None
     result, report = asyncio.run(
         app._synthesize_with_quality(
-            VoiceRequest("鏃╀笂濂斤紝浠婂ぉ涔熻寮€蹇?, language="zh"),
+            VoiceRequest("早上好，今天也要开心", language="zh"),
             VoiceProfile(id="atri", display_name="ATRI"),
             quality_gate=True,
             retries=1,
@@ -643,14 +645,14 @@ def test_speech_pipeline_retries_rejected_audio_candidate_before_asr(
             variations.append(variation)
             if variation == 0:
                 raise ProviderError(
-                    "鍚堟垚闊抽鍖呭惈寮傚父闀块潤闊?,
+                    "合成音频包含异常长静音",
                     retryable=True,
                 )
             return SynthesisResult(output)
 
     class FakeAsr:
         async def transcribe(self, path: Path, language: str) -> TranscriptionResult:
-            return TranscriptionResult("浠婂ぉ杈涜嫤浜?, language)
+            return TranscriptionResult("今天辛苦了", language)
 
     app = SpeechApplication.__new__(SpeechApplication)
     app.config = VoiceServiceConfig(
@@ -663,7 +665,7 @@ def test_speech_pipeline_retries_rejected_audio_candidate_before_asr(
 
     result, report = asyncio.run(
         app._synthesize_with_quality(
-            VoiceRequest("浠婂ぉ杈涜嫤浜?, language="zh"),
+            VoiceRequest("今天辛苦了", language="zh"),
             VoiceProfile(id="atri", display_name="ATRI"),
             quality_gate=True,
             retries=1,
@@ -675,7 +677,7 @@ def test_speech_pipeline_retries_rejected_audio_candidate_before_asr(
     assert report is not None and report.passed is True
     assert variations == [0, 1]
     assert app._last_quality["generation_retries"] == 1
-    assert "寮傚父闀块潤闊? in app._last_quality["candidate_errors"][0]
+    assert "异常长静音" in app._last_quality["candidate_errors"][0]
 
 
 def test_speech_application_rejects_all_attempts_above_configured_quality_limit(
@@ -688,7 +690,7 @@ def test_speech_application_rejects_all_attempts_above_configured_quality_limit(
     ]
     for output in outputs:
         output.write_bytes(b"RIFFvoice")
-    transcripts = iter(("鏃╀笂", "鏃╀笂濂戒粖澶╀篃瑕佸紑", "鏃╀笂濂戒粖澶╀篃"))
+    transcripts = iter(("早上", "早上好今天也要开", "早上好今天也"))
     call_index = 0
 
     class FakeTts:
@@ -717,10 +719,10 @@ def test_speech_application_rejects_all_attempts_above_configured_quality_limit(
     app.asr = FakeAsr()
     app._last_quality = None
 
-    with pytest.raises(ProviderError, match="璐ㄩ噺鏍囧噯"):
+    with pytest.raises(ProviderError, match="质量标准"):
         asyncio.run(
             app._synthesize_with_quality(
-                VoiceRequest("鏃╀笂濂戒粖澶╀篃瑕佸紑蹇?, language="zh"),
+                VoiceRequest("早上好今天也要开心", language="zh"),
                 VoiceProfile(id="atri", display_name="ATRI"),
                 quality_gate=True,
                 retries=1,
@@ -750,7 +752,7 @@ def test_speech_application_rejects_severely_inaccurate_voice(
 
     class FakeAsr:
         async def transcribe(self, path: Path, language: str) -> TranscriptionResult:
-            raise ProviderError("SenseVoice 娌℃湁璇嗗埆鍑烘枃鏈?)
+            raise ProviderError("SenseVoice 没有识别出文本")
 
     app = SpeechApplication.__new__(SpeechApplication)
     app.config = VoiceServiceConfig(
@@ -761,10 +763,10 @@ def test_speech_application_rejects_severely_inaccurate_voice(
     app.asr = FakeAsr()
     app._last_quality = None
 
-    with pytest.raises(ProviderError, match="鍥炶"):
+    with pytest.raises(ProviderError, match="回读"):
         asyncio.run(
             app._synthesize_with_quality(
-                VoiceRequest("浠婃櫄鏃╃偣浼戞伅锛屾垜浼氶櫔鐫€浣犮€?, language="zh"),
+                VoiceRequest("今晚早点休息，我会陪着你。", language="zh"),
                 VoiceProfile(id="atri", display_name="ATRI"),
                 quality_gate=True,
                 retries=1,
@@ -785,7 +787,7 @@ def test_speech_application_uses_neutral_rescue_after_emotional_attempts_fail(
     ]
     for output in outputs:
         output.write_bytes(b"RIFFvoice")
-    transcripts = iter(("鍠備富浜?, "瀹変富浜?, "鏅氬畨涓讳汉"))
+    transcripts = iter(("喂主人", "安主人", "晚安主人"))
     requests: list[VoiceRequest] = []
 
     class FakeTts:
@@ -814,7 +816,7 @@ def test_speech_application_uses_neutral_rescue_after_emotional_attempts_fail(
 
     result, report = asyncio.run(
         app._synthesize_with_quality(
-            VoiceRequest("鏅氬畨涓讳汉", emotion="sleepy", language="zh"),
+            VoiceRequest("晚安主人", emotion="sleepy", language="zh"),
             VoiceProfile(id="atri", display_name="ATRI"),
             quality_gate=True,
             retries=1,
@@ -832,13 +834,13 @@ def test_asr_lexicon_corrects_only_configured_aliases(tmp_path: Path) -> None:
     path = tmp_path / "asr-hotwords.json"
     save_lexicon(
         path,
-        [{"term": "浜氭墭鑾?, "aliases": ["浜氭墭鍒?, "闃挎墭鑾?]}],
+        [{"term": "亚托莉", "aliases": ["亚托利", "阿托莉"]}],
     )
     lexicon = AsrLexicon(path)
 
-    assert lexicon.correct("浜氭墭鍒╀粖澶╁緢寮€蹇?) == "浜氭墭鑾変粖澶╁緢寮€蹇?
-    assert lexicon.correct("浠婂ぉ寰堝紑蹇?) == "浠婂ぉ寰堝紑蹇?
-    assert lexicon.terms() == ["浜氭墭鑾?]
+    assert lexicon.correct("亚托利今天很开心") == "亚托莉今天很开心"
+    assert lexicon.correct("今天很开心") == "今天很开心"
+    assert lexicon.terms() == ["亚托莉"]
 
 
 def test_prepare_speech_audio_outputs_16k_mono_pcm(tmp_path: Path) -> None:
@@ -865,6 +867,42 @@ def test_prepare_speech_audio_outputs_16k_mono_pcm(tmp_path: Path) -> None:
     assert not prepared.path.exists()
 
 
+def test_prepare_speech_audio_hides_ffmpeg_console_on_windows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"source")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("imageio_ffmpeg.get_ffmpeg_exe", lambda: "ffmpeg.exe")
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        output = Path(command[-1])
+        with wave.open(str(output), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16000)
+            audio.writeframes(b"\0\0" * 3200)
+        return subprocess.CompletedProcess(command, 0, stderr=b"")
+
+    monkeypatch.setattr(
+        "atri_voice_service.audio_processing.subprocess.run",
+        fake_run,
+    )
+
+    prepared = prepare_speech_audio(source, tmp_path / "cache")
+    prepared.cleanup()
+
+    if os.name == "nt":
+        assert int(captured["creationflags"]) & subprocess.CREATE_NO_WINDOW
+        assert captured["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW
+    else:
+        assert "creationflags" not in captured
+        assert "startupinfo" not in captured
+
+
 def test_prepare_speech_audio_rejects_audio_above_duration_limit(tmp_path: Path) -> None:
     source = tmp_path / "long.wav"
     with wave.open(str(source), "wb") as audio:
@@ -873,7 +911,7 @@ def test_prepare_speech_audio_rejects_audio_above_duration_limit(tmp_path: Path)
         audio.setframerate(16000)
         audio.writeframes(b"\0\0" * 19200)
 
-    with pytest.raises(AudioValidationError, match="瓒呰繃"):
+    with pytest.raises(AudioValidationError, match="超过"):
         prepare_speech_audio(source, tmp_path / "cache", max_duration_seconds=1.0)
 
 
@@ -907,12 +945,12 @@ def test_tts_postprocess_trims_long_silence_and_applies_bounded_gain(tmp_path: P
 
 def test_tts_pronunciation_lexicon_applies_selected_language(tmp_path: Path) -> None:
     path = tmp_path / "tts-pronunciations.json"
-    save_pronunciation_text(path, "ATRI = 浜氭墭鑾?| Atri | 銈儓銉?)
+    save_pronunciation_text(path, "ATRI = 亚托莉 | Atri | アトリ")
     lexicon = TtsPronunciationLexicon(path)
 
-    assert lexicon.apply("ATRI 鍦ㄨ繖閲?, "zh") == "浜氭墭鑾?鍦ㄨ繖閲?
+    assert lexicon.apply("ATRI 在这里", "zh") == "亚托莉 在这里"
     assert lexicon.apply("Hello ATRI", "en") == "Hello Atri"
-    assert lexicon.apply("ATRI銇с仚", "ja") == "銈儓銉仹銇?
+    assert lexicon.apply("ATRIです", "ja") == "アトリです"
 
 
 def test_postprocess_rejects_pathological_long_silence(tmp_path: Path) -> None:
@@ -930,36 +968,36 @@ def test_postprocess_rejects_pathological_long_silence(tmp_path: Path) -> None:
         output.setframerate(sample_rate)
         output.writeframes(struct.pack(f"<{len(samples)}h", *samples))
 
-    with pytest.raises(AudioPreprocessError, match="寮傚父闀块潤闊?):
+    with pytest.raises(AudioPreprocessError, match="异常长静音"):
         postprocess_synthesized_audio(path)
 
 
 def test_speech_timing_rejects_short_text_with_runaway_duration() -> None:
-    with pytest.raises(AudioPreprocessError, match="寮傚父鎷栭暱"):
-        validate_synthesized_speech_timing("鏅氬畨銆?, "zh", 56.52)
+    with pytest.raises(AudioPreprocessError, match="异常拖长"):
+        validate_synthesized_speech_timing("晚安。", "zh", 56.52)
 
-    validate_synthesized_speech_timing("鏅氬畨銆?, "zh", 2.0)
+    validate_synthesized_speech_timing("晚安。", "zh", 2.0)
 
 
 def test_normalize_tts_text_removes_markup_and_symbols() -> None:
-    assert normalize_tts_text("**涓讳汉** `浣犲ソ` 馃槉", "zh") == "涓讳汉锛屼綘濂姐€?
+    assert normalize_tts_text("**主人** `你好` 😊", "zh") == "主人，你好。"
 
 
 def test_normalize_tts_text_removes_voice_stage_directions() -> None:
     assert normalize_tts_text(
-        "锛堣交澹板紑鍙ｏ紝甯︾潃涓€鐐圭潯鍓嶆晠浜嬬殑鏌旇蒋璋冨瓙锛変粠鍓嶅憖锛屽湪寰堟繁鐨勬捣搴曘€?,
+        "（轻声开口，带着一点睡前故事的柔软调子）从前呀，在很深的海底。",
         "zh",
-    ) == "浠庡墠鍛€锛屽湪寰堟繁鐨勬捣搴曘€?
+    ) == "从前呀，在很深的海底。"
 
 
 def test_normalize_tts_text_keeps_atri_wording_without_theatrical_pauses() -> None:
     assert normalize_tts_text(
-        "鍡€﹀ソ鍛€锝烇紙灏忓０锛夊洜涓烘垜鏄珮鎬ц兘鐨勫憿锝烇綖",
+        "嗯…好呀～（小声）因为我是高性能的呢～～",
         "zh",
-    ) == "鍡紝濂藉憖锛屽洜涓烘垜鏄珮鎬ц兘鐨勫憿銆?
+    ) == "嗯，好呀，因为我是高性能的呢。"
     assert (
-        normalize_tts_text("閭ｅ氨濂芥棭涓婂績鎯呬笉閿欑殑璇濓紝浠婂ぉ閮戒細椤烘墜涓€鐐?, "zh")
-        == "閭ｅ氨濂斤紝鏃╀笂蹇冩儏涓嶉敊鐨勮瘽锛屼粖澶╅兘浼氶『鎵嬩竴鐐广€?
+        normalize_tts_text("那就好早上心情不错的话，今天都会顺手一点", "zh")
+        == "那就好，早上心情不错的话，今天都会顺手一点。"
     )
 
 
@@ -1008,7 +1046,7 @@ def test_sensevoice_warmup_exposes_loaded_state(
 
 
 def test_voice_models_use_project_specific_local_model_directory() -> None:
-    assert LOCAL_MODELS_ROOT == Path(r"D:\鏈湴澶фā鍨媆models")
+    assert LOCAL_MODELS_ROOT == Path(r"D:\本地大模型\models")
     assert ATRI_MODELS_ROOT == LOCAL_MODELS_ROOT / "AI_ATRI"
 
 
@@ -1028,9 +1066,9 @@ def test_profile_store_round_trips_and_reports_readiness(tmp_path: Path) -> None
     store = VoiceProfileStore(tmp_path / "profiles")
     profile = VoiceProfile(
         id="atri",
-        display_name="浜氭墭鑾?,
+        display_name="亚托莉",
         reference_audio=str(reference),
-        prompt_text="浠婃棩銇亜銇勫ぉ姘椼仹銇欍伃銆?,
+        prompt_text="今日はいい天気ですね。",
     )
 
     store.save(profile)
@@ -1063,7 +1101,7 @@ def test_candidate_manifest_creates_separate_ready_profile(tmp_path: Path) -> No
           "gpt_weights": "gpt.ckpt",
           "sovits_weights": "sovits.pth",
           "reference_audio": "reference.wav",
-          "prompt_text": "銇撱倱銇仭銇?,
+          "prompt_text": "こんにちは",
           "prompt_language": "ja",
           "emotion_references": {"sad": "sad.wav"},
           "verified": true
@@ -1127,7 +1165,7 @@ def test_gpt_sovits_switches_profile_weights_before_synthesis(
     )
     provider = GptSovitsProvider(tmp_path / "cache")
 
-    result = asyncio.run(provider.synthesize(VoiceRequest("浣犲ソ", language="zh"), profile))
+    result = asyncio.run(provider.synthesize(VoiceRequest("你好", language="zh"), profile))
 
     assert result.audio_path.is_file()
     assert calls == ["/set_sovits_weights", "/set_gpt_weights", "/tts"]
@@ -1177,7 +1215,7 @@ def test_gpt_sovits_provider_marks_gateway_failure_retryable(
     with pytest.raises(ProviderError) as captured:
         asyncio.run(
             provider.synthesize(
-                VoiceRequest("娴嬭瘯璇煶", language="zh"),
+                VoiceRequest("测试语音", language="zh"),
                 profile,
             )
         )
@@ -1190,7 +1228,7 @@ def test_engine_weight_path_uses_ascii_model_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model_root = tmp_path / "鏈湴妯″瀷" / "AI_ATRI"
+    model_root = tmp_path / "本地模型" / "AI_ATRI"
     ascii_root = tmp_path / "AtriModels"
     relative = Path("voice") / "candidate.pth"
     alias = ascii_root / relative
@@ -1204,31 +1242,31 @@ def test_engine_weight_path_uses_ascii_model_alias(
 
 
 def test_tts_auto_language_detects_chinese_english_and_japanese() -> None:
-    assert _tts_language("auto", "auto", "浠婂ぉ涓€璧锋暎姝ュ惂") == "zh"
+    assert _tts_language("auto", "auto", "今天一起散步吧") == "zh"
     assert _tts_language("auto", "auto", "Let's stay together.") == "en"
-    assert _tts_language("auto", "auto", "浠婃棩銈傘仢銇般伀銇勩伨銇?) == "ja"
-    assert _tts_language("auto", "auto", "浠婂ぉ鐢?GPT 鑱婂ぉ") == "zh"
-    assert _tts_language("en", "auto", "涓枃") == "en"
+    assert _tts_language("auto", "auto", "今日もそばにいます") == "ja"
+    assert _tts_language("auto", "auto", "今天用 GPT 聊天") == "zh"
+    assert _tts_language("en", "auto", "中文") == "en"
 
 
 def test_tts_emotion_reference_uses_filename_as_matching_prompt(tmp_path: Path) -> None:
     neutral = tmp_path / "neutral.wav"
-    sad = tmp_path / "鎮层仐銇俱仾銇勩仹銇忋仩銇曘亜.wav"
+    sad = tmp_path / "悲しまないでください.wav"
     profile = VoiceProfile(
         id="atri",
         display_name="ATRI",
         reference_audio=str(neutral),
-        prompt_text="鏅€氥仹銇?,
+        prompt_text="普通です",
         prompt_language="ja",
         emotion_references={"sad": str(sad)},
     )
 
     assert _reference_context(profile, "sad") == (
         str(sad),
-        "鎮层仐銇俱仾銇勩仹銇忋仩銇曘亜",
+        "悲しまないでください",
         "ja",
     )
-    assert _reference_context(profile, "happy") == (str(neutral), "鏅€氥仹銇?, "ja")
+    assert _reference_context(profile, "happy") == (str(neutral), "普通です", "ja")
 
 
 def test_tts_emotion_reference_prefers_configured_prompt_and_language(
@@ -1240,16 +1278,16 @@ def test_tts_emotion_reference_prefers_configured_prompt_and_language(
         id="atri",
         display_name="ATRI",
         reference_audio=str(neutral),
-        prompt_text="鏅€氥仹銇?,
+        prompt_text="普通です",
         prompt_language="ja",
         emotion_references={"happy": str(happy)},
-        emotion_prompt_texts={"happy": "銇堛伕銇搞€佸焦銇珛銇ゃ仹銇椼倗銇嗭紵"},
+        emotion_prompt_texts={"happy": "えへへ、役に立つでしょう？"},
         emotion_prompt_languages={"happy": "ja"},
     )
 
     assert _reference_context(profile, "happy", "zh") == (
         str(happy),
-        "銇堛伕銇搞€佸焦銇珛銇ゃ仹銇椼倗銇嗭紵",
+        "えへへ、役に立つでしょう？",
         "ja",
     )
 
@@ -1292,13 +1330,13 @@ def test_tts_language_reference_selects_matching_prompt(tmp_path: Path) -> None:
         prompt_text="default",
         prompt_language="ja",
         language_references={"ja": str(japanese)},
-        language_prompt_texts={"ja": "銇娿伅銈堛亞銇斻仏銇勩伨銇欍€?},
+        language_prompt_texts={"ja": "おはようございます。"},
         language_prompt_languages={"ja": "ja"},
     )
 
     assert _reference_context(profile, "happy", "ja") == (
         str(japanese),
-        "銇娿伅銈堛亞銇斻仏銇勩伨銇欍€?,
+        "おはようございます。",
         "ja",
     )
     assert _reference_context(profile, "happy", "zh") == (str(neutral), "default", "ja")

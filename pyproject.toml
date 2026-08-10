@@ -11,12 +11,20 @@ dependencies = [
   "pypinyin>=0.53.0,<1.0",
   "pypdf>=4.0.0",
   "python-dotenv>=1.0.1",
+  "rapidocr>=3.9.0,<4.0",
+  "onnxruntime>=1.18.0,<2.0",
   "websockets>=12.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0.0",
+]
+music = [
+  "numpy>=1.26.0,<3.0",
+  "pedalboard>=0.9.24,<1.0",
+  "scipy>=1.11.0,<2.0",
+  "soundfile>=0.12.0,<1.0",
 ]
 
 [project.gui-scripts]

@@ -5,6 +5,94 @@ import re
 from typing import Any
 
 
+def is_poke_event(event: dict[str, Any]) -> bool:
+    """判断 OneBot 通知是否为戳一戳事件。
+
+    戳一戳在 OneBot v11 中不是普通 message，而是 notice 事件。先在
+    OneBot 适配层识别，后续再归一化为 ATRI 可以复用的普通对话事件。
+    """
+
+    return (
+        str(event.get("post_type") or "").lower() == "notice"
+        and (
+            str(event.get("notice_type") or "").lower() == "poke"
+            or str(event.get("sub_type") or "").lower() == "poke"
+        )
+    )
+
+
+def normalize_poke_event(event: dict[str, Any], bot_qq: int) -> dict[str, Any] | None:
+    """把“戳到亚托莉”的通知转换成普通消息事件。
+
+    这里只做事件归一化，不调用 OneBot 动作，也不直接发送回戳。这样
+    戳一戳会自然进入现有的回复策略、人格、记忆、语音和表情包流程。
+    戳到其他人的通知返回 ``None``，避免机器人误回复。
+    """
+
+    if not is_poke_event(event):
+        return None
+    target_id = _as_int(event.get("target_id"))
+    actor_id = _as_int(event.get("user_id"))
+    if target_id != int(bot_qq) or actor_id is None or actor_id == int(bot_qq):
+        return None
+
+    normalized = dict(event)
+    normalized.update(
+        {
+            "post_type": "message",
+            "message_type": "group" if event.get("group_id") is not None else "private",
+            "sub_type": "poke",
+            "message": [
+                {
+                    "type": "text",
+                    "data": {"text": "[用户戳了戳亚托莉]"},
+                }
+            ],
+            "raw_message": "[用户戳了戳亚托莉]",
+            "_atri_poke_event": True,
+        }
+    )
+    return normalized
+
+
+def extract_reply_message_id(message: Any) -> str | None:
+    """从消息段或 NapCat 的 reply 对象中提取被引用消息 ID。"""
+
+    if isinstance(message, list):
+        for segment in message:
+            result = extract_reply_message_id(segment)
+            if result:
+                return result
+        return None
+    if not isinstance(message, dict):
+        return None
+
+    if str(message.get("type") or "").lower() == "reply":
+        data = message.get("data") or {}
+        value = data.get("id") or data.get("message_id")
+        return str(value) if value not in (None, "") else None
+
+    for key in ("message_id", "id"):
+        value = message.get(key)
+        if value not in (None, "") and ("message" in message or "sender" in message):
+            return str(value)
+    nested = message.get("message")
+    return extract_reply_message_id(nested) if nested is not None else None
+
+
+def extract_reply_inline_message(event: dict[str, Any]) -> Any | None:
+    """读取事件中可能直接携带的引用原文，避免不必要的 get_msg 请求。"""
+
+    reply = event.get("reply")
+    if isinstance(reply, dict):
+        if reply.get("message") is not None:
+            return reply.get("message")
+        for key in ("raw_message", "text"):
+            if reply.get(key):
+                return reply[key]
+    return None
+
+
 def extract_plain_text(message: Any) -> str:
     if isinstance(message, str):
         return message.strip()
@@ -57,6 +145,15 @@ def extract_plain_text(message: Any) -> str:
             parts.append(f"[分享:{summary}]" if summary else "[分享]")
 
     return "".join(parts).strip()
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _share_segment_summary(data: dict[str, Any]) -> str:

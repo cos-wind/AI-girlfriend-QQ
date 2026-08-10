@@ -1,6 +1,39 @@
 from __future__ import annotations
 
 
+def appearance_direct_reply(user_text: str) -> str | None:
+    """对明确的自我外貌提问返回稳定事实，避免长上下文下答非所问。
+
+    这不是替代视觉模型，而是保护“亚托莉认不出自己”这一基础身份问答：
+    只有同时出现身份词和外貌相关词时触发，不干预普通闲聊、图片理解或工具调用。
+    """
+    text = user_text.strip()
+    lowered = text.lower()
+    asks_about_atri = "亚托莉" in text or "atri" in lowered
+    appearance_terms = (
+        "外貌",
+        "长什么样",
+        "什么样子",
+        "发色",
+        "头发",
+        "眼睛",
+        "眼瞳",
+        "瞳色",
+        "衣服",
+        "服装",
+        "鞋子",
+        "型号",
+        "yhn-04b",
+    )
+    if not asks_about_atri or not any(term in lowered or term in text for term in appearance_terms):
+        return None
+    return (
+        "那就是我哦：淡色及肩长发，头顶常翘着一撮呆毛，"
+        "深红色的双瞳像红宝石一样；我通常穿连衣裙样式的衣服，"
+        "脚上是茶色革制便鞋，后颈印着 YHN-04B。"
+    )
+
+
 def lore_direct_reply(user_text: str) -> str | None:
     text = user_text.strip()
     lowered = text.lower()

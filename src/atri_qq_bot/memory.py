@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -9,8 +11,35 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .memory_parts import core as _memory_core
+from .memory_parts.ingestion import (
+    MemoryExtractionRequest,
+    MemoryExtractionResult,
+    MemoryExtractionWorker,
+    deterministic_operations as _memory_core_deterministic_operations,
+)
+from .retrieval import ContextRetrievalPlanner, RetrievalSettings
 
 from .proactive import parse_hhmm, safe_zoneinfo
+
+
+LOGGER = logging.getLogger("atri.memory")
+
+# 记忆保存发生在消息处理链路中，不能因为一次内存不足就让整条回复任务失败。
+# 失败后采用短暂退避，避免在系统内存紧张时每条消息都重复创建序列化缓冲区。
+SAVE_RETRY_MIN_SECONDS = 5.0
+SAVE_RETRY_MAX_SECONDS = 60.0
+MAX_MEMORY_TEXT_CHARS = 2000
+MEMORY_BACKFILL_VERSION = 1
+
+
+def _locked_mutation(method):
+    """为主消息写入与后台整合共用一把进程内可重入锁。"""
+    def wrapped(self, *args, **kwargs):
+        with self._memory_state_lock:
+            return method(self, *args, **kwargs)
+    wrapped.__name__ = method.__name__
+    wrapped.__doc__ = method.__doc__
+    return wrapped
 
 
 TOPIC_STOPWORDS = _memory_core.TOPIC_STOPWORDS
@@ -55,13 +84,44 @@ IMPLICIT_INTEREST_HINTS = _memory_core.IMPLICIT_INTEREST_HINTS
 
 
 class UserMemoryStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, config: Any | None = None) -> None:
         self.path = path
         self._loaded_file_state: tuple[int, int] | None = None
         self._data = self._load()
         self._loaded_file_state = self._current_file_state()
         self._session_l3: dict[str, list[dict[str, Any]]] = {}
+        self._save_retry_after = 0.0
+        self._save_failure_count = 0
+        self._memory_state_lock = threading.RLock()
+        # 检索器是可选的旁路；即使 SQLite 文件损坏，原 JSON 记忆仍能正常工作。
+        self._retrieval = ContextRetrievalPlanner(
+            RetrievalSettings.from_config(path, config)
+        )
+        self._memory_worker = MemoryExtractionWorker(
+            self._apply_extraction_result,
+            enabled=bool(getattr(config, "memory_extraction_enabled", True)),
+            # 直接创建 UserMemoryStore（测试、迁移脚本、离线修复）默认不应
+            # 意外拉起本地大模型；正式运行由 load_config 明确打开此开关。
+            llm_enabled=bool(getattr(config, "memory_extraction_llm_enabled", False)),
+            model=str(getattr(config, "memory_extraction_model", "qwen3:4b-instruct")),
+            base_url=str(getattr(config, "memory_extraction_base_url", "http://127.0.0.1:11434")),
+            api_key=getattr(config, "memory_extraction_api_key", None),
+            timeout_seconds=float(getattr(config, "memory_extraction_timeout_seconds", 10.0)),
+            cooldown_seconds=float(getattr(config, "memory_extraction_cooldown_seconds", 45.0)),
+        )
+        self._backfill_thread: threading.Thread | None = None
+        self._memory_backfill_max_conversations = int(
+            getattr(config, "memory_backfill_max_conversations", 250) or 250
+        )
+        if bool(getattr(config, "memory_backfill_enabled", False)):
+            self._backfill_thread = threading.Thread(
+                target=self._backfill_history_profiles,
+                name="atri-memory-backfill",
+                daemon=True,
+            )
+            self._backfill_thread.start()
 
+    @_locked_mutation
     def observe_user(
         self,
         conversation_id: str,
@@ -76,11 +136,14 @@ class UserMemoryStore:
         visibility: str = "private",
         source_context: str | None = None,
     ) -> None:
+        # 记忆只需要保存可检索的摘要文本；超长媒体描述、转发内容或异常 payload
+        # 不应原样进入持久化树，避免单条消息放大整个快照。
+        text = _shorten(str(text or ""), MAX_MEMORY_TEXT_CHARS)
         if is_memory_pollution_text(text):
             return
         now = now or time.time()
         item = self._conversation(conversation_id)
-        _ensure_structured_memory(item)
+        memory = _ensure_structured_memory(item)
         _decay_event_memories(item, now)
         _initialize_affection(item, is_owner)
         if update_affection is not False and not _is_group_conversation(conversation_id):
@@ -125,10 +188,10 @@ class UserMemoryStore:
         _merge_feature_counts(item, _message_features(text))
         _append_history(item, "user", text, now, actor_id=actor_id, nickname=nickname)
         item["topic_words"] = _merge_topics(item.get("topic_words"), _extract_topics(text))
-        _append_session_l3(self._session_l3, conversation_id, text, now)
+        _append_session_l3(self._session_l3, conversation_id, text, now, memory)
         affection_event = _classify_affection_event(text)
         if update_affection:
-            _update_affection(item, affection_event, is_owner)
+            _update_affection(item, affection_event, is_owner, now=now)
         _remember_structured_from_user(
             item,
             text,
@@ -137,8 +200,19 @@ class UserMemoryStore:
             visibility=visibility,
             source_context=source_context,
         )
+        self._enqueue_memory_extraction(
+            conversation_id,
+            text,
+            now,
+            visibility=visibility,
+            source_context=source_context,
+            scope_kind="group" if _is_group_conversation(conversation_id) and ":user:" not in conversation_id else "person",
+        )
+        if not _is_group_conversation(conversation_id):
+            _remember_personal_event(item, text, now)
         self._save()
 
+    @_locked_mutation
     def observe_bot(
         self,
         conversation_id: str,
@@ -146,6 +220,7 @@ class UserMemoryStore:
         sent_sticker: bool = False,
         now: float | None = None,
     ) -> None:
+        reply_text = _shorten(str(reply_text or ""), MAX_MEMORY_TEXT_CHARS)
         if is_memory_pollution_text(reply_text):
             return
         now = now or time.time()
@@ -164,6 +239,7 @@ class UserMemoryStore:
             _append_history(item, "assistant", reply_text, now)
         self._save()
 
+    @_locked_mutation
     def remember_target(self, conversation_id: str, event: dict[str, Any]) -> None:
         item = self._conversation(conversation_id)
         if event.get("message_type") == "private":
@@ -181,6 +257,7 @@ class UserMemoryStore:
             item["target"] = target
         self._save()
 
+    @_locked_mutation
     def observe_group_message(
         self,
         group_id: int | str,
@@ -203,6 +280,8 @@ class UserMemoryStore:
             update_affection=False,
             update_group_activity=True,
             addressed_to_bot=addressed_to_bot,
+            visibility=f"group:{group_id}",
+            source_context=f"group:{group_id}",
         )
         self.observe_user(
             member_conversation_id,
@@ -233,6 +312,7 @@ class UserMemoryStore:
             )
         return group_conversation_id, member_conversation_id
 
+    @_locked_mutation
     def remember_person_profile_from_group(
         self,
         group_id: int | str,
@@ -246,6 +326,14 @@ class UserMemoryStore:
         now = now or time.time()
         item = self._conversation(f"private:{user_id}")
         _ensure_structured_memory(item)
+        memory = _ensure_structured_memory(item)
+        _append_session_l3(
+            self._session_l3,
+            f"private:{user_id}",
+            text,
+            now,
+            memory,
+        )
         _initialize_affection(item, is_owner)
         affection_event = _classify_affection_event(text)
         _remember_structured_from_user(
@@ -256,8 +344,17 @@ class UserMemoryStore:
             visibility=f"group:{group_id}",
             source_context=f"group:{group_id}",
         )
+        self._enqueue_memory_extraction(
+            f"private:{user_id}",
+            text,
+            now,
+            visibility=f"group:{group_id}",
+            source_context=f"group:{group_id}",
+            scope_kind="person",
+        )
         self._save()
 
+    @_locked_mutation
     def observe_affection_event(
         self,
         conversation_id: str,
@@ -272,10 +369,11 @@ class UserMemoryStore:
         _ensure_structured_memory(item)
         _initialize_affection(item, is_owner)
         affection_event = _classify_affection_event(text)
-        _update_affection(item, affection_event, is_owner)
+        _update_affection(item, affection_event, is_owner, now=now)
         _remember_important_interaction(item, text, now, affection_event)
         self._save()
 
+    @_locked_mutation
     def record_iteration_decision(
         self,
         conversation_id: str,
@@ -421,7 +519,9 @@ class UserMemoryStore:
 
         structured_memory = _structured_memory_profile(
             item,
-            self._session_l3.get(conversation_id) or [],
+            self._session_l3.get(conversation_id)
+            or (item.get("structured_memory") or {}).get("l3")
+            or [],
         )
         affection_score = float(item.get("affection_score", DEFAULT_AFFECTION))
         group_activity_score = float(item.get("group_activity_score", GROUP_ACTIVITY_DEFAULT))
@@ -485,13 +585,46 @@ class UserMemoryStore:
         now: float | None = None,
     ) -> str:
         profile = self.profile(conversation_id, now=now)
+        try:
+            context = self._retrieval.build(profile, user_text)
+            if context:
+                return context
+        except Exception as exc:  # 检索索引是增强项，绝不能让它阻断 QQ 回复。
+            LOGGER.warning("semantic retrieval fallback: %s", exc)
         return _format_recall_context(profile, user_text)
+
+    def retrieval_status(self) -> dict[str, Any]:
+        """为 WebUI/诊断提供索引状态，不暴露任何跨会话的记忆内容。"""
+
+        return self._retrieval.status()
+
+    def update_retrieval_config(self, config: Any) -> None:
+        """WebUI 热加载配置后重建轻量 Planner，不触碰 JSON 和记忆会话。"""
+
+        self._retrieval = ContextRetrievalPlanner(
+            RetrievalSettings.from_config(self.path, config)
+        )
 
     def affection_summary(self, conversation_id: str, is_owner: bool = False) -> str:
         item = self._conversation(conversation_id)
         _ensure_structured_memory(item)
         _initialize_affection(item, is_owner)
         return _affection_summary_text(float(item.get("affection_score", DEFAULT_AFFECTION)))
+
+    def trust_tier(self, conversation_id: str) -> str:
+        item = self._conversation(conversation_id, save=False)
+        member = _group_member_identity(conversation_id)
+        if member:
+            canonical = self._data.get("conversations", {}).get(f"private:{member[1]}")
+            if isinstance(canonical, dict):
+                item = canonical
+        return _trust_tier(item.get("trust_tier"))
+
+    def set_trust_tier(self, conversation_id: str, value: str) -> str:
+        item = self._conversation(conversation_id)
+        item["trust_tier"] = _trust_tier(value)
+        self._save()
+        return item["trust_tier"]
 
     def set_affection(self, conversation_id: str, value: float, is_owner: bool = False) -> str:
         item = self._conversation(conversation_id)
@@ -659,6 +792,44 @@ class UserMemoryStore:
                     groups.append((conversation_id, dict(target)))
         return list(candidates.values()) + groups
 
+    def due_personal_events(
+        self,
+        owner_qqs: Iterable[int],
+        now: float | None = None,
+    ) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+        self._reload_if_changed()
+        now = now or time.time()
+        owner_ids = {int(value) for value in owner_qqs if int(value) > 0}
+        due: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        for conversation_id, item in self._data.get("conversations", {}).items():
+            if not conversation_id.startswith("private:") or not isinstance(item, dict):
+                continue
+            target = item.get("target") or {}
+            user_id = int(target.get("user_id") or conversation_id.split(":", 1)[1] or 0)
+            if user_id not in owner_ids and _trust_tier(item.get("trust_tier")) not in {"approved", "trusted"}:
+                continue
+            for event in item.get("personal_events") or []:
+                if not isinstance(event, dict) or event.get("status") != "scheduled":
+                    continue
+                due_at = _as_float(event.get("due_at")) or 0.0
+                if due_at <= now <= due_at + 12 * 60 * 60:
+                    due.append((conversation_id, {"message_type": "private", "user_id": user_id}, dict(event)))
+        return due
+
+    def mark_personal_event_sent(
+        self,
+        conversation_id: str,
+        event_id: str,
+        now: float | None = None,
+    ) -> None:
+        item = self._conversation(conversation_id)
+        for event in item.get("personal_events") or []:
+            if isinstance(event, dict) and str(event.get("id") or "") == str(event_id):
+                event["status"] = "sent"
+                event["sent_at"] = now or time.time()
+                self._save()
+                return
+
     def proactive_state(
         self,
         conversation_id: str,
@@ -700,6 +871,7 @@ class UserMemoryStore:
             "event_dates": dict(item.get("proactive_event_dates") or {}),
             "recent_messages": list(item.get("recent_proactive_messages") or [])[-8:],
             "proactive_override": _proactive_override(item.get("proactive_override")),
+            "trust_tier": _trust_tier(item.get("trust_tier")),
         }
 
     def set_proactive_plan(
@@ -812,6 +984,173 @@ class UserMemoryStore:
         item["last_bot_at"] = time.time()
         self._save()
 
+    def _enqueue_memory_extraction(
+        self,
+        conversation_id: str,
+        text: str,
+        now: float,
+        *,
+        visibility: str,
+        source_context: str | None,
+        scope_kind: str,
+    ) -> None:
+        """把画像提取放入有界后台队列。
+
+        这里故意只做快照和入队，不调用模型、不等待结果；消息主链路在此之后
+        继续完成原有保存和回复。后台回写前会重新加载磁盘状态，避免覆盖 WebUI
+        或另一条消息刚刚写入的内容。
+        """
+        if not self._memory_worker.enabled:
+            return
+        item = self._conversation(conversation_id, save=False)
+        structured = _ensure_structured_memory(item)
+        known_memory = tuple(
+            f"{entry.get('key')}: {entry.get('value')}"
+            for bucket in ("l1", "l2")
+            for entry in list(structured.get(bucket) or [])[-12:]
+            if isinstance(entry, dict)
+            and entry.get("state") not in {"expired", "deleted", "rejected"}
+        )
+        history = list(item.get("history") or [])
+        recent_context = tuple(
+            f"{entry.get('role') or 'user'}: {entry.get('text') or ''}"
+            for entry in history[-12:]
+            if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+        )
+        request = MemoryExtractionRequest(
+            conversation_id=conversation_id,
+            subject_id=conversation_id,
+            text=text,
+            recent_context=recent_context,
+            known_memory=known_memory,
+            now=now,
+            visibility=visibility,
+            source_context=source_context,
+            scope_kind=scope_kind,
+        )
+        if self._memory_worker.submit(request):
+            LOGGER.debug("记忆提取任务已入队 conversation=%s scope=%s", conversation_id, scope_kind)
+
+    @_locked_mutation
+    def _apply_extraction_result(self, result: MemoryExtractionResult) -> None:
+        """在主进程内合并后台结果；失败只记日志，不影响下一条消息。"""
+        request = result.request
+        file_state_before = self._current_file_state()
+        item = self._conversation(request.conversation_id, save=False)
+        memory = _ensure_structured_memory(item)
+        # WebUI 手工编辑优先级高于已经在队列里的旧消息。否则用户刚删除的
+        # 记忆可能被旧任务重新写回，表现为“保存后又恢复”。新消息的时间戳
+        # 晚于编辑时间时仍可正常进入提取流程。
+        manual_edit_at = _as_float(item.get("memory_manual_edit_at")) or 0.0
+        if manual_edit_at and request.now < manual_edit_at:
+            LOGGER.debug(
+                "跳过早于 WebUI 编辑的后台画像结果 conversation=%s",
+                request.conversation_id,
+            )
+            return
+        # WebUI 是独立 HTTP 服务，和本进程不共享 Python 锁。若后台读取快照
+        # 后文件已经被 WebUI/人工流程改过，宁可丢弃这一批旧结果，也不能把
+        # 旧画像覆盖回去；下一条真实消息会重新排队提取。
+        if self._current_file_state() != file_state_before:
+            self._reload_if_changed()
+            return
+        memory_ids: list[str] = []
+        for operation in result.operations:
+            # core 的操作入口接收 conversation item，并在内部取出
+            # item["structured_memory"]；不能把已经取出的 memory 再传进去，
+            # 否则会意外生成 structured_memory.structured_memory 嵌套树。
+            memory_id = _memory_core.apply_extraction_operation(item, operation, request.now)
+            if memory_id:
+                memory_ids.append(str(memory_id))
+        memory = _ensure_structured_memory(item)
+        _memory_core._link_related_memories(memory, memory_ids)
+        if memory_ids:
+            if self._current_file_state() != file_state_before:
+                self._reload_if_changed()
+                LOGGER.debug(
+                    "检测到外部记忆编辑，放弃旧后台画像结果 conversation=%s",
+                    request.conversation_id,
+                )
+                return
+            self._save()
+            LOGGER.info(
+                "后台画像提取完成 conversation=%s operations=%d model=%s",
+                request.conversation_id,
+                len(memory_ids),
+                result.model_used,
+            )
+        if result.error:
+            LOGGER.debug(
+                "后台画像模型不可用，已保留规则提取结果 conversation=%s error=%s",
+                request.conversation_id,
+                result.error,
+            )
+
+    def memory_extraction_status(self) -> dict[str, Any]:
+        """返回后台画像提取状态；仅用于 WebUI/诊断，不改变记忆。"""
+        status = self._memory_worker.status()
+        status["backfill_running"] = bool(self._backfill_thread and self._backfill_thread.is_alive())
+        return status
+
+    def _backfill_history_profiles(self) -> None:
+        """低优先级回放旧 history，补齐升级前没有结构化画像的用户。
+
+        只调用确定性提取器，不在启动时批量加载大模型；模型增强由真实新消息
+        通过有界队列完成。每个会话单独持锁和保存，主回复最多只等待一次很短
+        的锁竞争，异常会被吞掉并记录，绝不影响服务启动。
+        """
+        try:
+            limit = self._memory_backfill_max_conversations
+        except (TypeError, ValueError):
+            limit = 250
+        conversations = list(self._data.get("conversations", {}).items())[: max(10, min(limit, 500))]
+        for conversation_id, original_item in conversations:
+            try:
+                history = list((original_item or {}).get("history") or [])
+                if len(history) < 2:
+                    continue
+                with self._memory_state_lock:
+                    item = self._conversation(conversation_id, save=False)
+                    # 回填是一次性迁移；打标后重启不再重复扫描和写盘，避免启动抖动。
+                    if int(item.get("memory_backfill_version", 0) or 0) >= MEMORY_BACKFILL_VERSION:
+                        continue
+                    memory = _ensure_structured_memory(item)
+                    scope_kind = (
+                        "group"
+                        if conversation_id.startswith("group:") and ":user:" not in conversation_id
+                        else "person"
+                    )
+                    visibility = (
+                        conversation_id
+                        if scope_kind == "group"
+                        else "private"
+                    )
+                    changed = False
+                    for entry in history[-300:]:
+                        if not isinstance(entry, dict) or entry.get("role") != "user":
+                            continue
+                        text = _shorten(str(entry.get("text") or ""), MAX_MEMORY_TEXT_CHARS)
+                        if not text or is_memory_pollution_text(text):
+                            continue
+                        operations = _memory_core_deterministic_operations(
+                            text,
+                            now=_as_float(entry.get("at")) or time.time(),
+                            visibility=visibility,
+                            source_context=visibility if scope_kind == "group" else None,
+                            scope_kind=scope_kind,
+                        )
+                        for operation in operations:
+                            if _memory_core.apply_extraction_operation(item, operation, operation.get("updated_at") or time.time()):
+                                changed = True
+                    item["memory_backfill_version"] = MEMORY_BACKFILL_VERSION
+                    changed = True
+                    if changed:
+                        self._save()
+                # 让出调度权，避免历史较多时与消息线程争用 CPU/磁盘。
+                time.sleep(0.02)
+            except Exception:
+                LOGGER.exception("历史画像回放失败 conversation=%s", conversation_id)
+
     def _morning_candidate_targets(
         self, owner_qqs: Iterable[int]
     ) -> list[tuple[str, dict[str, Any]]]:
@@ -865,14 +1204,28 @@ class UserMemoryStore:
         data.setdefault("conversations", {})
         return data
 
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def _save(self) -> bool:
+        """尽量持久化记忆，但绝不让持久化异常中断当前回复。
+
+        旧实现先用 ``json.dumps`` 把整个记忆树拼成一个大字符串，再一次性写入
+        临时文件。系统内存紧张时，这个额外的字符串缓冲区可能触发
+        ``MemoryError``，异常会沿着消息处理链路冒泡，表现为“连接正常但不回复”。
+
+        这里改为流式 ``json.dump`` 写临时文件，并对内存不足和文件 I/O 异常做
+        有限退避。临时文件只有在完整写入后才替换正式文件，因此不会留下半截
+        users.json；内存恢复后下一次保存会自动恢复。
+        """
+        now = time.monotonic()
+        if now < self._save_retry_after:
+            return False
+
         tmp_path = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            tmp_path.write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # 直接向临时文件写入，避免额外创建完整 JSON 字符串。
+            with tmp_path.open("w", encoding="utf-8") as stream:
+                json.dump(self._data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
             for attempt in range(4):
                 try:
                     tmp_path.replace(self.path)
@@ -881,10 +1234,38 @@ class UserMemoryStore:
                     if attempt >= 3:
                         raise
                     time.sleep(0.025 * (attempt + 1))
+        except MemoryError:
+            self._save_failure_count += 1
+            delay = min(
+                SAVE_RETRY_MAX_SECONDS,
+                SAVE_RETRY_MIN_SECONDS * (2 ** min(self._save_failure_count - 1, 4)),
+            )
+            self._save_retry_after = now + delay
+            LOGGER.warning(
+                "记忆保存暂缓：系统内存不足，当前回复继续执行；将在 %.1f 秒后重试",
+                delay,
+            )
+            return False
+        except (OSError, TypeError, ValueError) as exc:
+            self._save_failure_count += 1
+            delay = min(
+                SAVE_RETRY_MAX_SECONDS,
+                SAVE_RETRY_MIN_SECONDS * (2 ** min(self._save_failure_count - 1, 4)),
+            )
+            self._save_retry_after = now + delay
+            LOGGER.warning(
+                "记忆保存暂缓：文件写入失败（%s），当前回复继续执行；将在 %.1f 秒后重试",
+                exc,
+                delay,
+            )
+            return False
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
         self._loaded_file_state = self._current_file_state()
+        self._save_failure_count = 0
+        self._save_retry_after = 0.0
+        return True
 
 
 def _group_member_identity(conversation_id: str) -> tuple[str, str] | None:
@@ -899,7 +1280,7 @@ def _merge_group_safe_structured_memory(
     canonical_item: dict[str, Any],
     group_scope: str,
 ) -> dict[str, list[dict[str, Any]]]:
-    merged: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "candidates": []}
+    merged: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "l3": [], "candidates": []}
     member_memory = _ensure_structured_memory(member_item)
     canonical_memory = _ensure_structured_memory(canonical_item)
     for bucket in ("l1", "l2", "candidates"):
@@ -918,6 +1299,13 @@ def _merge_group_safe_structured_memory(
             if key not in seen:
                 merged[bucket].append(dict(entry))
                 seen.add(key)
+    # 群成员会话的 L3 只给当前成员详情使用，不能把别人的原始对话混进来。
+    # 群总览的 L3 仍由 group:<id> 自己维护。
+    merged["l3"] = [
+        dict(entry)
+        for entry in list(member_memory.get("l3") or [])[-8:]
+        if isinstance(entry, dict)
+    ]
     return merged
 
 
@@ -935,6 +1323,75 @@ def _entry_visible_in_group(entry: dict[str, Any], group_scope: str) -> bool:
 def _proactive_override(value: Any) -> str:
     normalized = str(value or "auto").strip().lower()
     return normalized if normalized in {"auto", "allow", "deny"} else "auto"
+
+
+def _trust_tier(value: Any) -> str:
+    normalized = str(value or "probation").strip().lower()
+    return normalized if normalized in {"probation", "approved", "trusted", "blocked"} else "probation"
+
+
+_PERSONAL_EVENT_HINTS = (
+    "生日", "考试", "面试", "答辩", "开会", "会议", "截止", "ddl", "DDL",
+    "报名", "航班", "飞机", "火车", "旅行", "纪念日",
+)
+
+
+def _remember_personal_event(item: dict[str, Any], text: str, now: float) -> None:
+    source = str(text or "").strip()
+    if not source or not any(hint in source for hint in _PERSONAL_EVENT_HINTS):
+        return
+    local_now = datetime.fromtimestamp(now, safe_zoneinfo("Asia/Shanghai"))
+    event_date = None
+    if "大后天" in source:
+        event_date = (local_now + timedelta(days=3)).date()
+    elif "后天" in source:
+        event_date = (local_now + timedelta(days=2)).date()
+    elif "明天" in source:
+        event_date = (local_now + timedelta(days=1)).date()
+    elif "今天" in source or "今晚" in source:
+        event_date = local_now.date()
+    else:
+        match = re.search(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})[日号]?", source)
+        if match:
+            year = int(match.group(1) or local_now.year)
+            try:
+                event_date = datetime(year, int(match.group(2)), int(match.group(3))).date()
+            except ValueError:
+                return
+            if not match.group(1) and event_date < local_now.date():
+                event_date = event_date.replace(year=event_date.year + 1)
+    if event_date is None:
+        return
+
+    hour, minute = 9, 0
+    time_match = re.search(r"(\d{1,2})[点:：](?:(\d{1,2})分?)?", source)
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2) or 0)
+        if "下午" in source and hour < 12:
+            hour += 12
+        if "晚上" in source and hour < 12:
+            hour += 12
+        if hour > 23 or minute > 59:
+            return
+    due = datetime.combine(event_date, datetime.min.time(), tzinfo=local_now.tzinfo).replace(
+        hour=hour,
+        minute=minute,
+    )
+    event_id = f"{event_date.isoformat()}:{hour:02d}{minute:02d}:{next(h for h in _PERSONAL_EVENT_HINTS if h in source).lower()}"
+    events = [event for event in (item.get("personal_events") or []) if isinstance(event, dict)]
+    if any(str(event.get("id") or "") == event_id for event in events):
+        return
+    events.append({
+        "id": event_id,
+        "title": source[:120],
+        "kind": "birthday" if "生日" in source else "important_event",
+        "due_at": due.timestamp(),
+        "created_at": now,
+        "status": "scheduled",
+        "visibility": "private",
+    })
+    item["personal_events"] = events[-20:]
 
 
 _running_average = _memory_core._running_average

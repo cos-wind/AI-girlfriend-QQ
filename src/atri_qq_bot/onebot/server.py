@@ -3,15 +3,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import random
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
+from ..group_reply_focus import GroupReplyFocusStore
 from ..message_plan import OutgoingMessage, build_outgoing_messages, outgoing_to_onebot_message
 from ..persona import AtriReplyEngine
 from ..proactive import ProactivePlanner, load_proactive_policy, safe_zoneinfo
+from ..runtime.control import (
+    publish_napcat_runtime_state,
+    publish_onebot_event_activity,
+    publish_onebot_probe_result,
+    restart_background_services,
+)
 from ..runtime.paths import PROJECT_ROOT
 from ..stickers import StickerManager
 from ..toolbox import ToolAnalyzer
@@ -29,16 +38,131 @@ from ..voice import (
     stabilize_explicit_voice_request,
 )
 from atri_webui import bind_loop, start_webui, stop_webui
-from .message_batch import _merge_message_batch
-from .message_parser import extract_plain_text
+from .message_batch import _merge_message_batch, _message_to_segments
+from .message_parser import (
+    extract_plain_text,
+    extract_reply_inline_message,
+    extract_reply_message_id,
+    is_poke_event,
+    normalize_poke_event,
+)
 from .reply_policy import _as_int, is_bot_mentioned, should_reply
 
 SMART_GROUP_REPLY_COOLDOWN_SECONDS = 75.0
 MESSAGE_DEBOUNCE_SECONDS = 1.2
 QUEUE_IDLE_TIMEOUT_SECONDS = 20.0
+VISUAL_CONTEXT_TTL_SECONDS = 15 * 60
+PENDING_GROUP_VISUAL_TTL_SECONDS = 60
+POKE_REPLY_COOLDOWN_SECONDS = 60.0
+ONEBOT_HEALTH_INTERVAL_SECONDS = 30.0
+ONEBOT_HEALTH_FAILURES_BEFORE_RECOVERY = 2
+NAPCAT_RECOVERY_COOLDOWN_SECONDS = 10 * 60
+LOGGER = logging.getLogger("atri.onebot")
+
+
+def _onebot_status_is_healthy(result: dict[str, Any] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    try:
+        retcode = int(result.get("retcode", -1))
+    except (TypeError, ValueError):
+        return False
+    data = result.get("data")
+    return bool(
+        retcode == 0
+        and str(result.get("status") or "ok").lower() in {"ok", "async"}
+        and isinstance(data, dict)
+        and data.get("online") is True
+        and data.get("good") is True
+    )
+
+
+def _is_visual_followup(text: str) -> bool:
+    normalized = "".join(str(text or "").split()).lower()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "这是谁",
+            "这个是谁",
+            "图里是谁",
+            "图片里是谁",
+            "什么角色",
+            "哪个角色",
+            "出自哪里",
+            "哪部作品",
+            "图上写",
+            "图片写",
+            "写了什么",
+            "什么文字",
+            "图片内容",
+            "图里内容",
+            "这个表情",
+            "刚才那张",
+            "上一张图",
+            "这张图",
+            "这张图片",
+        )
+    )
+
+
+def _event_has_visual_material(event: dict[str, Any]) -> bool:
+    message = event.get("message")
+    if not isinstance(message, list):
+        return False
+    return any(
+        isinstance(segment, dict)
+        and str(segment.get("type") or "").lower() in {"image", "mface", "marketface"}
+        for segment in message
+    )
+
+
+def _should_reuse_cached_visual(event: dict[str, Any], text: str) -> bool:
+    return not _event_has_visual_material(event) and _is_visual_followup(text)
+
+
+def _personal_event_message(event: dict[str, Any]) -> str:
+    title = str(event.get("title") or "今天的重要安排").strip()
+    if event.get("kind") == "birthday":
+        return "生日快乐！今天是你的重要日子。高性能亚托莉记得，也希望你今天能被认真地祝福。"
+    if len(title) > 72:
+        title = title[:72].rstrip("，,：:；;")
+    return f"提醒你一下：你之前提到“{title}”。时间到了，先确认要带的东西和下一步，别让重要安排被忙乱挤掉。"
+
+
+def _pending_visual_key(event: dict[str, Any]) -> str:
+    if event.get("message_type") != "group":
+        return ""
+    group_id = event.get("group_id")
+    user_id = event.get("user_id")
+    if group_id is None or user_id is None:
+        return ""
+    return f"group:{group_id}:user:{user_id}"
+
+
+def _merge_pending_visual_event(
+    visual_event: dict[str, Any],
+    current_event: dict[str, Any],
+) -> dict[str, Any]:
+    visual_segments = [
+        dict(segment)
+        for segment in _message_to_segments(visual_event.get("message"))
+        if str(segment.get("type") or "").lower() in {"image", "mface", "marketface"}
+    ]
+    if not visual_segments:
+        return current_event
+    merged = dict(current_event)
+    merged["message"] = visual_segments + _message_to_segments(current_event.get("message"))
+    return merged
 
 
 class OneBotServer:
+    """OneBot v11 的接入适配器。
+
+    消息流转为：NapCat 反向 WebSocket -> ``handle_payload`` -> 按会话队列
+    防抖合并 -> ``_handle_event``（回复策略、ASR、多模态）-> 人格引擎 ->
+    ``send_reply`` -> OneBot action。每个会话独占队列，避免慢模型请求导致
+    同一用户的消息乱序。
+    """
     def __init__(self, config: Any, reply_engine: AtriReplyEngine) -> None:
         self.config = config
         self.reply_engine = reply_engine
@@ -48,10 +172,20 @@ class OneBotServer:
         self.voice_calls = VoiceCallStore()
         self._active_websockets: set[Any] = set()
         self._pending_actions: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._onebot_probe_failures = 0
+        self._last_napcat_recovery_at = 0.0
         self._message_tasks: set[asyncio.Task[Any]] = set()
         self._conversation_queues: dict[str, asyncio.Queue[tuple[Any, dict[str, Any]]]] = {}
         self._conversation_workers: dict[str, asyncio.Task[Any]] = {}
+        # 戳一戳不应因重复通知触发连续大模型请求；按会话做轻量冷却。
+        self._last_poke_reply_at: dict[str, float] = {}
         self._last_smart_group_reply_at: dict[str, float] = {}
+        self._recent_visual_contexts: dict[str, tuple[float, Any]] = {}
+        self._group_reply_focus = GroupReplyFocusStore(bot_qq=config.bot_qq)
+        self._pending_group_visual_events: dict[
+            str,
+            tuple[float, dict[str, Any]],
+        ] = {}
         self._event_log = PROJECT_ROOT / "logs" / "onebot-events.log"
         self._reply_event_log = PROJECT_ROOT / "logs" / "reply-events.jsonl"
         self._voice_event_log = PROJECT_ROOT / "logs" / "voice-events.log"
@@ -61,29 +195,109 @@ class OneBotServer:
         )
 
     async def handle_connection(self, websocket: Any, path: str | None = None) -> None:
-        print(f"[onebot] NapCat connected: {getattr(websocket, 'remote_address', 'unknown')}")
+        LOGGER.info("NapCat 已连接：remote=%s", getattr(websocket, "remote_address", "unknown"))
         self._active_websockets.add(websocket)
+        publish_napcat_runtime_state("probing", detail="NapCat 已连接，正在确认 QQ 登录状态")
+        health_task = asyncio.create_task(self.onebot_health_loop(websocket))
         try:
             async for raw_message in websocket:
                 await self.handle_payload(websocket, raw_message)
         except Exception as exc:
-            print(f"[onebot] NapCat connection closed or failed: {exc}")
+            LOGGER.warning("NapCat 连接关闭或异常：%s", exc)
         finally:
+            health_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await health_task
             self._active_websockets.discard(websocket)
-            print("[onebot] NapCat disconnected; waiting for reconnect.")
+            if not self._active_websockets:
+                publish_napcat_runtime_state(
+                    "disconnected",
+                    detail="NapCat 连接已断开，正在等待重连",
+                )
+            LOGGER.warning("NapCat 已断开，服务继续监听并等待其自动重连")
+
+    async def probe_onebot_status(self, websocket: Any) -> bool:
+        """主动询问 QQ 内核状态；NapCat 心跳本身不能证明 QQ 仍在线。"""
+        try:
+            result = await self.call_action_and_wait(
+                websocket,
+                "get_status",
+                {},
+                5.0,
+            )
+        except Exception as exc:
+            publish_onebot_probe_result(False, detail=f"QQ 状态探测失败：{exc}")
+            LOGGER.warning("QQ 状态探测失败：%s", exc)
+            return False
+        healthy = _onebot_status_is_healthy(result)
+        data = result.get("data") if isinstance(result, dict) else None
+        self_id = self.config.bot_qq if isinstance(data, dict) else None
+        if healthy:
+            publish_onebot_probe_result(
+                True,
+                detail="QQ 登录与消息服务正常",
+                self_id=self_id,
+            )
+            return True
+        detail = _onebot_action_error_detail(result, default="QQ 内核报告离线或异常")
+        publish_onebot_probe_result(False, detail=detail, self_id=self_id)
+        LOGGER.warning("QQ 状态异常：%s", detail)
+        return False
+
+    async def onebot_health_loop(self, websocket: Any) -> None:
+        await asyncio.sleep(1.0)
+        while websocket in self._active_websockets:
+            healthy = await self.probe_onebot_status(websocket)
+            if healthy:
+                self._onebot_probe_failures = 0
+            else:
+                self._onebot_probe_failures += 1
+                await self._recover_napcat_after_repeated_probe_failures()
+            await asyncio.sleep(ONEBOT_HEALTH_INTERVAL_SECONDS)
+
+    async def _recover_napcat_after_repeated_probe_failures(self) -> None:
+        if self._onebot_probe_failures < ONEBOT_HEALTH_FAILURES_BEFORE_RECOVERY:
+            return
+        now = time.monotonic()
+        if now - self._last_napcat_recovery_at < NAPCAT_RECOVERY_COOLDOWN_SECONDS:
+            return
+        self._last_napcat_recovery_at = now
+        result = restart_background_services()
+        if result.get("ok"):
+            LOGGER.warning("QQ 状态连续异常，已请求受控恢复 NapCat 专用进程")
+        else:
+            LOGGER.error("请求恢复 NapCat 失败：%s", result.get("error"))
 
     async def handle_payload(self, websocket: Any, raw_message: str) -> None:
         try:
             event = json.loads(raw_message)
         except json.JSONDecodeError:
-            print(f"[onebot] Ignored non-json payload: {raw_message[:120]}")
+            LOGGER.warning("忽略非 JSON OneBot 负载：bytes=%s", len(raw_message))
             return
+
+        # OneBot 心跳是验证 QQ/NapCat 事件流仍活着的唯一低成本信号；仅有
+        # WebSocket TCP 连接并不足以说明机器人还能接收 QQ 消息。
+        publish_onebot_event_activity(is_message=event.get("post_type") == "message")
 
         if "echo" in event and "retcode" in event:
             self._resolve_pending_action(event)
             return
 
+        # OneBot 的戳一戳是 notice 事件。只把“目标是亚托莉”的事件归一化，
+        # 戳其他人的通知直接忽略，避免误触发正常对话链路。
+        if is_poke_event(event):
+            event = normalize_poke_event(event, self.config.bot_qq)
+            if event is None:
+                return
+
         if event.get("post_type") == "message":
+            # 不记录原始聊天文本，日志只保留类型和会话标识以保护隐私。
+            LOGGER.debug(
+                "收到消息事件：type=%s conversation=%s user=%s",
+                event.get("message_type"),
+                _conversation_id(event),
+                event.get("user_id"),
+            )
             self._enqueue_message_event(websocket, event)
             return
 
@@ -121,6 +335,7 @@ class OneBotServer:
         )
 
     async def _conversation_worker(self, queue_id: str) -> None:
+        """在 1.2 秒窗口内合并同一会话的连续输入，再串行处理。"""
         queue = self._conversation_queues[queue_id]
         try:
             while True:
@@ -152,19 +367,47 @@ class OneBotServer:
                 self._start_conversation_worker(queue_id)
 
     async def _handle_event(self, websocket: Any, event: dict[str, Any]) -> None:
+        """执行一次完整的入站消息决策和回复流程。"""
         plain_text = extract_plain_text(event.get("message"))
+        poke_event = bool(event.get("_atri_poke_event"))
         is_message = (
             event.get("post_type") == "message"
             and _as_int(event.get("user_id")) != self.config.bot_qq
             and _as_int(event.get("self_id")) in {None, self.config.bot_qq}
         )
 
-        preliminary_reply = should_reply(
+        if poke_event and not self._allow_poke_reply(event):
+            LOGGER.info(
+                "戳一戳回复进入冷却：conversation=%s user=%s",
+                _conversation_id(event),
+                event.get("user_id"),
+            )
+            return
+
+        preliminary_reply = poke_event or should_reply(
             event,
             self.config.bot_qq,
             self.config.reply_mode,
             self.config.owner_qqs,
         )
+        active_group_continuation = False
+        explicit_group_mention = bool(
+            is_message
+            and event.get("message_type") == "group"
+            and not poke_event
+            and is_bot_mentioned(event, self.config.bot_qq, plain_text)
+        )
+        if explicit_group_mention:
+            self._group_reply_focus.open_session(
+                event,
+                nickname=_nickname(event) or "",
+            )
+        elif is_message and event.get("message_type") == "group" and not poke_event:
+            active_group_continuation = self._group_reply_focus.is_active_continuation(
+                event,
+                plain_text,
+            )
+            preliminary_reply = preliminary_reply or active_group_continuation
         voice_transcript = None
         voice_error: Exception | None = None
         if is_message and (event.get("message_type") == "private" or preliminary_reply):
@@ -195,7 +438,9 @@ class OneBotServer:
 
         should_send_reply = preliminary_reply
         conversation_id = _conversation_id(event)
-        if should_send_reply and not self._smart_group_reply_allowed(
+        if is_message:
+            self._remember_pending_group_visual(event)
+        if should_send_reply and not active_group_continuation and not self._smart_group_reply_allowed(
             event,
             conversation_id,
             plain_text,
@@ -204,16 +449,48 @@ class OneBotServer:
         profile_id = _profile_id(event)
         nickname = _nickname(event)
         is_owner = _as_int(event.get("user_id")) in set(self.config.owner_qqs)
+        trust_tier = getattr(self.reply_engine.memory, "trust_tier", None)
+        if (
+            is_message
+            and not is_owner
+            and callable(trust_tier)
+            and trust_tier(profile_id) == "blocked"
+        ):
+            should_send_reply = False
         addressed_to_bot = (
             event.get("message_type") == "private"
+            or poke_event
             or (
                 event.get("message_type") == "group"
                 and (should_send_reply or is_bot_mentioned(event, self.config.bot_qq, plain_text))
             )
         )
+        group_reply_focus = None
+        if is_message and event.get("message_type") == "group" and not poke_event:
+            group_reply_focus = self._group_reply_focus.resolve(
+                event,
+                plain_text,
+                nickname=nickname or "",
+                addressed_to_bot=addressed_to_bot,
+            )
+            if active_group_continuation and group_reply_focus is not None:
+                group_reply_focus = replace(group_reply_focus, source="active_session")
+            if not addressed_to_bot:
+                self._group_reply_focus.remember(
+                    event,
+                    plain_text,
+                    nickname=nickname or "",
+                    addressed_to_bot=False,
+                )
 
         if is_message:
             self._log_message_decision(event, plain_text, should_send_reply)
+            LOGGER.info(
+                "消息决策：conversation=%s reply=%s mode=%s",
+                conversation_id,
+                should_send_reply,
+                self.config.reply_mode,
+            )
 
         if is_message:
             self.reply_engine.remember_target(conversation_id, event)
@@ -245,6 +522,23 @@ class OneBotServer:
         if not should_send_reply:
             return
 
+        if group_reply_focus is not None and group_reply_focus.source == "previous_same_sender":
+            analysis_event = group_reply_focus.analysis_event
+            self._pending_group_visual_events.pop(_pending_visual_key(event), None)
+        else:
+            analysis_event = self._event_with_pending_group_visual(event)
+
+        quoted_message_id, quoted_text, quoted_segments = await self._resolve_quoted_message(
+            websocket,
+            event,
+        )
+        if quoted_segments:
+            analysis_event = self._event_with_quoted_message(
+                analysis_event,
+                quoted_segments,
+            )
+        model_input_text = _compose_model_input(plain_text, quoted_text)
+
         voice_only_text = plain_text.replace("@群友", "").strip()
         if (
             voice_error is not None
@@ -258,11 +552,15 @@ class OneBotServer:
             )
             return
 
+        has_current_visual = _event_has_visual_material(analysis_event)
+        if has_current_visual:
+            self._recent_visual_contexts.pop(conversation_id, None)
+
         tool_context = None
         try:
             tool_context = await self.tools.analyze(
-                event,
-                plain_text,
+                analysis_event,
+                model_input_text,
                 lambda action, params: self.call_action_and_wait(
                     websocket,
                     action,
@@ -271,7 +569,35 @@ class OneBotServer:
                 ),
             )
         except Exception as exc:
-            print(f"[onebot] Tool analysis skipped: {exc}")
+            LOGGER.warning("多模态/工具分析跳过：conversation=%s error=%s", conversation_id, exc)
+        if tool_context is None and _should_reuse_cached_visual(
+            analysis_event,
+            model_input_text,
+        ):
+            cached = self._recent_visual_contexts.get(conversation_id)
+            if cached and time.time() - cached[0] <= VISUAL_CONTEXT_TTL_SECONDS:
+                try:
+                    if getattr(cached[1], "visual_data", None):
+                        tool_context = await self.tools.analyze_visual_followup(
+                            cached[1],
+                            model_input_text,
+                        )
+                except Exception as exc:
+                    LOGGER.warning("图片追问分析失败：conversation=%s error=%s", conversation_id, exc)
+                if tool_context is None:
+                    tool_context = cached[1]
+            elif cached:
+                self._recent_visual_contexts.pop(conversation_id, None)
+        if tool_context is not None and (
+            has_current_visual or getattr(tool_context, "visual_data", None)
+        ):
+            self._recent_visual_contexts[conversation_id] = (time.time(), tool_context)
+            if len(self._recent_visual_contexts) > 256:
+                oldest = min(
+                    self._recent_visual_contexts,
+                    key=lambda key: self._recent_visual_contexts[key][0],
+                )
+                self._recent_visual_contexts.pop(oldest, None)
         if voice_transcript is not None:
             tool_context = VoicePromptContext(
                 voice_transcript,
@@ -281,11 +607,12 @@ class OneBotServer:
 
         reply_text = await self.reply_engine.reply(
             conversation_id,
-            plain_text,
+            model_input_text,
             nickname,
             profile_id=profile_id,
             observed=True,
             tool_context=tool_context,
+            reply_focus=group_reply_focus,
         )
         voice_request = self.reply_engine.consume_voice_request(conversation_id)
         consume_reply_voice_choice = getattr(
@@ -433,7 +760,124 @@ class OneBotServer:
             delivered_reply=recorded_reply,
             voice_mode=getattr(voice_request, "mode", "") if voice_request else "",
             material_read_level=str(getattr(tool_context, "read_level", "") or ""),
+            reply_focus_source=str(getattr(group_reply_focus, "source", "") or ""),
+            reply_focus_text=str(getattr(group_reply_focus, "focus_text", "") or ""),
+            quoted_message_id=quoted_message_id,
         )
+
+    async def _resolve_quoted_message(
+        self,
+        websocket: Any,
+        event: dict[str, Any],
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """解析用户引用的消息，供本轮模型和多模态工具共同使用。
+
+        QQ/OneBot 的 reply 消息段通常只携带目标消息 ID；若事件没有直接
+        附带原文，就按需调用 ``get_msg``。读取失败时保留“存在引用”的
+        明确信息，但绝不根据 ID 猜测原文。
+        """
+
+        message_id = extract_reply_message_id(event.get("message"))
+        if not message_id:
+            reply_payload = event.get("reply")
+            if isinstance(reply_payload, dict):
+                value = reply_payload.get("id") or reply_payload.get("message_id")
+                if value not in (None, ""):
+                    message_id = str(value)
+        if not message_id:
+            return "", "", []
+
+        inline_message = extract_reply_inline_message(event)
+        if inline_message is not None:
+            return (
+                message_id,
+                extract_plain_text(inline_message),
+                _message_to_segments(inline_message),
+            )
+
+        request_id: int | str = int(message_id) if message_id.isdigit() else message_id
+        try:
+            result = await self.call_action_and_wait(
+                websocket,
+                "get_msg",
+                {"message_id": request_id},
+                3.0,
+            )
+            data = result.get("data") if isinstance(result, dict) else None
+            quoted_message = data.get("message") if isinstance(data, dict) else None
+            if quoted_message is not None:
+                return (
+                    message_id,
+                    extract_plain_text(quoted_message),
+                    _message_to_segments(quoted_message),
+                )
+        except Exception as exc:
+            LOGGER.warning("引用消息读取失败：message_id=%s error=%s", message_id, exc)
+
+        return message_id, "[引用消息原文暂时无法读取]", []
+
+    def _event_with_quoted_message(
+        self,
+        event: dict[str, Any],
+        quoted_segments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """把引用消息的媒体段合并到本轮分析事件，不改变原始事件。"""
+
+        if not quoted_segments:
+            return event
+        merged = dict(event)
+        current_segments = _message_to_segments(event.get("message"))
+        merged["message"] = (
+            [{"type": "text", "data": {"text": "[引用消息]"}}]
+            + quoted_segments
+            + [{"type": "text", "data": {"text": "\n[当前消息]"}}]
+            + current_segments
+        )
+        return merged
+
+    def _allow_poke_reply(self, event: dict[str, Any]) -> bool:
+        """对戳一戳做会话级冷却，防止重复通知触发刷屏。"""
+
+        key = _message_queue_id(event)
+        now = time.time()
+        last = getattr(self, "_last_poke_reply_at", {}).get(key, 0.0)
+        if now - last < POKE_REPLY_COOLDOWN_SECONDS:
+            return False
+        if not hasattr(self, "_last_poke_reply_at"):
+            self._last_poke_reply_at = {}
+        self._last_poke_reply_at[key] = now
+        return True
+
+    def _remember_pending_group_visual(self, event: dict[str, Any]) -> None:
+        key = _pending_visual_key(event)
+        if not key or not _event_has_visual_material(event):
+            return
+        self._pending_group_visual_events[key] = (time.time(), event)
+        if len(self._pending_group_visual_events) <= 256:
+            return
+        oldest_key = min(
+            self._pending_group_visual_events,
+            key=lambda item: self._pending_group_visual_events[item][0],
+        )
+        self._pending_group_visual_events.pop(oldest_key, None)
+
+    def _event_with_pending_group_visual(
+        self,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        key = _pending_visual_key(event)
+        if not key:
+            return event
+        if _event_has_visual_material(event):
+            self._pending_group_visual_events.pop(key, None)
+            return event
+        pending = self._pending_group_visual_events.pop(key, None)
+        if (
+            not pending
+            or time.time() - pending[0] > PENDING_GROUP_VISUAL_TTL_SECONDS
+        ):
+            return event
+        return _merge_pending_visual_event(pending[1], event)
 
     async def _send_streamed_speech_reply(
         self,
@@ -536,6 +980,7 @@ class OneBotServer:
                                 event,
                                 OutgoingMessage("text", fallback_text),
                             )
+                    await self._recover_napcat_after_repeated_probe_failures()
                     return fallback_text or notice
                 error_text = "消息没有发送成功。"
                 with contextlib.suppress(Exception):
@@ -544,6 +989,7 @@ class OneBotServer:
                         event,
                         OutgoingMessage("text", error_text),
                     )
+                await self._recover_napcat_after_repeated_probe_failures()
                 return error_text
 
             if message.kind == "text":
@@ -603,7 +1049,7 @@ class OneBotServer:
                     12.0,
                 )
                 try:
-                    _require_onebot_action_success(result)
+                    self._require_message_delivery(result)
                 except RuntimeError as exc:
                     self._log_voice_event(event, "delivery_failed", error=str(exc))
                     raise
@@ -617,26 +1063,45 @@ class OneBotServer:
                     12.0,
                 )
                 try:
-                    _require_onebot_action_success(result)
+                    self._require_message_delivery(result)
                 except RuntimeError as exc:
                     self._log_voice_event(event, "delivery_failed", error=str(exc))
                     raise
                 self._log_voice_event(event, "delivered", message=message, result=result)
                 return
         if message_type == "private":
-            await self.call_action(
+            result = await self.call_action_and_wait(
                 websocket,
                 "send_private_msg",
                 {"user_id": event["user_id"], "message": onebot_message},
+                12.0,
             )
+            self._require_message_delivery(result)
             return
 
         if message_type == "group":
-            await self.call_action(
+            result = await self.call_action_and_wait(
                 websocket,
                 "send_group_msg",
                 {"group_id": event["group_id"], "message": onebot_message},
+                12.0,
             )
+            self._require_message_delivery(result)
+
+    def _require_message_delivery(self, result: dict[str, Any] | None) -> None:
+        try:
+            _require_onebot_action_success(result)
+        except RuntimeError:
+            detail = _onebot_action_error_detail(result, default="QQ 消息发送失败")
+            publish_onebot_probe_result(False, detail=detail, self_id=self.config.bot_qq)
+            self._onebot_probe_failures += 1
+            raise
+        self._onebot_probe_failures = 0
+        publish_onebot_probe_result(
+            True,
+            detail="QQ 消息发送成功",
+            self_id=self.config.bot_qq,
+        )
 
     async def call_action(
         self, websocket: Any, action: str, params: dict[str, Any]
@@ -646,6 +1111,7 @@ class OneBotServer:
             "params": params,
             "echo": f"atri-{uuid.uuid4().hex}",
         }
+        LOGGER.debug("调用 OneBot action=%s", action)
         await websocket.send(json.dumps(payload, ensure_ascii=False))
 
     async def call_action_and_wait(
@@ -665,6 +1131,7 @@ class OneBotServer:
             "echo": echo,
         }
         try:
+            LOGGER.debug("调用并等待 OneBot action=%s timeout=%.1fs", action, timeout_seconds)
             await websocket.send(json.dumps(payload, ensure_ascii=False))
             return await asyncio.wait_for(future, timeout=max(1.0, float(timeout_seconds)))
         finally:
@@ -680,7 +1147,11 @@ class OneBotServer:
         with contextlib.suppress(asyncio.CancelledError):
             exc = task.exception()
             if exc is not None:
-                print(f"[onebot] Message task failed: {exc}")
+                LOGGER.error(
+                    "消息任务异常：%s",
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
 
     async def idle_nudge_loop(self) -> None:
         while True:
@@ -757,6 +1228,29 @@ class OneBotServer:
             websocket = self._first_active_websocket()
             if websocket is None:
                 continue
+            try:
+                due_events = self.reply_engine.memory.due_personal_events(
+                    getattr(self.config, "owner_qqs", ()),
+                )
+            except Exception as exc:
+                print(f"[onebot] Personal event scheduler skipped: {exc}")
+                due_events = []
+            for conversation_id, target, personal_event in due_events:
+                try:
+                    text = _personal_event_message(personal_event)
+                    await self.call_action(
+                        websocket,
+                        "send_private_msg",
+                        {"user_id": target["user_id"], "message": text},
+                    )
+                    self.reply_engine.memory.mark_personal_event_sent(
+                        conversation_id,
+                        str(personal_event.get("id") or ""),
+                    )
+                    self.reply_engine.record_bot_reply(conversation_id, text)
+                    print(f"[onebot] Personal event reminder sent to {target['user_id']}.")
+                except Exception as exc:
+                    print(f"[onebot] Personal event reminder failed: {exc}")
             self.proactive_planner.update_owner_qqs(getattr(self.config, "owner_qqs", ()))
             try:
                 due_plans = self.proactive_planner.due_plans(policy)
@@ -971,6 +1465,9 @@ class OneBotServer:
         delivered_reply: str,
         voice_mode: str = "",
         material_read_level: str = "",
+        reply_focus_source: str = "",
+        reply_focus_text: str = "",
+        quoted_message_id: str = "",
     ) -> None:
         with contextlib.suppress(Exception):
             payload = {
@@ -984,6 +1481,9 @@ class OneBotServer:
                 "delivered_reply": str(delivered_reply or "")[:1200],
                 "voice_mode": voice_mode,
                 "material_read_level": material_read_level,
+                "reply_focus_source": reply_focus_source,
+                "reply_focus_text": str(reply_focus_text or "")[:400],
+                "quoted_message_id": str(quoted_message_id or ""),
             }
             self._reply_event_log.parent.mkdir(parents=True, exist_ok=True)
             with self._reply_event_log.open("a", encoding="utf-8") as file:
@@ -1023,6 +1523,16 @@ async def run_server(config: Any) -> None:
                 await proactive_v2_task
             with contextlib.suppress(asyncio.CancelledError):
                 await group_task
+
+
+def _compose_model_input(current_text: str, quoted_text: str) -> str:
+    """将引用内容和用户当前输入放入明确边界，避免模型混淆说话人。"""
+
+    current = str(current_text or "").strip() or "[用户未附加文字]"
+    quoted = str(quoted_text or "").strip()
+    if not quoted:
+        return current
+    return f"【引用消息】\n{quoted[:800]}\n【用户当前消息】\n{current}"
 
 
 def _message_queue_id(event: dict[str, Any]) -> str:
@@ -1080,13 +1590,23 @@ def _require_onebot_action_success(result: dict[str, Any] | None) -> None:
         retcode = -1
     if retcode == 0 and str(result.get("status") or "ok").lower() in {"ok", "async"}:
         return
-    detail = str(
+    detail = _onebot_action_error_detail(result, default=f"retcode={retcode}")
+    raise RuntimeError(f"NapCat 消息发送失败：{detail}")
+
+
+def _onebot_action_error_detail(
+    result: dict[str, Any] | None,
+    *,
+    default: str,
+) -> str:
+    if not isinstance(result, dict):
+        return default
+    return str(
         result.get("message")
         or result.get("wording")
         or result.get("msg")
-        or f"retcode={retcode}"
+        or default
     ).strip()
-    raise RuntimeError(f"NapCat 语音发送失败：{detail}")
 
 
 def _now_text() -> str:

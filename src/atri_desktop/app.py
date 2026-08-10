@@ -25,6 +25,16 @@ DEFAULT_DPI = 96
 WINDOWS_APP_ID = "AtriQQBot.DesktopPet"
 
 
+def status_bubble_message(status: DesktopPetStatus) -> str:
+    if status.atri and status.napcat:
+        return random.choice(("后台连接正常。", "高性能运行中。", "Atri 和 NapCat 都在线。"))
+    if status.napcat_state == "login_required":
+        return "QQ 登录已失效，请扫描已弹出的二维码重新登录。"
+    if status.atri:
+        return "Atri 已启动，NapCat 还没连上。"
+    return "Atri 未运行。右键可以启动亚托莉。"
+
+
 def _prepare_color_key_image(image: Image.Image) -> Image.Image:
     rgba = image.convert("RGBA")
     alpha_mask = rgba.getchannel("A").point(
@@ -197,10 +207,18 @@ class DesktopPetApp:
                 [
                     f"Atri 服务：{_state_text(status.atri)}",
                     f"NapCat：{_state_text(status.napcat)}",
+                    f"NapCat 状态：{status.napcat_detail or status.napcat_state}",
                     f"Ollama：{_state_text(status.ollama)}",
                     f"模型：{status.model or '未配置'}",
+                    f"视觉模型：{status.vision_model or '未配置'}",
                     f"OneBot：{status.onebot}",
                     f"WebUI：{status.webui_url}",
+                    (
+                        f"NapCat WebUI：{status.napcat_webui_url}"
+                        if status.napcat_webui_url
+                        else "NapCat WebUI：未配置"
+                    ),
+                    f"NapCat WebUI 状态：{_state_text(status.napcat_webui_reachable)}",
                     f"QQ：{status.bot_qq}",
                 ]
             ),
@@ -278,7 +296,7 @@ class DesktopPetApp:
                 self._say("上一条命令还在执行，稍等一下。")
                 return
             self.busy = True
-            self._say("命令执行中...")
+            self._say("正在停止 Atri..." if name == "stop" else "命令执行中...")
 
         def worker() -> None:
             try:
@@ -348,12 +366,8 @@ class DesktopPetApp:
             self._clear_startup_guard()
         expression = expression_for_status(status.atri, status.napcat)
         self._set_expression(expression)
-        if status.atri and status.napcat:
-            self._say(random.choice(("后台连接正常。", "高性能运行中。", "Atri 和 NapCat 都在线。")))
-        elif status.atri:
-            self._say("Atri 已启动，NapCat 还没连上。")
-        else:
-            self._say("Atri 未运行。右键可以启动亚托莉。")
+        message = status_bubble_message(status)
+        self._say(message)
 
     def _set_expression_by_key(self, key: str, message: str) -> None:
         for expression in EXPRESSIONS:

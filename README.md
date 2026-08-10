@@ -171,7 +171,7 @@ WEB_SEARCH_MAX_RESULTS=5
 云端部署说明在：
 
 ```text
-D:\Codex project\AI_ATRI\deploy\cloud\README.md
+deploy/cloud/README.md
 ```
 
 核心要求：
@@ -195,7 +195,7 @@ OWNER_QQ=你的QQ号
 把图片放进：
 
 ```text
-D:\Codex project\AI_ATRI\data\stickers
+<项目根目录>\data\stickers
 ```
 
 推荐按情绪放到这些文件夹：
@@ -207,13 +207,13 @@ happy / comfort / tired / proud / confused / shy / food / goodnight / default
 自动保存聊天记录表情包：
 
 ```text
-D:\Codex project\AI_ATRI\data\stickers\_chat_history
+<项目根目录>\data\stickers\_chat_history
 ```
 
 默认联网表情缓存：
 
 ```text
-D:\Codex project\AI_ATRI\data\stickers\_online_default
+<项目根目录>\data\stickers\_online_default
 ```
 
 发送优先级：
@@ -225,7 +225,7 @@ D:\Codex project\AI_ATRI\data\stickers\_online_default
 自定义触发词编辑：
 
 ```text
-D:\Codex project\AI_ATRI\data\stickers\triggers.json
+<项目根目录>\data\stickers\triggers.json
 ```
 
 例如 `"高性能": "proud"` 表示用户说到"高性能"时，优先从 `proud` 文件夹发一张表情包。
@@ -238,3 +238,9 @@ cd "C:\Path\To\AI_ATRI"  # 替换为你的实际路径
 python -m pip install -e ".[dev]"
 python -m pytest
 ```
+
+## 开发者支持
+
+完整的服务关系、端口、NapCat WebUI、日志、依赖与故障排查见 [DEVELOPER.md](DEVELOPER.md)。
+
+主运行环境由 [requirements.txt](requirements.txt) 锁定：`httpx` 用于模型/API 请求，`websockets` 用于 OneBot 反向连接，`python-dotenv` 读取配置，`Pillow`/`rapidocr`/`onnxruntime` 处理图像与 OCR，`pypdf` 解析 PDF，`imageio-ffmpeg` 抽取视频帧；`pytest` 仅用于开发回归测试。语音与歌唱使用隔离运行时，不应混装进主 `.venv`。

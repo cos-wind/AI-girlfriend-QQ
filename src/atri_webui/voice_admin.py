@@ -114,6 +114,19 @@ def save_test_audio(filename: str, data: bytes) -> Path:
     return target.resolve()
 
 
+def save_singing_source_audio(filename: str, data: bytes) -> Path:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in AUDIO_EXTENSIONS:
+        raise ValueError("导唱音频只支持 wav/flac/mp3/ogg/m4a/aac")
+    if not data:
+        raise ValueError("导唱音频为空")
+    target_dir = VOICE_CACHE_DIR / "singing-sources"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"source-{uuid4().hex}{suffix}"
+    target.write_bytes(data)
+    return target.resolve()
+
+
 def resolve_voice_audio(raw_path: str) -> Path | None:
     try:
         root = VOICE_ROOT.resolve()

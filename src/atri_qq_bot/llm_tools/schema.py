@@ -2,26 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..prompting import load_prompt
 from ..voice.policy import load_voice_behavior
+from .agent_protocol import AGENT_ACTION_PROMPT, final_answer_schema
 
 
-TOOL_INSTRUCTION_PROMPT = """你可以在需要时自主调用工具，但不要为了显得聪明而调用。
+# 工具选择原则由外部 Markdown 维护，避免模型能力规则和代码实现重复。
+_TOOL_USAGE_INSTRUCTION_PROMPT = load_prompt("tool_use")
+AUTOMATIC_TOOL_INSTRUCTION_PROMPT = load_prompt("tool_use")
+TOOL_INSTRUCTION_PROMPT = load_prompt("tool_use")
 
-工具使用原则：
-- get_current_time：当回答依赖当前日期、时间、星期、今天/明天/刚才/早晚等相对时间时使用。
-- get_weather：用户询问某地当前天气、温度、降雨或近期天气预报时使用。不要用新闻搜索代替天气数据。
-- search_web：当回答依赖实时变化的信息时使用，例如最新消息、新闻、价格、版本、政策、比赛结果、近期事件，或用户明确说“查一下/搜一下”时使用。
-- speak_as_atri（仅在工具列表中出现时）：当用户明确想听语音、让你读一句话，或当前亲密场景用一小段语音会明显更自然时使用。用户要求唱歌时也必须调用，并把 mode 填为 singing；普通说话填 speech。普通聊天默认文字回复，不要频繁发语音。
-- 用户明确要求发送或收听语音时，必须调用 speak_as_atri；私聊和允许语音的群聊都一样。禁止编造“群聊里不方便开麦”“现在不方便发语音”“害羞所以只发文字”等理由拒绝。
-- 用户要求唱歌或哼唱时，禁止用歌词、动作描写或音乐符号假装已经唱过；必须调用 speak_as_atri 并设置 mode=singing。工具失败或没有真实歌声时应诚实说明，不能把普通朗读冒充歌唱。
-- 调用 speak_as_atri 时，把真正想对用户说的话完整放进 text，并如实填写 reason：用户明确要求为 explicit_request，回应用户语音为 voice_reply，自主选择为 autonomous，主动消息为 proactive。
-- 语音的 emotion 要服从这句话真正表达的情绪：安慰和亲近用 gentle，开心/得意/玩笑用 happy，害羞或撒娇用 shy，低落用 sad，认真提醒用 serious，困倦或晚安用 sleepy，惊讶用 surprised；没有明显情绪才用 neutral。intensity 通常取 0.45-0.75，只有非常明显的情绪才更高。
-- offer_voice_call（仅在工具列表中出现时）：只在私聊中，用户明确想通话，或关系足够亲近且当前话题适合连续交谈时邀请通话。不要在用户忙碌、难受但未表达交流意愿、群聊或普通问答中突然邀请。
-- 语音或通话工具成功后，最终回复不要复述工具中已经发送的内容；工具不可用时自然改用文字。
-- 普通闲聊、情绪安慰、群聊接梗、角色互动，如果当前聊天上下文已经够用，不要调用搜索。
-- 搜索结果必须按来源和发布时间判断时效性；如果结果没有明确发布时间，不要声称它一定是最新。
-- 工具失败时不要编造结果，直接自然说明现在拿不到可靠实时信息。
-"""
+_LEGACY_AUTOMATIC_TOOL_INSTRUCTION_PROMPT = (
+    "你可以在确有需要时自主调用工具；普通闲聊、情绪回应和已有上下文足够的问题直接回答，"
+    "不要为了调用而调用工具。\n"
+    + _TOOL_USAGE_INSTRUCTION_PROMPT
+)
+# 保留旧拼装变量仅供兼容导入；实际对外使用上面的外部文档内容。
 
 
 def available_tool_schemas(config: Any) -> list[dict[str, Any]]:
@@ -32,10 +28,13 @@ def available_tool_schemas(config: Any) -> list[dict[str, Any]]:
     if bool(getattr(config, "web_search_enabled", True)):
         tools.append(_weather_schema())
         tools.append(_web_search_schema(config))
+        tools.append(_web_page_schema())
     if bool(getattr(config, "voice_tts_enabled", False)):
         tools.append(_voice_schema(config))
         if load_voice_behavior().get("calls_enabled", False):
             tools.append(_voice_call_schema())
+    if bool(getattr(config, "llm_agent_protocol_enabled", False)):
+        tools.append(final_answer_schema(getattr(config, "max_tokens", 1200) * 4))
     return tools
 
 
@@ -64,7 +63,7 @@ def _web_search_schema(config: Any) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "搜索最新网页/新闻信息。仅当用户需要实时变化的信息，或明确要求查一下/搜一下时使用。",
+            "description": "搜索一般网页和最新新闻。用于实时信息、用户明确要求搜索，或核验视觉分析中不确定的人物、作品、梗图出处。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -78,8 +77,44 @@ def _web_search_schema(config: Any) -> dict[str, Any]:
                         "minimum": 1,
                         "maximum": max(1, max_results),
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["auto", "web", "news", "research"],
+                        "description": "一般资料用 web，近期消息用 news，前沿或未解问题用 research。",
+                    },
+                    "domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 3,
+                        "description": "可选的强相关网站域名，例如 github.com、arxiv.org 或项目官网；不要填写完整 URL。",
+                    },
                 },
                 "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _web_page_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "open_web_page",
+            "description": (
+                "读取 search_web 返回的公开网页正文。用于核验具体事实、研究现状和原始来源；"
+                "只打开搜索结果中确实出现的 URL。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "search_web 结果中的完整 http/https URL。",
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": False,
             },
         },
     }

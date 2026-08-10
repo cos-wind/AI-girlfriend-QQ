@@ -9,7 +9,11 @@ from .message_parser import (
     _first_nested_url,
     _parse_json_text,
     _share_segment_summary,
+    extract_reply_inline_message,
+    extract_reply_message_id,
     extract_plain_text,
+    is_poke_event,
+    normalize_poke_event,
 )
 from .reply_policy import (
     SMART_GROUP_TRIGGERS,
@@ -56,7 +60,11 @@ __all__ = [
     "_share_segment_summary",
     "_should_reply_smart_group",
     "extract_plain_text",
+    "extract_reply_inline_message",
+    "extract_reply_message_id",
     "is_bot_mentioned",
+    "is_poke_event",
+    "normalize_poke_event",
     "run_server",
     "should_reply",
 ]

@@ -80,6 +80,7 @@ class OriginalVoiceLibrary:
         self.cache_dir = Path(cache_dir).expanduser().resolve() / "original-clips"
         self.refresh_seconds = max(1.0, float(refresh_seconds))
         self._clips: tuple[OriginalClip, ...] = ()
+        self._singing_paths: tuple[Path, ...] = ()
         self._last_scan_at = 0.0
         self._last_error = ""
 
@@ -96,8 +97,27 @@ class OriginalVoiceLibrary:
         }
 
     def singing_count(self) -> int:
+        return len(self.singing_references())
+
+    def singing_references(self) -> list[dict[str, str]]:
+        """Return the canonical singing-reference list for every local client."""
+
         self._refresh_if_needed()
-        return sum(1 for clip in self._clips if _is_singing_path(clip.path, self.root))
+        references: list[dict[str, str]] = []
+        for resolved in self._singing_paths:
+            relative = resolved.relative_to(self.root)
+            reference_id = hashlib.sha256(
+                relative.as_posix().encode("utf-8")
+            ).hexdigest()[:12]
+            references.append(
+                {
+                    "id": reference_id,
+                    "name": resolved.stem,
+                    "path": str(resolved),
+                    "relative_path": str(relative),
+                }
+            )
+        return references
 
     def match(
         self,
@@ -190,6 +210,7 @@ class OriginalVoiceLibrary:
         self._last_scan_at = now
         try:
             self._clips = tuple(_scan_clips(self.root))
+            self._singing_paths = tuple(_scan_singing_paths(self.root))
             self._last_error = ""
         except OSError as exc:
             self._last_error = str(exc)
@@ -251,6 +272,21 @@ def _scan_clips(root: Path) -> list[OriginalClip]:
                 )
             )
     return clips
+
+
+def _scan_singing_paths(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    return sorted(
+        (
+            path.resolve()
+            for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in AUDIO_EXTENSIONS
+            and _is_singing_path(path, root)
+        ),
+        key=lambda path: str(path).casefold(),
+    )
 
 
 def _filename_transcript(stem: str) -> str:

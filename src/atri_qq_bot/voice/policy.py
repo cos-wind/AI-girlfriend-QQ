@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..proactive.time_utils import parse_hhmm, safe_zoneinfo
+from ..prompting import render_prompt
 from ..runtime.paths import VOICE_BEHAVIOR_PATH
 
 
@@ -173,12 +174,11 @@ def voice_policy_prompt(
         )
     explicit = "允许" if policy["explicit_requests_enabled"] else "禁止"
     autonomous = "允许" if eligible else "不允许"
-    return (
-        f"当前语音策略：用户明确要求语音时{explicit}；本场景自主语音{autonomous}"
-        f"（{relation}）。调用 speak_as_atri 时必须如实填写 reason。"
-        "自主语音适合简短问候、安慰、撒娇、玩笑、惊喜、晚安和有明显情绪的短回应；"
-        "长篇知识回答、代码、网址和需要逐字查看的内容继续用文字。"
-        "只要当前场景允许且语音比文字更有温度，就可以主动选择语音，不必等待用户先提。"
+    return render_prompt(
+        "voice_policy",
+        explicit=explicit,
+        autonomous=autonomous,
+        relation=relation,
     )
 
 

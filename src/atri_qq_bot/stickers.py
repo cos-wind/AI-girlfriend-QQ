@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,53 @@ DEFAULT_EMOTION_KEYWORDS = _sticker_core.DEFAULT_EMOTION_KEYWORDS
 DEFAULT_EMOJIS = _sticker_core.DEFAULT_EMOJIS
 DEFAULT_QQ_FACE_IDS = _sticker_core.DEFAULT_QQ_FACE_IDS
 
+_FILENAME_EMOTION_HINTS = {
+    "happy": ("哈哈", "开心", "满意", "热情", "可爱"),
+    "comfort": ("理解",),
+    "sad": ("呜呜", "疼"),
+    "angry": ("生气", "攻击", "火箭拳", "警告", "拒绝"),
+    "tired": ("好累", "好热", "懒"),
+    "proud": ("高性能", "自信", "认可", "赞美", "满意"),
+    "confused": ("疑惑", "啊", "诶"),
+    "speechless": ("无语", "不屑"),
+    "surprised": ("惊喜", "啊", "诶"),
+    "awkward": ("心虚", "掩饰", "装傻"),
+    "teasing": ("调皮", "搞怪", "抽象", "轻浮", "捡回一条小命", "装傻", "嘴硬"),
+    "shy": ("害羞",),
+    "affection": ("撒娇", "请求"),
+    "encourage": ("加油",),
+    "thinking": ("若有所思", "让我想想", "果然如此"),
+    "pout": ("傲娇", "不服", "委屈", "不快", "嘴硬"),
+}
+_FILENAME_CONTEXT_ALIASES = {
+    "生气": ("气死", "火大", "恼火", "红温", "过分"),
+    "攻击": ("攻击", "打他", "揍", "火箭拳", "欺负"),
+    "警告": ("警告", "不许", "不准", "注意点"),
+    "拒绝": ("拒绝", "不要", "不可以", "不行"),
+    "哈哈": ("好笑", "笑死", "绷不住"),
+    "理解": ("理解", "明白", "懂你", "我懂"),
+    "呜呜": ("想哭", "哭了", "难过", "伤心"),
+    "疼": ("疼", "痛", "受伤"),
+    "好累": ("累", "疲惫", "撑不住"),
+    "懒": ("懒", "不想动"),
+    "高性能": ("高性能", "完成", "搞定", "成功"),
+    "疑惑": ("疑惑", "不懂", "为什么", "怎么回事"),
+    "无语": ("无语", "麻了", "没眼看"),
+    "不屑": ("不屑", "嫌弃", "就这"),
+    "惊喜": ("惊喜", "惊了", "不会吧", "真的假的"),
+    "心虚": ("心虚", "被发现", "露馅"),
+    "装傻": ("装傻", "不知道", "别问我"),
+    "调皮": ("调皮", "逗你", "开玩笑"),
+    "搞怪": ("搞怪", "抽象", "整活"),
+    "轻浮": ("轻浮", "阴阳怪气", "逗你"),
+    "害羞": ("害羞", "喜欢你", "爱你", "亲亲"),
+    "撒娇": ("撒娇", "求求", "拜托", "陪我"),
+    "加油": ("加油", "努力", "坚持", "开始做"),
+    "若有所思": ("考虑", "想想", "纠结", "怎么选"),
+    "傲娇": ("傲娇", "嘴硬", "才不是"),
+    "委屈": ("委屈", "欺负我", "不开心"),
+}
+_FILENAME_SPLIT_RE = re.compile(r"[\s,，、;；。.!！?？_\-—()（）【】\[\]{}]+")
 
 
 @dataclass(frozen=True)
@@ -92,7 +140,13 @@ class StickerManager:
             if random.random() > adjusted_chance:
                 return None
 
-        image_path = forced_image or self._pick_image(emotion)
+        semantic_image = self._pick_semantic_image(user_text, reply_text, emotion)
+        if isinstance(forced_image, str) or (
+            isinstance(forced_image, Path) and self._is_primary_file(forced_image)
+        ):
+            image_path = forced_image
+        else:
+            image_path = semantic_image or forced_image or self._pick_image(emotion)
         if isinstance(image_path, Path):
             return StickerChoice(
                 emotion=emotion,
@@ -166,39 +220,92 @@ class StickerManager:
         return self._pick_web_image(emotion)
 
     def _images_for_emotion(self, emotion: str) -> list[Path]:
-        if not self.sticker_dir.exists():
-            return []
+        roots = self._library_roots()
+        for root in roots:
+            if not root.exists():
+                continue
+            manual_candidates = _image_files_in_dir(root / emotion)
+            manual_candidates.extend(
+                path
+                for path in root.iterdir()
+                if path.is_file()
+                and path.suffix.lower() in IMAGE_EXTENSIONS
+                and path.stem.lower().startswith(emotion.lower())
+            )
+            if manual_candidates:
+                return sorted(set(manual_candidates))
 
-        manual_candidates = _image_files_in_dir(self.sticker_dir / emotion)
-        manual_candidates.extend(
-            path
-            for path in self.sticker_dir.iterdir()
-            if path.is_file()
-            and path.suffix.lower() in IMAGE_EXTENSIONS
-            and path.stem.lower().startswith(emotion.lower())
-        )
-        if manual_candidates:
-            return sorted(set(manual_candidates))
-
-        for emotion_dir in (
-            self.sticker_dir / "_curated" / emotion,
-            self.sticker_dir / "_chat_history" / emotion,
-            self.sticker_dir / "_online_default" / emotion,
-        ):
-            candidates = _image_files_in_dir(emotion_dir)
-            if candidates:
-                return sorted(set(candidates))
+        for root in roots:
+            for emotion_dir in (
+                root / "_curated" / emotion,
+                root / "_chat_history" / emotion,
+                root / "_online_default" / emotion,
+            ):
+                candidates = _image_files_in_dir(emotion_dir)
+                if candidates:
+                    return sorted(set(candidates))
 
         return []
+
+    def _pick_semantic_image(
+        self,
+        user_text: str,
+        reply_text: str,
+        emotion: str,
+    ) -> Path | None:
+        if not self.sticker_dir.exists():
+            return None
+
+        scored: list[tuple[int, Path]] = []
+        for path in self.sticker_dir.rglob("*"):
+            if (
+                not path.is_file()
+                or path.suffix.lower() not in IMAGE_EXTENSIONS
+                or any(part.startswith("_") for part in path.relative_to(self.sticker_dir).parts[:-1])
+            ):
+                continue
+            score = _semantic_filename_score(path.stem, user_text, reply_text, emotion)
+            if score > 0:
+                scored.append((score, path))
+
+        if not scored:
+            return None
+        best_score = max(score for score, _ in scored)
+        return random.choice([path for score, path in scored if score == best_score])
+
+    def _library_roots(self) -> list[Path]:
+        roots = [self.sticker_dir]
+        trigger_root = self.trigger_file.parent
+        try:
+            same_root = trigger_root.resolve() == self.sticker_dir.resolve()
+        except OSError:
+            same_root = trigger_root == self.sticker_dir
+        if not same_root:
+            roots.append(trigger_root)
+        return roots
+
+    def _is_primary_file(self, path: Path) -> bool:
+        try:
+            path.resolve().relative_to(self.sticker_dir.resolve())
+            return True
+        except (OSError, ValueError):
+            return False
 
     def _resolve_file(self, value: Any) -> Path | None:
         if not value:
             return None
         path = Path(str(value))
-        if not path.is_absolute():
-            path = self.sticker_dir / path
-        if path.exists() and path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
-            return path
+        candidates = [path] if path.is_absolute() else [
+            self.sticker_dir / path,
+            self.trigger_file.parent / path,
+        ]
+        for candidate in candidates:
+            if (
+                candidate.exists()
+                and candidate.is_file()
+                and candidate.suffix.lower() in IMAGE_EXTENSIONS
+            ):
+                return candidate
         return None
 
     def _pick_web_image(self, emotion: str) -> str | None:
@@ -321,6 +428,46 @@ class StickerManager:
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
+
+
+def _semantic_filename_score(
+    stem: str,
+    user_text: str,
+    reply_text: str,
+    emotion: str,
+) -> int:
+    terms = [term.strip().lower() for term in _FILENAME_SPLIT_RE.split(stem) if term.strip()]
+    if not terms:
+        return 0
+
+    user_normalized = _normalize_semantic_text(user_text)
+    reply_normalized = _normalize_semantic_text(reply_text)
+    score = 0
+    for term in terms:
+        normalized_term = _normalize_semantic_text(term)
+        if not normalized_term:
+            continue
+        if normalized_term in user_normalized:
+            score += 28 + min(12, len(normalized_term) * 2)
+        if normalized_term in reply_normalized:
+            score += 34 + min(12, len(normalized_term) * 2)
+        for label, aliases in _FILENAME_CONTEXT_ALIASES.items():
+            if _normalize_semantic_text(label) not in normalized_term:
+                continue
+            if any(_normalize_semantic_text(alias) in user_normalized for alias in aliases):
+                score += 18
+            if any(_normalize_semantic_text(alias) in reply_normalized for alias in aliases):
+                score += 22
+
+    normalized_emotion = _normalize_emotion(emotion)
+    for hint in _FILENAME_EMOTION_HINTS.get(normalized_emotion, ()):
+        if _normalize_semantic_text(hint) in _normalize_semantic_text(stem):
+            score += 12
+    return score
+
+
+def _normalize_semantic_text(value: str) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").lower(), flags=re.UNICODE)
 
 
 _as_list = _sticker_core._as_list

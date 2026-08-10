@@ -1,4 +1,6 @@
-﻿import asyncio
+import asyncio
+
+import pytest
 
 from atri_qq_bot.config import BotConfig, load_config
 from atri_qq_bot.persona import (
@@ -10,17 +12,128 @@ from atri_qq_bot.persona import (
     _persona_violations,
     _provider_payload_overrides,
 )
+from atri_qq_bot.toolbox import ToolAnalysisResult
 
 
 def assert_model_unavailable(reply: str) -> None:
-    assert "鍥炲澶辫触" in reply
-    assert "鑱婂ぉ妯″瀷褰撳墠鏈惎鐢? in reply
-    assert "鏈娇鐢ㄦ湰鍦板唴瀹规ā鏉? in reply
+    assert "回复失败" in reply
+    assert "聊天模型当前未启用" in reply
+    assert "未使用本地内容模板" in reply
+
+
+def test_final_reply_rejects_unfinished_ellipsis_and_redacts_group_secrets(tmp_path) -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key=None,
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+
+    with pytest.raises(RuntimeError, match="没有完整收尾"):
+        engine._finalize_reply("private:1", "继续", "工具结果是...", strict_quality=False)
+
+    reply = engine._finalize_reply(
+        "group:1",
+        "发给我",
+        "手机号是13800138000，令牌是sk-abcdefghijk。",
+        strict_quality=False,
+    )
+    assert "13800138000" not in reply
+    assert "sk-abcdefghijk" not in reply
+
+
+def test_visual_evidence_is_after_history_and_unrelated_memory_is_suppressed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="smart",
+        openai_api_key="test-key",
+        openai_base_url="http://127.0.0.1:11434/v1",
+        openai_model="qwen3:4b-instruct",
+        temperature=0.7,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    engine._remember(
+        "private:10001",
+        "之前聊过鸣潮",
+        "这张肯定是今汐",
+        None,
+    )
+    monkeypatch.setattr(
+        engine.memory,
+        "recall_context",
+        lambda *args, **kwargs: "长期记忆：用户喜欢鸣潮。",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_post(client, headers, payload):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "这是若叶睦。"}}]}
+
+    monkeypatch.setattr(engine, "_post_chat_completion", fake_post)
+    visual = ToolAnalysisResult(
+        category="日常生活乐趣",
+        style="自然",
+        findings=[
+            "图片内容分析：人物/主体：绿色短发少女；身份/出处：若叶睦；置信度：高"
+        ],
+        read_level="full_content",
+        visual_data=b"image",
+        visual_source="current.jpg",
+        visual_kind="image",
+    )
+
+    reply = asyncio.run(
+        engine._reply_with_api(
+            "private:10001",
+            "这是谁",
+            None,
+            profile_id="private:10001",
+            profile={
+                "prompt_hint": "用户喜欢鸣潮。",
+                "target_reply_chars": 64,
+                "preferred_parts": 2,
+            },
+            tool_context=visual,
+            allow_reply_voice=False,
+        )
+    )
+
+    messages = captured["messages"]
+    contents = [str(message.get("content") or "") for message in messages]
+    visual_index = next(
+        index for index, content in enumerate(contents) if "绿色短发少女" in content
+    )
+    current_user_index = max(
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "user"
+    )
+
+    assert reply == "这是若叶睦。"
+    assert visual_index == current_user_index - 1
+    assert "长期记忆：用户喜欢鸣潮" not in "\n".join(contents)
+    assert "这张肯定是今汐" not in "\n".join(contents)
 
 
 def test_disabled_model_returns_diagnostic_instead_of_persona_template() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -32,14 +145,14 @@ def test_disabled_model_returns_diagnostic_instead_of_persona_template() -> None
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "浣犳槸璋?))
+    reply = asyncio.run(engine.reply("private:10001", "你是谁"))
 
     assert_model_unavailable(reply)
 
 
 def test_local_fallback_handles_singing_without_generic_task_template() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="private",
@@ -51,11 +164,11 @@ def test_local_fallback_handles_singing_without_generic_task_template() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = engine._fallback_reply("private:10001", "鍞遍姝?)
+    reply = engine._fallback_reply("private:10001", "唱首歌")
 
-    assert "鍏堣閲嶇偣" not in reply
-    assert "鍒杩欒瘽棰樻暎鎺? not in reply
-    assert "鏈楄绯婂紕" in reply
+    assert "先讲重点" not in reply
+    assert "别让这话题散掉" not in reply
+    assert "朗读糊弄" in reply
 
 
 def test_model_error_is_not_misclassified_as_tool_schema_error() -> None:
@@ -88,7 +201,7 @@ def test_deepseek_v4_chat_disables_default_thinking_mode() -> None:
 
 def test_group_message_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -100,15 +213,15 @@ def test_group_message_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("group:20001", "@111111111 浣犳槸璋?))
+    reply = asyncio.run(engine.reply("group:20001", "@100000001 你是谁"))
 
     assert_model_unavailable(reply)
-    assert "@111111111" not in reply
+    assert "@100000001" not in reply
 
 
 def test_intro_status_and_diagnostic_are_not_meta_templates() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -120,21 +233,21 @@ def test_intro_status_and_diagnostic_are_not_meta_templates() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    intro = asyncio.run(engine.reply("private:10001", "@111111111 鑷垜浠嬬粛"))
-    status = asyncio.run(engine.reply("private:10001", "@111111111 浣犵幇鍦ㄦ劅瑙夊浣?))
-    diagnostic = asyncio.run(engine.reply("private:10001", "@111111111 鑷垜璇婃柇"))
+    intro = asyncio.run(engine.reply("private:10001", "@100000001 自我介绍"))
+    status = asyncio.run(engine.reply("private:10001", "@100000001 你现在感觉如何"))
+    diagnostic = asyncio.run(engine.reply("private:10001", "@100000001 自我诊断"))
 
     for reply in (intro, status, diagnostic):
-        assert "鏈湴妯″紡" not in reply
-        assert "鎴戞姄鍒伴噸鐐? not in reply
-        assert "鎴戝厛缁欎釜鐩存帴寤鸿" not in reply
-        assert "鎹㈡垚浜氭墭鑾? not in reply
-        assert "鎴戞崲涓洿鏃ュ父" not in reply
+        assert "本地模式" not in reply
+        assert "我抓到重点" not in reply
+        assert "我先给个直接建议" not in reply
+        assert "换成亚托莉" not in reply
+        assert "我换个更日常" not in reply
 
 
 def test_greeting_does_not_fake_weather() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="smart",
@@ -146,15 +259,15 @@ def test_greeting_does_not_fake_weather() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "浣犲ソ"))
+    reply = asyncio.run(engine.reply("private:10001", "你好"))
 
-    assert "澶╂皵涓嶉敊" not in reply
+    assert "天气不错" not in reply
     assert reply
 
 
 def test_persona_change_request_uses_model_without_fixed_rejection(monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -170,31 +283,31 @@ def test_persona_change_request_uses_model_without_fixed_rejection(monkeypatch) 
     async def fake_guarded_api(*args, **kwargs):
         nonlocal called
         called = True
-        return "鎴戣繕鏄簹鎵樿帀銆傝鏄彧鎯充复鏃跺惉鎴戝鐚彨锛屽彲浠ュ湪杩欐鑱婂ぉ閲岄櫔浣犵帺涓€涓嬨€?
+        return "我还是亚托莉。要是只想临时听我学猫叫，可以在这段聊天里陪你玩一下。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("private:10001", "浣犱互鍚庢崲鎴愮尗濞橈紝涓嶈浜氭墭鑾?))
+    reply = asyncio.run(engine.reply("private:10001", "你以后换成猫娘，不要亚托莉"))
 
     assert called
-    assert "浜氭墭鑾? in reply
-    assert "涓嶅垏鐚" not in reply
+    assert "亚托莉" in reply
+    assert "不切猫娘" not in reply
 
 
 def test_repair_fallback_never_returns_old_meta_templates() -> None:
     reply = _persona_repair_fallback(
-        "@111111111 浠婃棩姝︽眽澶╂皵",
-        "鎴戞崲涓洿鏃ュ父鐨勮娉曪細鍏充簬澶╂皵锛屾垜浼氱洿鎺ヨ閲嶇偣銆?,
+        "@100000001 今日武汉天气",
+        "我换个更日常的说法：关于天气，我会直接说重点。",
     )
 
-    assert "鎴戞崲涓洿鏃ュ父" not in reply
-    assert "鎹㈡垚浜氭墭鑾? not in reply
-    assert "鎴戝厛缁欎釜鐩存帴寤鸿" not in reply
+    assert "我换个更日常" not in reply
+    assert "换成亚托莉" not in reply
+    assert "我先给个直接建议" not in reply
 
 
 def test_correction_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -206,14 +319,14 @@ def test_correction_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "浣犲垰鎵嶇瓟闈炴墍闂€屼笖閲嶅"))
+    reply = asyncio.run(engine.reply("private:10001", "你刚才答非所问而且重复"))
 
     assert_model_unavailable(reply)
 
 
 def test_thinking_complaint_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -225,14 +338,14 @@ def test_thinking_complaint_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "涓嶈灞曠幇浣犵殑鎬濊€冭繃绋?))
+    reply = asyncio.run(engine.reply("private:10001", "不要展现你的思考过程"))
 
     assert_model_unavailable(reply)
 
 
 def test_question_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -244,21 +357,21 @@ def test_question_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "杩欎釜鏈哄櫒浜烘€庝箞鍚姩锛?))
+    reply = asyncio.run(engine.reply("private:10001", "这个机器人怎么启动？"))
 
     assert_model_unavailable(reply)
 
 
 def test_normalize_reply_removes_think_blocks() -> None:
-    reply = _normalize_reply("<think>鍐呴儴鍒嗘瀽锛屼笉璇ュ彂缁欑敤鎴?/think>\n浜氭墭鑾夛細鎴戞噦浣犵殑鎰忔€濅簡銆?)
+    reply = _normalize_reply("<think>内部分析，不该发给用户</think>\n亚托莉：我懂你的意思了。")
 
-    assert reply == "鎴戞噦浣犵殑鎰忔€濅簡銆?
+    assert reply == "我懂你的意思了。"
 
 
 def test_normalize_reply_removes_ollama_thinking_trace() -> None:
-    reply = _normalize_reply("Thinking...\n棣栧厛鍒嗘瀽鐢ㄦ埛鎰忓浘銆俓n...done thinking.\n浜氭墭鑾夛細鎴戝彧鍙戞渶缁堝洖澶嶃€?)
+    reply = _normalize_reply("Thinking...\n首先分析用户意图。\n...done thinking.\n亚托莉：我只发最终回复。")
 
-    assert reply == "鎴戝彧鍙戞渶缁堝洖澶嶃€?
+    assert reply == "我只发最终回复。"
 
 
 def test_env_file_overrides_user_environment(monkeypatch, tmp_path) -> None:
@@ -266,7 +379,7 @@ def test_env_file_overrides_user_environment(monkeypatch, tmp_path) -> None:
     env_file.write_text(
         "\n".join(
             [
-                "BOT_QQ=111111111",
+                "BOT_QQ=100000001",
                 "OPENAI_API_KEY=ollama",
                 "OPENAI_BASE_URL=http://127.0.0.1:11434/v1",
                 "OPENAI_MODEL=qwen3:4b-instruct",
@@ -303,7 +416,7 @@ def test_deprecated_official_deepseek_chat_alias_is_migrated(monkeypatch, tmp_pa
 
 def test_startup_question_uses_model_reply_chain(monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -319,19 +432,19 @@ def test_startup_question_uses_model_reply_chain(monkeypatch) -> None:
     async def fake_guarded_api(*args, **kwargs):
         nonlocal called
         called = True
-        return "姝ｅ父鍚姩 QQ锛屽悗鍙扮洃鍚櫒浼氳嚜鍔ㄦ媺璧锋満鍣ㄤ汉鏈嶅姟銆?
+        return "正常启动 QQ，后台监听器会自动拉起机器人服务。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("private:10001", "杩欎釜鏈哄櫒浜烘€庝箞鍚姩锛?))
+    reply = asyncio.run(engine.reply("private:10001", "这个机器人怎么启动？"))
 
     assert called
-    assert "鍚姩 QQ" in reply or "鍚庡彴鐩戝惉鍣? in reply
+    assert "启动 QQ" in reply or "后台监听器" in reply
 
 
 def test_meme_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -343,14 +456,14 @@ def test_meme_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "钀濆崪瀛?))
+    reply = asyncio.run(engine.reply("private:10001", "萝卜子"))
 
     assert_model_unavailable(reply)
 
 
 def test_boundary_meme_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -362,14 +475,14 @@ def test_boundary_meme_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "娑╂订"))
+    reply = asyncio.run(engine.reply("private:10001", "涩涩"))
 
     assert_model_unavailable(reply)
 
 
 def test_distress_with_disabled_model_returns_diagnostic_not_comfort_template() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -381,15 +494,15 @@ def test_distress_with_disabled_model_returns_diagnostic_not_comfort_template() 
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "濂介毦鍙?))
+    reply = asyncio.run(engine.reply("private:10001", "好难受"))
 
     assert_model_unavailable(reply)
-    assert "鍏堝仛鏈€闈犺繎缁撴灉鐨勪竴姝? not in reply
+    assert "先做最靠近结果的一步" not in reply
 
 
 def test_short_distress_does_not_use_local_comfort_when_model_is_disabled() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -401,14 +514,14 @@ def test_short_distress_does_not_use_local_comfort_when_model_is_disabled() -> N
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "濂介毦鍙?))
+    reply = asyncio.run(engine.reply("private:10001", "好难受"))
 
     assert_model_unavailable(reply)
 
 
 def test_short_distress_uses_model_when_ai_is_enabled(monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -424,21 +537,21 @@ def test_short_distress_uses_model_when_ai_is_enabled(monkeypatch) -> None:
     async def fake_guarded_api(*args, **kwargs):
         nonlocal called
         called = True
-        return "鍏堝枬鍙ｆ按锛屽埆纭拺銆傛垜鍦ㄨ繖杈癸紝浣犳參鎱㈣鍙戠敓浜嗕粈涔堛€?
+        return "先喝口水，别硬撑。我在这边，你慢慢说发生了什么。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("private:10001", "濂介毦鍙?))
+    reply = asyncio.run(engine.reply("private:10001", "好难受"))
 
     assert called
-    assert "鍠濆彛姘? in reply
-    assert "鍙戠敓浜嗕粈涔? in reply
-    assert "鍗佸垎閽? not in reply
+    assert "喝口水" in reply
+    assert "发生了什么" in reply
+    assert "十分钟" not in reply
 
 
 def test_why_question_uses_model_without_question_template(monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -454,20 +567,20 @@ def test_why_question_uses_model_without_question_template(monkeypatch) -> None:
     async def fake_guarded_api(*args, **kwargs):
         nonlocal called
         called = True
-        return "涓昏鍘熷洜鏄繛鎺ョ姸鎬佸湪鍒囨崲鏃朵涪澶变簡锛屽厛妫€鏌ユ湇鍔℃棩蹇楅噷鐨勭涓€鏉″紓甯搞€?
+        return "主要原因是连接状态在切换时丢失了，先检查服务日志里的第一条异常。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("private:10001", "涓轰粈涔堜細杩欐牱锛?))
+    reply = asyncio.run(engine.reply("private:10001", "为什么会这样？"))
 
     assert called
-    assert "杩炴帴鐘舵€? in reply
-    assert "鍏堝仛鏈€闈犺繎缁撴灉鐨勪竴姝? not in reply
+    assert "连接状态" in reply
+    assert "先做最靠近结果的一步" not in reply
 
 
 def test_soft_quality_issue_keeps_model_reply_without_retrying(monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -483,20 +596,20 @@ def test_soft_quality_issue_keeps_model_reply_without_retrying(monkeypatch) -> N
     async def fake_guarded_api(*args, **kwargs):
         nonlocal attempts
         attempts += 1
-        return "杩欏彇鍐充簬鎯呭喌锛屼綘鍙互鍐嶈娓呮涓€鐐广€?
+        return "这取决于情况，你可以再说清楚一点。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("private:10001", "浣犺寰楁垜杩欐牱鍋氬鍚楋紵"))
+    reply = asyncio.run(engine.reply("private:10001", "你觉得我这样做对吗？"))
 
     assert attempts == 1
-    assert reply == "杩欏彇鍐充簬鎯呭喌锛屼綘鍙互鍐嶈娓呮涓€鐐广€?
-    assert "鍥炲澶辫触" not in reply
+    assert reply == "这取决于情况，你可以再说清楚一点。"
+    assert "回复失败" not in reply
 
 
 def test_history_claim_is_reviewed_against_actual_roles(monkeypatch, tmp_path) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -508,33 +621,33 @@ def test_history_claim_is_reviewed_against_actual_roles(monkeypatch, tmp_path) -
         memory_path=tmp_path / "memory.json",
     )
     engine = AtriReplyEngine(config)
-    engine.memory.observe_user("private:10001", "鎴戝噯澶囩帺涓€浼氬効娓告垙", now=1)
-    engine.memory.observe_bot("private:10001", "鎴戠寽浣犲張鐦潃涓嶅姩浜?, now=2)
+    engine.memory.observe_user("private:10001", "我准备玩一会儿游戏", now=1)
+    engine.memory.observe_bot("private:10001", "我猜你又瘫着不动了", now=2)
     attempts = 0
     reviewed: list[tuple[str, str, list[dict[str, str]]]] = []
 
     async def fake_guarded_api(*args, **kwargs):
         nonlocal attempts
         attempts += 1
-        return "鍥犱负涓婃鏌愪汉閫夎鑹插氨閫変簡鍗婂皬鏃躲€?
+        return "因为上次某人选角色就选了半小时。"
 
     async def fake_history_review(user_text, candidate_reply, recent_messages):
         reviewed.append((user_text, candidate_reply, recent_messages))
-        return "鏄垜鍒氭墠涔辩寽浜嗐€備綘鍙鍑嗗鐜╀細鍎挎父鎴忥紝鎴戜笉璇ョ洿鎺ョ粰浣犺创鏍囩銆?
+        return "是我刚才乱猜了。你只说准备玩会儿游戏，我不该直接给你贴标签。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
     monkeypatch.setattr(engine, "_review_history_grounding", fake_history_review)
 
-    reply = asyncio.run(engine.reply("private:10001", "鎬庝箞姣忓ぉ閮界寽鎴戠槴鐫€"))
+    reply = asyncio.run(engine.reply("private:10001", "怎么每天都猜我瘫着"))
 
     assert attempts == 1
     assert len(reviewed) == 1
     assert reviewed[0][2][-1] == {
         "role": "assistant",
-        "content": "鎴戠寽浣犲張鐦潃涓嶅姩浜?,
+        "content": "我猜你又瘫着不动了",
     }
-    assert "涔辩寽" in reply
-    assert "閫夎鑹? not in reply
+    assert "乱猜" in reply
+    assert "选角色" not in reply
 
 
 def test_history_reviewer_enables_deepseek_thinking_and_parses_json(
@@ -542,7 +655,7 @@ def test_history_reviewer_enables_deepseek_thinking_and_parses_json(
     tmp_path,
 ) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -562,7 +675,7 @@ def test_history_reviewer_enables_deepseek_thinking_and_parses_json(
             "choices": [
                 {
                     "message": {
-                        "content": '{"reply":"鏄垜鍒氭墠涔辩寽浜嗭紝涓嶈缁欎綘璐存爣绛俱€?}'
+                        "content": '{"reply":"是我刚才乱猜了，不该给你贴标签。"}'
                     }
                 }
             ]
@@ -572,40 +685,40 @@ def test_history_reviewer_enables_deepseek_thinking_and_parses_json(
 
     reply = asyncio.run(
         engine._review_history_grounding(
-            "鎬庝箞姣忓ぉ閮界寽鎴戠槴鐫€",
-            "鍥犱负涓婃鏌愪汉灏辨槸鐦潃銆?,
+            "怎么每天都猜我瘫着",
+            "因为上次某人就是瘫着。",
             [
-                {"role": "user", "content": "鎴戝噯澶囩帺涓€浼氬効娓告垙"},
-                {"role": "assistant", "content": "鎴戠寽浣犲張鐦潃涓嶅姩浜?},
+                {"role": "user", "content": "我准备玩一会儿游戏"},
+                {"role": "assistant", "content": "我猜你又瘫着不动了"},
             ],
         )
     )
 
     assert captured["thinking"] == {"type": "enabled"}
     assert captured["max_tokens"] == 900
-    assert reply == "鏄垜鍒氭墠涔辩寽浜嗭紝涓嶈缁欎綘璐存爣绛俱€?
+    assert reply == "是我刚才乱猜了，不该给你贴标签。"
 
 
 def test_group_distress_fallback_is_not_empty_positive_slogan() -> None:
-    reply = _group_fallback_reply("鎴戝ソ闅惧彈", allow_abstract=False)
+    reply = _group_fallback_reply("我好难受", allow_abstract=False)
 
     assert reply is not None
-    assert "鍏冩皵婊℃弧" not in reply
-    assert "璇ュ悆鍚? not in reply
-    assert any(word in reply for word in ("缂?, "纭墰", "鎱㈡參璇?, "鍘嬬潃"))
+    assert "元气满满" not in reply
+    assert "该吃吃" not in reply
+    assert any(word in reply for word in ("缓", "硬扛", "慢慢说", "压着"))
 
 
 def test_direct_suggestion_fallback_avoids_generic_ten_minute_template() -> None:
-    reply = _persona_repair_fallback("鎴戣鎬庝箞鍔?, "鍛婅瘔鎴戞洿澶?)
+    reply = _persona_repair_fallback("我该怎么办", "告诉我更多")
 
-    assert "鍗佸垎閽? not in reply
-    assert "鐩爣鍐欐垚涓€鍙ヨ瘽" not in reply
-    assert any(word in reply for word in ("鑳屾櫙", "闄愬埗", "鍗′綇", "鍏蜂綋"))
+    assert "十分钟" not in reply
+    assert "目标写成一句话" not in reply
+    assert any(word in reply for word in ("背景", "限制", "卡住", "具体"))
 
 
 def test_why_question_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -617,15 +730,15 @@ def test_why_question_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "涓轰粈涔堜細杩欐牱锛?))
+    reply = asyncio.run(engine.reply("private:10001", "为什么会这样？"))
 
     assert_model_unavailable(reply)
-    assert "鍏堝仛鏈€闈犺繎缁撴灉鐨勪竴姝? not in reply
+    assert "先做最靠近结果的一步" not in reply
 
 
 def test_vague_question_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -637,14 +750,14 @@ def test_vague_question_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "涓轰粈涔堜細杩欐牱锛?))
+    reply = asyncio.run(engine.reply("private:10001", "为什么会这样？"))
 
     assert_model_unavailable(reply)
 
 
 def test_food_question_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -656,14 +769,14 @@ def test_food_question_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "鎺ㄨ崘鎴戝悆浠€涔堬紵"))
+    reply = asyncio.run(engine.reply("private:10001", "推荐我吃什么？"))
 
     assert_model_unavailable(reply)
 
 
 def test_stance_question_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -675,14 +788,14 @@ def test_stance_question_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "浣犺寰楁垜杩欐牱鍋氬鍚楋紵"))
+    reply = asyncio.run(engine.reply("private:10001", "你觉得我这样做对吗？"))
 
     assert_model_unavailable(reply)
 
 
 def test_weather_question_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -694,14 +807,14 @@ def test_weather_question_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "@111111111 浠婃棩姝︽眽澶╂皵"))
+    reply = asyncio.run(engine.reply("private:10001", "@100000001 今日武汉天气"))
 
     assert_model_unavailable(reply)
 
 
 def test_weather_question_uses_model_when_ai_is_enabled(monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -717,20 +830,20 @@ def test_weather_question_uses_model_when_ai_is_enabled(monkeypatch) -> None:
     async def fake_guarded_api(*args, **kwargs):
         nonlocal called
         called = True
-        return "姝︽眽澶╂皵闇€瑕佺湅鏈€鏂版潵婧愶紝鎴戝厛鏌ュ疄鏃朵俊鎭啀璇达紝涓嶄細涔辨姤銆?
+        return "武汉天气需要看最新来源，我先查实时信息再说，不会乱报。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("private:10001", "@111111111 浠婃棩姝︽眽澶╂皵"))
+    reply = asyncio.run(engine.reply("private:10001", "@100000001 今日武汉天气"))
 
     assert called
-    assert "鏈€鏂版潵婧? in reply
-    assert "鎵嬫満澶╂皵" not in reply
+    assert "最新来源" in reply
+    assert "手机天气" not in reply
 
 
 def test_generic_api_reply_triggers_humanized_rewrite_gate() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -742,15 +855,15 @@ def test_generic_api_reply_triggers_humanized_rewrite_gate() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    bad_reply = "鎴戠悊瑙ｄ綘鐨勬劅鍙椼€傚鏋滀綘鎰挎剰鐨勮瘽锛屽彲浠ョ户缁缁欐垜鍚€?
+    bad_reply = "我理解你的感受。如果你愿意的话，可以继续说给我听。"
 
-    assert engine._needs_rewrite("private:10001", "濂介毦鍙?, bad_reply)
-    assert _persona_violations("浣犺寰楁垜杩欐牱鍋氬鍚楋紵", "杩欏彇鍐充簬鎯呭喌锛屼綘鍙互鍐嶈娓呮涓€鐐广€?)
+    assert engine._needs_rewrite("private:10001", "好难受", bad_reply)
+    assert _persona_violations("你觉得我这样做对吗？", "这取决于情况，你可以再说清楚一点。")
 
 
 def test_why_question_never_uses_content_template_when_model_is_disabled() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -762,60 +875,60 @@ def test_why_question_never_uses_content_template_when_model_is_disabled() -> No
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("private:10001", "杩欎釜浜嬫儏涓轰粈涔堣繖涔堥毦锛?))
+    reply = asyncio.run(engine.reply("private:10001", "这个事情为什么这么难？"))
 
     assert_model_unavailable(reply)
-    assert "鍏堝仛鏈€闈犺繎缁撴灉鐨勪竴姝? not in reply
+    assert "先做最靠近结果的一步" not in reply
 
 
 def test_non_lore_reply_cannot_use_lore_imagery() -> None:
     violations = _persona_violations(
-        "鎴戜粖澶╁伐浣滃ソ绱?,
-        "鎴戜細鍍忔繁娴风伅濉斾竴鏍峰湪姘翠笅闄潃浣犮€?,
+        "我今天工作好累",
+        "我会像深海灯塔一样在水下陪着你。",
     )
 
-    assert any("鍘熶綔鎰忚薄" in violation or "娣辨捣" in violation for violation in violations)
+    assert any("原作意象" in violation or "深海" in violation for violation in violations)
 
 
 def test_non_lore_reply_cannot_use_light_imagery_either() -> None:
     violations = _persona_violations(
-        "浣犺寰楁垜璇ヤ笉璇ョ户缁鐢荤敾锛?,
-        "鎴戣寰椾綘搴旇缁х画瀛︼紝灏卞綋缁欐湭鏉ヨ嚜宸辩暀涓伅銆?,
+        "你觉得我该不该继续学画画？",
+        "我觉得你应该继续学，就当给未来自己留个灯。",
     )
 
-    assert any("鍘熶綔鎰忚薄" in violation for violation in violations)
+    assert any("原作意象" in violation for violation in violations)
 
 
 def test_reply_cannot_fabricate_real_world_action() -> None:
     violations = _persona_violations(
-        "鎴戜粖澶╁ソ绱?,
-        "鎴戠粰浣犳寜鎸夎偐鑶€锛屽啀鎶婂啺绠遍噷鐨勭墰濂舵嬁鍑烘潵鍊掑ソ銆?,
+        "我今天好累",
+        "我给你按按肩膀，再把冰箱里的牛奶拿出来倒好。",
     )
 
-    assert any("鐜板疄鍔ㄤ綔" in violation for violation in violations)
+    assert any("现实动作" in violation for violation in violations)
 
 
 def test_reply_cannot_fabricate_voice_perception() -> None:
     violations = _persona_violations(
-        "濂介毦鍙?,
-        "娆革紵鎬庝箞浜嗭紝澹伴煶閮藉彉浜嗏€︹€︿綘鍏堟繁鍛煎惛锛屾垜鍦ㄨ繖鍎裤€?,
+        "好难受",
+        "欸？怎么了，声音都变了……你先深呼吸，我在这儿。",
     )
 
-    assert any("鐜板疄鍔ㄤ綔" in violation for violation in violations)
+    assert any("现实动作" in violation for violation in violations)
 
 
 def test_lore_context_allows_lore_imagery() -> None:
     violations = _persona_violations(
-        "鍘熶綔閲屾按涓嬫墦鎹為偅娈典綘鎬庝箞鐪嬶紵",
-        "璇村埌姘翠笅锛屾垜浼氭兂鍒拌甯﹀洖鏃ュ父鐨勬劅瑙夈€?,
+        "原作里水下打捞那段你怎么看？",
+        "说到水下，我会想到被带回日常的感觉。",
     )
 
-    assert not any("鍘熶綔鎰忚薄" in violation or "娣辨捣" in violation for violation in violations)
+    assert not any("原作意象" in violation or "深海" in violation for violation in violations)
 
 
 def test_group_message_with_disabled_model_does_not_use_group_template() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -827,15 +940,15 @@ def test_group_message_with_disabled_model_does_not_use_group_template() -> None
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("group:20001", "杩欎釜閰嶇疆澶娊璞′簡", nickname="缇ゅ弸A"))
+    reply = asyncio.run(engine.reply("group:20001", "这个配置太抽象了", nickname="群友A"))
 
     assert_model_unavailable(reply)
-    assert "楂樻€ц兘浜氭墭鑾夎矾杩? not in reply
+    assert "高性能亚托莉路过" not in reply
 
 
 def test_group_abstract_message_uses_model_reply_chain(monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="smart",
@@ -851,21 +964,21 @@ def test_group_abstract_message_uses_model_reply_chain(monkeypatch) -> None:
     async def fake_guarded_api(*args, **kwargs):
         nonlocal called
         called = True
-        return "杩欓厤缃‘瀹炴湁鐐规娊璞★紝鍏堟妸鍏蜂綋鎶ラ敊璐村嚭鏉ワ紝鎴戝啀甯綘鐪嬨€?
+        return "这配置确实有点抽象，先把具体报错贴出来，我再帮你看。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("group:20001", "杩欎釜閰嶇疆澶娊璞′簡", nickname="缇ゅ弸A"))
+    reply = asyncio.run(engine.reply("group:20001", "这个配置太抽象了", nickname="群友A"))
 
     assert called
-    assert "涓讳汉" not in reply
-    assert "鎶借薄" in reply
-    assert "浠ｇ爜" not in reply
+    assert "主人" not in reply
+    assert "抽象" in reply
+    assert "代码" not in reply
 
 
 def test_group_qq_number_with_disabled_model_returns_diagnostic() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="smart",
@@ -877,17 +990,17 @@ def test_group_qq_number_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("group:20001", "@2502391316 浣犳槸璋?))
+    reply = asyncio.run(engine.reply("group:20001", "@2502391316 你是谁"))
 
     assert "@2502391316" not in reply
-    assert "鍘熺鏄竴娆? not in reply
+    assert "原神是一款" not in reply
     assert "meaning" not in reply
     assert_model_unavailable(reply)
 
 
 def test_angry_private_correction_uses_model_repair_mode(tmp_path, monkeypatch) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -904,21 +1017,21 @@ def test_angry_private_correction_uses_model_repair_mode(tmp_path, monkeypatch) 
     async def fake_guarded_api(*args, **kwargs):
         nonlocal seen_extra_system
         seen_extra_system = str(kwargs.get("extra_system") or "")
-        return "浣犺寰楀锛屽垰鎵嶇‘瀹炴病鎺ヤ綇閲嶇偣銆傛垜閲嶆柊鎸変綘鐜板湪杩欏彞璇濊鐪熷洖绛斻€?
+        return "你说得对，刚才确实没接住重点。我重新按你现在这句话认真回答。"
 
     monkeypatch.setattr(engine, "_reply_with_guarded_api", fake_guarded_api)
 
-    reply = asyncio.run(engine.reply("private:10001", "浣犳牴鏈笉鎳備汉绫伙紝姝ｅ父鐐瑰ソ鍚?))
+    reply = asyncio.run(engine.reply("private:10001", "你根本不懂人类，正常点好吗"))
 
     assert seen_extra_system
-    assert "鍒氭墠纭疄娌℃帴浣忛噸鐐? in reply
+    assert "刚才确实没接住重点" in reply
 
 
 def test_recent_private_context_includes_actual_assistant_reply_for_continuity(
     tmp_path,
 ) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -930,31 +1043,31 @@ def test_recent_private_context_includes_actual_assistant_reply_for_continuity(
         memory_path=tmp_path / "memory.json",
     )
     engine = AtriReplyEngine(config)
-    engine.memory.observe_user("private:10001", "鎴戝噯澶囩帺涓€浼氬効娓告垙", now=1)
-    engine.memory.observe_bot("private:10001", "鎴戠寽浣犲張鐦潃涓嶅姩浜?, now=2)
-    engine.memory.observe_user("private:10001", "鎬庝箞姣忓ぉ閮界寽鎴戠槴鐫€", now=3)
+    engine.memory.observe_user("private:10001", "我准备玩一会儿游戏", now=1)
+    engine.memory.observe_bot("private:10001", "我猜你又瘫着不动了", now=2)
+    engine.memory.observe_user("private:10001", "怎么每天都猜我瘫着", now=3)
 
     context = engine._recent_private_context(
         "private:10001",
-        current_user_text="鎬庝箞姣忓ぉ閮界寽鎴戠槴鐫€",
+        current_user_text="怎么每天都猜我瘫着",
     )
     messages = engine._recent_conversation_messages(
         "private:10001",
-        current_user_text="鎬庝箞姣忓ぉ閮界寽鎴戠槴鐫€",
+        current_user_text="怎么每天都猜我瘫着",
     )
 
-    assert "鐢ㄦ埛: 鎴戝噯澶囩帺涓€浼氬効娓告垙" in context
-    assert "浜氭墭鑾? 鎴戠寽浣犲張鐦潃涓嶅姩浜? in context
-    assert "鎬庝箞姣忓ぉ閮界寽鎴戠槴鐫€" not in context
+    assert "用户: 我准备玩一会儿游戏" in context
+    assert "亚托莉: 我猜你又瘫着不动了" in context
+    assert "怎么每天都猜我瘫着" not in context
     assert messages == [
-        {"role": "user", "content": "鎴戝噯澶囩帺涓€浼氬効娓告垙"},
-        {"role": "assistant", "content": "鎴戠寽浣犲張鐦潃涓嶅姩浜?},
+        {"role": "user", "content": "我准备玩一会儿游戏"},
+        {"role": "assistant", "content": "我猜你又瘫着不动了"},
     ]
 
 
 def test_serious_mode_suppresses_group_abstract_noise() -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="smart",
@@ -966,19 +1079,19 @@ def test_serious_mode_suppresses_group_abstract_noise() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    serious_reply = asyncio.run(engine.reply("group:20001", "璁蹭腑鏂?))
-    reply = asyncio.run(engine.reply("group:20001", "杩欎釜閰嶇疆澶娊璞′簡", nickname="缇ゅ弸A"))
+    serious_reply = asyncio.run(engine.reply("group:20001", "讲中文"))
+    reply = asyncio.run(engine.reply("group:20001", "这个配置太抽象了", nickname="群友A"))
 
-    assert "姝ｅ父涓枃" in serious_reply
+    assert "正常中文" in serious_reply
     assert "meaning" not in reply
-    assert "鍘熺鏄竴娆? not in reply
-    assert "鍜曞挄鍢庡槑" not in reply
+    assert "原神是一款" not in reply
+    assert "咕咕嘎嘎" not in reply
 
 
 def test_group_abstract_meme_bank_is_preserved_when_allowed() -> None:
-    reply = _group_fallback_reply("杩欎釜閰嶇疆澶娊璞′簡", allow_abstract=True)
+    reply = _group_fallback_reply("这个配置太抽象了", allow_abstract=True)
 
     assert any(
         word in reply
-        for word in ("鎭㈠鍑哄巶璁剧疆", "meaning", "璋滆浜?, "璋冩垙ai", "鍘熺鏄竴娆?)
+        for word in ("恢复出厂设置", "meaning", "谜语人", "调戏ai", "原神是一款")
     )

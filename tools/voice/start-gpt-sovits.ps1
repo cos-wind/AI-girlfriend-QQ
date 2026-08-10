@@ -4,6 +4,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$StartupMutex = New-Object System.Threading.Mutex($false, "Global\AtriGptSovitsService")
+if (-not $StartupMutex.WaitOne(0)) {
+    Write-Host "GPT-SoVITS startup is already in progress."
+    return
+}
+try {
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $RuntimeRoot = Join-Path $ProjectDir "data\runtime\gpt-sovits"
 $SourceRoot = Join-Path $RuntimeRoot "source"
@@ -103,3 +109,7 @@ for ($i = 0; $i -lt 240; $i++) {
     }
 }
 throw "GPT-SoVITS did not become ready within 120 seconds."
+} finally {
+    $StartupMutex.ReleaseMutex()
+    $StartupMutex.Dispose()
+}

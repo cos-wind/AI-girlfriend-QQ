@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
+from atri_qq_bot.runtime.inference_lock import inference_resource_lease
+
 
 class InferenceResourceManager:
     """Serializes GPU-heavy work without coupling providers to one runtime."""
@@ -27,7 +29,8 @@ class InferenceResourceManager:
         self._last_engine = self._active_engine
         self._last_started_at = datetime.now(timezone.utc).isoformat()
         try:
-            yield
+            async with inference_resource_lease(self._active_engine):
+                yield
         finally:
             self._active_engine = ""
             self._lock.release()

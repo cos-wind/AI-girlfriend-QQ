@@ -1,0 +1,14 @@
+# 锁定当前已验证的 ATRI 核心 Python 运行环境（Python 3.11+）。
+# 可用：.venv\Scripts\python.exe -m pip install -r requirements.txt
+httpx==0.28.1
+imageio-ffmpeg==0.6.0
+Pillow==12.2.0
+pypinyin==0.55.0
+pypdf==6.12.2
+python-dotenv==1.2.2
+rapidocr==3.9.2
+onnxruntime==1.28.0
+websockets==16.0
+
+# 开发与回归测试。
+pytest==9.0.3

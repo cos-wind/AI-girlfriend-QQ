@@ -27,7 +27,9 @@ def split_reply_text(text: str, max_chars: int = 44, max_parts: int = 4) -> list
 
     kept = merged[: max_parts - 1]
     tail = "".join(merged[max_parts - 1 :])
-    kept.append(_truncate_tail(tail, max_chars * 2))
+    # Generation controls total length. Transport splitting must keep the final
+    # thought intact instead of manufacturing an unfinished ellipsis.
+    kept.append(tail)
     return kept
 
 
@@ -69,6 +71,8 @@ def _ends_with_strong_punctuation(text: str) -> bool:
 
 
 def _truncate_tail(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return f"{text[: limit - 1].rstrip()}…"
+    """Backward-compatible helper that deliberately keeps complete content."""
+    return text
+
+# End of module.
+

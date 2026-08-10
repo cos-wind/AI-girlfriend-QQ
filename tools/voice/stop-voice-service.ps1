@@ -4,10 +4,13 @@ $PidFile = Join-Path $ProjectDir "data\runtime\voice-service.pid"
 
 function Get-ListeningProcessId {
     param([int]$Port)
-    foreach ($Line in (& netstat -ano -p tcp 2>$null)) {
-        if ($Line -match "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
-            return [int]$Matches[1]
-        }
+    $Connection = Get-NetTCPConnection `
+        -LocalPort $Port `
+        -State Listen `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($Connection) {
+        return [int]$Connection.OwningProcess
     }
     return $null
 }

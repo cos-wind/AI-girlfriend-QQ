@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import re
 import struct
 import subprocess
@@ -65,6 +66,7 @@ def _extract_video_frames(data: bytes, ext: str, max_frames: int) -> tuple[list[
                 error = completed.stderr.decode("utf-8", errors="ignore").strip()
                 return [], f"视频抽帧失败：{_shorten(error, 220) or 'ffmpeg 未返回成功状态'}"
             frames = [path.read_bytes() for path in sorted(tmp_dir.glob("frame_*.jpg"))[:max_frames]]
+        frames = _dedupe_similar_video_frames(frames)
         return frames, "" if frames else "视频文件已读取，但没有抽取到关键帧。"
 
 def _probe_video_duration_seconds(ffmpeg: str, input_path: Path) -> float | None:
@@ -96,10 +98,13 @@ def _extract_even_video_frames(
 ) -> list[bytes]:
     if not duration:
         return []
-    timestamps = [
-        max(0.0, min(duration - 0.05, duration * (index + 1) / (max_frames + 1)))
-        for index in range(max_frames)
-    ]
+    if max_frames <= 1:
+        timestamps = [duration / 2]
+    else:
+        timestamps = [
+            max(0.0, min(duration - 0.05, duration * index / (max_frames - 1)))
+            for index in range(max_frames)
+        ]
     frames: list[bytes] = []
     for index, timestamp in enumerate(timestamps, start=1):
         output_path = tmp_dir / f"even_frame_{index:02d}.jpg"
@@ -131,6 +136,34 @@ def _extract_even_video_frames(
         if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
             frames.append(output_path.read_bytes())
     return frames[:max_frames]
+
+
+def _dedupe_similar_video_frames(frames: list[bytes], threshold: float = 3.5) -> list[bytes]:
+    if len(frames) < 2:
+        return frames
+    try:
+        from PIL import Image, ImageChops, ImageStat
+    except Exception:
+        return frames
+
+    selected: list[bytes] = []
+    previous = None
+    for frame_data in frames:
+        try:
+            with Image.open(io.BytesIO(frame_data)) as image:
+                sample = image.convert("L").resize((32, 32))
+        except Exception:
+            selected.append(frame_data)
+            previous = None
+            continue
+        if previous is not None:
+            difference = ImageChops.difference(previous, sample)
+            mean_difference = float(ImageStat.Stat(difference).mean[0])
+            if mean_difference < threshold:
+                continue
+        selected.append(frame_data)
+        previous = sample
+    return selected or frames[:1]
 
 def _image_info(data: bytes) -> tuple[str, int, int] | None:
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:

@@ -60,13 +60,17 @@ L2_SLEEP_THRESHOLD = 0.3
 L2_DAILY_DECAY = 0.1
 DEFAULT_AFFECTION = 50
 OWNER_INITIAL_AFFECTION = 72
+NORMAL_AFFECTION_EQUILIBRIUM = 55.0
+OWNER_AFFECTION_EQUILIBRIUM = 72.0
 GROUP_ACTIVITY_DEFAULT = 50
 GROUP_ACTIVITY_DAILY_DECAY = 6.0
-OWNER_AFFECTION_COEFFICIENT = 0.55
+OWNER_AFFECTION_COEFFICIENT = 0.8
 NORMAL_AFFECTION_COEFFICIENT = 1.0
 PRIVATE_AFFECTION_IDLE_DECAY_GRACE_DAYS = 1
-PRIVATE_AFFECTION_IDLE_DAILY_DECAY = 1.2
-OWNER_AFFECTION_IDLE_DAILY_DECAY = 0.35
+PRIVATE_AFFECTION_IDLE_DAILY_DECAY = 0.35
+OWNER_AFFECTION_IDLE_DAILY_DECAY = 0.2
+AFFECTION_DAILY_POSITIVE_CAP = 1.4
+AFFECTION_DAILY_NEGATIVE_CAP = 1.15
 PRIVATE_NUDGE_STOP_AFFECTION = 35.0
 PRIVATE_NUDGE_SLOW_AFFECTION = 50.0
 PRIVATE_NUDGE_CLOSE_AFFECTION = 72.0
@@ -316,35 +320,70 @@ def _classify_affection_event(text: str) -> dict[str, Any]:
         return {"importance": "daily", "sentiment": "neutral", "polarity": 0.0, "weight": 0.0}
 
     if _contains_any(stripped, MAJOR_NEGATIVE_HINTS):
-        return {"importance": "major", "sentiment": "negative", "polarity": -1.0, "weight": 8.0}
+        return {"importance": "major", "sentiment": "negative", "polarity": -1.0, "weight": 0.75}
     if _contains_any(stripped, MAJOR_POSITIVE_HINTS):
-        return {"importance": "major", "sentiment": "positive", "polarity": 1.0, "weight": 8.0}
+        return {"importance": "major", "sentiment": "positive", "polarity": 1.0, "weight": 0.9}
     if _contains_any(stripped, MEDIUM_NEGATIVE_HINTS):
-        return {"importance": "medium", "sentiment": "negative", "polarity": -1.0, "weight": 4.0}
+        return {"importance": "medium", "sentiment": "negative", "polarity": -1.0, "weight": 0.38}
     if _contains_any(stripped, NEGATIVE_MOOD_HINTS):
-        return {"importance": "medium", "sentiment": "vulnerable", "polarity": 0.65, "weight": 4.0}
+        return {"importance": "medium", "sentiment": "vulnerable", "polarity": 1.0, "weight": 0.28}
     if _contains_any(stripped, MEDIUM_POSITIVE_HINTS):
-        return {"importance": "medium", "sentiment": "positive", "polarity": 1.0, "weight": 4.0}
+        return {"importance": "medium", "sentiment": "positive", "polarity": 1.0, "weight": 0.45}
     if _contains_any(stripped, DAILY_POSITIVE_HINTS):
-        return {"importance": "daily", "sentiment": "positive", "polarity": 0.35, "weight": 1.0}
-    return {"importance": "daily", "sentiment": "neutral", "polarity": 0.0, "weight": 1.0}
+        return {"importance": "daily", "sentiment": "positive", "polarity": 1.0, "weight": 0.12}
+    # A real, addressed interaction may build familiarity slowly even without
+    # explicit praise. This lowers the rise threshold without rewarding spam.
+    return {"importance": "daily", "sentiment": "neutral", "polarity": 1.0, "weight": 0.025}
 
 def _update_affection(
     item: dict[str, Any],
     affection_event: dict[str, Any],
     is_owner: bool = False,
+    now: float | None = None,
 ) -> None:
+    now = datetime.now().timestamp() if now is None else float(now)
     current = float(item.get("affection_score", DEFAULT_AFFECTION))
+    target = OWNER_AFFECTION_EQUILIBRIUM if is_owner else NORMAL_AFFECTION_EQUILIBRIUM
+    distance = target - current
+    if current < 25 or current > 85:
+        current += distance * 0.03
+    elif current < 35 or current > 75:
+        current += distance * 0.01
+
     coefficient = OWNER_AFFECTION_COEFFICIENT if is_owner else NORMAL_AFFECTION_COEFFICIENT
     delta = (
         float(affection_event.get("weight", 0.0))
         * float(affection_event.get("polarity", 0.0))
         * coefficient
     )
-    if delta:
-        item["affection_score"] = round(_clamp(current + delta), 3)
-    else:
-        item["affection_score"] = round(_clamp(current), 3)
+    if delta > 0:
+        if current >= 85:
+            delta *= 0.15
+        elif current >= 75:
+            delta *= 0.35
+        elif current >= target:
+            delta *= 0.7
+    elif delta < 0:
+        if current <= 25:
+            delta *= 0.2
+        elif current <= 40:
+            delta *= 0.5
+
+    day = datetime.fromtimestamp(now).date().isoformat()
+    if item.get("affection_delta_date") != day:
+        item["affection_delta_date"] = day
+        item["affection_positive_today"] = 0.0
+        item["affection_negative_today"] = 0.0
+    if delta > 0:
+        used = float(item.get("affection_positive_today", 0.0))
+        delta = min(delta, max(0.0, AFFECTION_DAILY_POSITIVE_CAP - used))
+        item["affection_positive_today"] = round(used + delta, 3)
+    elif delta < 0:
+        used = float(item.get("affection_negative_today", 0.0))
+        magnitude = min(-delta, max(0.0, AFFECTION_DAILY_NEGATIVE_CAP - used))
+        delta = -magnitude
+        item["affection_negative_today"] = round(used + magnitude, 3)
+    item["affection_score"] = round(_clamp(current + delta), 3)
 
 def _decay_private_affection_for_idle(item: dict[str, Any], now: float) -> bool:
     last_user_at = _as_float(item.get("last_user_at"))
@@ -372,7 +411,18 @@ def _decay_private_affection_for_idle(item: dict[str, Any], now: float) -> bool:
         else PRIVATE_AFFECTION_IDLE_DAILY_DECAY
     )
     old_score = float(item.get("affection_score", DEFAULT_AFFECTION))
-    item["affection_score"] = round(_clamp(old_score - rate * days), 3)
+    target = (
+        OWNER_AFFECTION_EQUILIBRIUM
+        if item.get("affection_owner_profile")
+        else NORMAL_AFFECTION_EQUILIBRIUM
+    )
+    # Existing extreme records converge without a disruptive one-shot rewrite.
+    movement = min(abs(target - old_score), rate * days, 2.0)
+    if old_score < target:
+        new_score = old_score + movement
+    else:
+        new_score = old_score - movement
+    item["affection_score"] = round(_clamp(new_score), 3)
     item["last_affection_idle_decay_at"] = now
     return item["affection_score"] != old_score
 
@@ -555,7 +605,9 @@ def _ensure_structured_memory(item: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(memory, dict):
         memory = {}
         item["structured_memory"] = memory
-    for key in ("l1", "l2", "candidates"):
+    # L1=稳定用户特点，L2=带时间的事件，L3=当前会话短上下文。
+    # candidates 只表示尚未达到确认门槛的候选，不应冒充已确认特点。
+    for key in ("l1", "l2", "l3", "candidates"):
         if not isinstance(memory.get(key), list):
             memory[key] = []
     item.setdefault("affection_score", DEFAULT_AFFECTION)
@@ -566,18 +618,30 @@ def _append_session_l3(
     conversation_id: str,
     text: str,
     now: float,
+    memory: dict[str, Any] | None = None,
 ) -> None:
     if _is_noisy_for_long_memory(text):
         return
     items = list(session_l3.get(conversation_id) or [])
-    items.append(
-        {
-            "layer": "L3",
-            "text": _shorten(text, 120),
-            "at": now,
-        }
-    )
+    # 进程重启后 session_l3 是空的，必须从持久化窗口恢复，否则第一条
+    # 新消息会把磁盘中的旧 L3 全部覆盖掉。
+    if not items and memory is not None:
+        items = list(memory.get("l3") or [])
+    entry = {
+        "layer": "L3",
+        "category": "session_context",
+        "key": "当前会话",
+        "text": _shorten(text, 120),
+        "value": _shorten(text, 120),
+        "source": "user",
+        "at": now,
+        "updated_at": now,
+    }
+    items.append(entry)
     session_l3[conversation_id] = items[-8:]
+    if memory is not None:
+        # 保存一份极短滚动窗口，重启后仍可展示和恢复上下文；它不是长期用户画像。
+        memory["l3"] = list(items[-8:])
 
 def _remember_structured_from_user(
     item: dict[str, Any],
@@ -627,7 +691,17 @@ def _actionable_style_candidate(
     stripped = str(text or "").strip()
     if not stripped:
         return None
-    if not _contains_any(stripped, ACTIONABLE_STYLE_HINTS):
+    style_terms = (
+        "别发日语", "不要发日语", "不准发日语", "别用日语", "不要用日语",
+        "别发外语", "不要发外语", "只说中文", "讲中文", "正常中文",
+        "别学我说话", "不要学我说话", "别复读", "不要复读",
+        "别主动发消息", "不要主动发消息", "没事别发消息", "少主动",
+        "别刷屏", "不要刷屏", "不要套话", "有逻辑",
+    )
+    short_style_request = any(word in stripped for word in ("短句", "直接", "别绕")) and any(
+        word in stripped for word in ("回复", "回答", "说话", "以后", "之后", "默认", "请")
+    )
+    if not any(word in stripped for word in style_terms) and not short_style_request:
         return None
     return _candidate(
         "communication_style",
@@ -652,8 +726,8 @@ def _style_rule_value(text: str) -> str:
     if any(word in text for word in ("别刷屏", "不要刷屏")):
         return "回复保持短句低频，不刷屏"
     if any(word in text for word in ("短句", "直接", "别绕", "不要套话", "有逻辑")):
-        return _shorten(text, 80)
-    return _shorten(text, 80)
+        return "回复偏好短句、直接、有逻辑，少铺垫和套话"
+    return "按用户明确要求调整回复方式"
 
 def _extract_l1_candidates(
     text: str,
@@ -944,6 +1018,102 @@ def _upsert_l2(memory: dict[str, Any], event: dict[str, Any], now: float) -> str
     memory["l2"] = list(memory["l2"])[-30:]
     return event["id"]
 
+
+def apply_extraction_operation(
+    memory: dict[str, Any],
+    operation: dict[str, Any],
+    now: float,
+) -> str | None:
+    """应用后台提取器的 ADD/UPDATE/DELETE，保留证据和旧值。
+
+    这个函数是结构化记忆的内部 seam：JSON、SQLite 索引和 WebUI 都只消费
+    统一后的条目，不需要知道提取器来自规则还是本地模型。
+    """
+    layer = str(operation.get("layer") or "").upper()
+    category = str(operation.get("category") or "").strip()
+    key = _clean_value(str(operation.get("key") or ""))
+    value = _clean_value(str(operation.get("value") or ""))
+    action = str(operation.get("operation") or "ADD").upper()
+    if layer not in {"L1", "L2"} or not key or (action != "DELETE" and not value):
+        return None
+    memory = _ensure_structured_memory(memory)
+    bucket_name = "l1" if layer == "L1" else "l2"
+    bucket = memory[bucket_name]
+    memory_key = f"{category}:{key}"
+    existing = _find_memory(bucket, memory_key)
+    if action == "DELETE":
+        if existing:
+            existing["state"] = "expired"
+            existing["valid_to"] = now
+            existing["updated_at"] = now
+            _append_source(existing, operation, now)
+            return existing.get("id")
+        return None
+
+    confidence = max(0.0, min(1.0, float(operation.get("confidence", 0.6))))
+    if layer == "L1" and category not in {"profile_fact", "interest", "preference", "habit", "communication_style"}:
+        return None
+    if layer == "L2" and category not in {"event", "schedule", "important_interaction"}:
+        return None
+
+    if existing:
+        if existing.get("locked") or existing.get("source_type") == "manual":
+            # WebUI 手工确认的事实是最高优先级，历史回放和模型都不能覆盖。
+            existing["last_mentioned_at"] = now
+            return existing.get("id")
+        old_value = str(existing.get("value") or "")
+        if old_value and old_value != value:
+            versions = list(existing.get("versions") or [])
+            versions.append({"value": old_value, "at": now, "reason": "updated_by_user_evidence"})
+            existing["versions"] = versions[-8:]
+        existing["value"] = value
+        existing["confidence"] = max(float(existing.get("confidence", 0.0)), confidence)
+        existing["evidence_count"] = int(existing.get("evidence_count", 1)) + 1
+        existing["updated_at"] = now
+        existing["last_mentioned_at"] = now
+        existing["state"] = "active"
+        _append_source(existing, operation, now)
+        return existing.get("id")
+
+    promote = bool(operation.get("promote")) or confidence >= 0.78
+    if layer == "L1" and not promote:
+        candidate = dict(operation)
+        candidate["layer"] = "L1"
+        return _upsert_l1_candidate(memory, candidate, now)
+
+    entry = {
+        "id": _memory_id(layer.lower(), memory_key),
+        "layer": layer,
+        "category": category,
+        "key": key,
+        "memory_key": memory_key,
+        "value": value,
+        "confidence": confidence,
+        "evidence_count": 1,
+        "source": "user",
+        "source_type": operation.get("source_type", "model"),
+        "evidence": _shorten(str(operation.get("evidence") or value), 180),
+        "created_at": operation.get("created_at", now),
+        "updated_at": now,
+        "last_mentioned_at": now,
+        "state": "active",
+        "associations": [],
+        "sources": [],
+    }
+    for meta_key in ("visibility", "source_context"):
+        if operation.get(meta_key):
+            entry[meta_key] = operation[meta_key]
+    _append_source(entry, operation, now)
+    bucket.append(entry)
+    if layer == "L1":
+        memory["candidates"] = [
+            item for item in memory["candidates"] if item.get("memory_key") != memory_key
+        ][-20:]
+        memory["l1"] = memory["l1"][-80:]
+    else:
+        memory["l2"] = memory["l2"][-50:]
+    return entry["id"]
+
 def _find_memory(items: list[dict[str, Any]], memory_key: str) -> dict[str, Any] | None:
     for item in items:
         if item.get("memory_key") == memory_key:
@@ -1073,12 +1243,20 @@ def _structured_memory_profile(
         entry
         for entry in memory.get("l1", [])
         if float(entry.get("confidence", 0.0)) >= 0.6
+        and _reliable_l1_entry(entry)
     ]
     l2 = [
         entry
         for entry in memory.get("l2", [])
         if float(entry.get("activity", 0.0)) > L2_SLEEP_THRESHOLD
         and entry.get("state") != "sleeping"
+        and (
+            entry.get("category") in {"event", "schedule"}
+            or (
+                entry.get("category") == "important_interaction"
+                and entry.get("importance") == "major"
+            )
+        )
     ]
     l2 = sorted(
         l2,
@@ -1091,6 +1269,7 @@ def _structured_memory_profile(
         entry
         for entry in memory.get("candidates", [])
         if float(entry.get("confidence", 0.0)) >= 0.55
+        and _reliable_l1_entry(entry)
     ]
     return {
         "l1": l1[-12:],
@@ -1098,6 +1277,26 @@ def _structured_memory_profile(
         "l3": list(session_l3)[-5:],
         "candidates": candidates[-8:],
     }
+
+
+def _reliable_l1_entry(entry: dict[str, Any]) -> bool:
+    """L1/L1候选只能作为用户特点参与检索，拒绝模型回声和临时长句。"""
+    category = str(entry.get("category") or "")
+    value = str(entry.get("value") or "").strip()
+    if entry.get("state") in {"expired", "deleted", "rejected"}:
+        return False
+    if category not in {"profile_fact", "interest", "preference", "habit", "communication_style"}:
+        return False
+    if not value or len(value) > 64:
+        return False
+    if any(marker in value for marker in ("你", "亚托莉", "http://", "https://", "...", "…", "[", "]")):
+        return False
+    if category == "communication_style" and not any(
+        marker in value
+        for marker in ("默认", "不要", "别", "回复偏好", "短句", "少铺垫", "有逻辑")
+    ):
+        return False
+    return True
 
 def _format_recall_context(profile: dict[str, Any], user_text: str) -> str:
     structured = profile.get("structured_memory") or {}
@@ -1205,7 +1404,9 @@ def _remember_important_interaction(
     now: float,
     affection_event: dict[str, Any] | None,
 ) -> str | None:
-    if not affection_event or affection_event.get("importance") == "daily":
+    # L2 是事件层，不是情绪流水账。普通感谢、吐槽和一次性情绪
+    # 只参与好感度计算；只有明确的重大互动才保留为长期事件。
+    if not affection_event or affection_event.get("importance") != "major":
         return None
     if _is_noisy_for_long_memory(text):
         return None
@@ -1310,6 +1511,8 @@ def _valid_preference_value(value: str) -> bool:
     if not value or len(value) > 18:
         return False
     if any(word in value for word in ("你", "亚托莉", "这个", "那个", "什么")):
+        return False
+    if any(marker in value for marker in ("http://", "https://", "...", "…", "[", "]")):
         return False
     if _is_noisy_for_long_memory(value):
         return False

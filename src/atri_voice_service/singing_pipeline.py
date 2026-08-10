@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from atri_qq_bot.voice import SynthesisResult
 
+from .process_utils import hidden_subprocess_options
 from .providers import ProviderError
 from .resources import InferenceResourceManager
 
@@ -316,6 +317,7 @@ async def _run_process(
             cwd=str(cwd) if cwd else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **hidden_subprocess_options(),
         )
     except OSError as exc:
         raise ProviderError(f"无法启动歌声引擎：{exc}") from exc

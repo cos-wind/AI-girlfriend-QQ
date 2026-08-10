@@ -89,8 +89,7 @@ def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest
             if segment_type == "image":
                 request.has_image_only = True
                 image_ref = _segment_ref("image", data, event)
-                if _should_analyze_image(plain_text) or _message_has_only_material(message):
-                    request.image_refs.append(image_ref)
+                request.image_refs.append(image_ref)
             elif segment_type == "file":
                 request.file_refs.append(_segment_ref("file", data, event))
             elif segment_type == "video":
@@ -303,7 +302,7 @@ def _onebot_material_actions(ref: _SegmentRef) -> list[tuple[str, dict[str, Any]
         return []
 
     actions: list[tuple[str, dict[str, Any]]] = []
-    if ref.kind == "image":
+    if ref.kind in {"image", "sticker"}:
         actions.append(("get_image", {"file": file_key}))
         actions.append(("get_file", {"file": file_key}))
     elif ref.kind in {"file", "video"}:
@@ -326,12 +325,8 @@ def _resolve_material_from_action_response(response: dict[str, Any] | None) -> t
         return None
     payload: Any = response.get("data") if "data" in response else response
     urls = _extract_urls_from_any(payload)
-    if urls:
-        return urls[0], ""
     path = _extract_path_from_any(payload)
-    if path:
-        return "", path
-    return None
+    return (urls[0] if urls else "", path) if urls or path else None
 
 def _extract_path_from_any(value: Any) -> str:
     if isinstance(value, str):
@@ -377,33 +372,6 @@ def _extract_paths(text: str) -> list[Path]:
         if suffix in TEXT_EXTENSIONS | DOC_EXTENSIONS | SHEET_EXTENSIONS | IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
             paths.append(Path(cleaned))
     return paths
-
-def _should_analyze_image(text: str) -> bool:
-    return any(
-        word in text
-        for word in (
-            "分析图片",
-            "分析这张",
-            "评价图片",
-            "评价这张",
-            "看图",
-            "看看图",
-            "看看这张",
-            "这张图",
-            "这张照片",
-            "这张截图",
-            "图片内容",
-            "图里",
-            "截图",
-            "帮我看",
-            "好看吗",
-            "怎么样",
-            "咋样",
-            "如何",
-            "评价一下",
-            "总结图片",
-        )
-    )
 
 def _classify_category(text: str, request: _MaterialRequest) -> str:
     if request.image_refs or request.has_image_only:

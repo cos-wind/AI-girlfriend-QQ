@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import threading
 from pathlib import Path
@@ -18,7 +18,7 @@ from atri_webui.model_profiles import (
     upsert_model_profile,
 )
 from atri_webui.page import render_index
-from atri_webui.sticker_admin import resolve_under, sticker_file_payload
+from atri_webui.sticker_admin import resolve_under, sticker_file_payload, sticker_summary
 from atri_webui import voice_admin
 from atri_webui.voice_admin import resolve_voice_audio, save_reference_audio, save_test_audio
 from atri_webui.upload_parser import (
@@ -46,13 +46,13 @@ def test_memory_admin_summarizes_and_reads_details(tmp_path: Path) -> None:
                                 {
                                     "category": "interest",
                                     "key": "likes-tests",
-                                    "value": "鍠滄绋冲畾鐨勫洖褰掓祴璇?,
+                                    "value": "喜欢稳定的回归测试",
                                 }
                             ],
                             "l2": [],
                             "candidates": [],
                         },
-                        "history": [{"role": "user", "nickname": "涓讳汉", "text": "璁板緱娴嬭瘯涓€涓?}],
+                        "history": [{"role": "user", "nickname": "主人", "text": "记得测试一下"}],
                     }
                 },
             },
@@ -70,11 +70,52 @@ def test_memory_admin_summarizes_and_reads_details(tmp_path: Path) -> None:
     assert summary["conversations"] == 1
     assert summary["items"][0]["id"] == "person:10001"
     assert summary["items"][0]["kind"] == "person"
-    assert summary["items"][0]["type"] == "浜虹墿妗ｆ"
+    assert summary["items"][0]["type"] == "人物档案"
     assert summary["items"][0]["memory_counts"]["total"] == 1
-    assert "鍠滄绋冲畾鐨勫洖褰掓祴璇? in summary["items"][0]["searchable"]
+    assert "喜欢稳定的回归测试" in summary["items"][0]["searchable"]
     assert detail["ok"] is True
     assert detail["content"]["message_count"] == 2
+
+
+def test_memory_detail_exposes_only_three_memory_layers(tmp_path: Path) -> None:
+    memory_path = tmp_path / "users.json"
+    memory_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "conversations": {
+                    "private:10001": {
+                        "target": {"user_id": 10001},
+                        "structured_memory": {
+                            "l1": [{"category": "habit", "key": "作息", "value": "晚上学习"}],
+                            "l2": [{"category": "event", "key": "明天:考试", "value": "明天有考试"}],
+                            "l3": [{"layer": "L3", "category": "session_context", "text": "当前正在讨论记忆系统", "value": "当前正在讨论记忆系统"}],
+                            "candidates": [],
+                        },
+                        "history": [{"role": "user", "text": "这句原始历史不应混入概览"}],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    detail = MemoryAdmin(memory_path, tmp_path / "backups").detail("id=private%3A10001")
+
+    assert [entry["value"] for entry in detail["layers"]["l1"]] == ["晚上学习"]
+    assert [entry["value"] for entry in detail["layers"]["l2"]] == ["明天有考试"]
+    assert [entry["text"] for entry in detail["layers"]["l3"]] == ["当前正在讨论记忆系统"]
+    assert "这句原始历史不应混入概览" not in detail["natural"]
+
+
+def test_memory_tabs_use_layer_names() -> None:
+    html = render_index()
+
+    assert "L1 用户特点" in html
+    assert "L2 事件" in html
+    assert "L3 最近聊天" in html
+    assert '>习惯<' not in html
 
 
 def test_memory_admin_person_summary_merges_private_and_group_member(
@@ -95,8 +136,8 @@ def test_memory_admin_person_summary_merges_private_and_group_member(
                             "l1": [
                                 {
                                     "category": "profile_fact",
-                                    "key": "鐢熸棩",
-                                    "value": "8鏈?2鏃?,
+                                    "key": "生日",
+                                    "value": "8月12日",
                                 }
                             ],
                             "l2": [],
@@ -111,15 +152,15 @@ def test_memory_admin_person_summary_merges_private_and_group_member(
                             "l1": [
                                 {
                                     "category": "interest",
-                                    "key": "鍏磋叮:鍜栧暋",
-                                    "value": "鍜栧暋",
+                                    "key": "兴趣:咖啡",
+                                    "value": "咖啡",
                                     "visibility": "group:20001",
                                 }
                             ],
                             "l2": [],
                             "candidates": [],
                         },
-                        "history": [{"role": "user", "nickname": "浣欏鸡瀵勯暱椋?, "text": "鎴戝枩娆㈠枬鍜栧暋"}],
+                        "history": [{"role": "user", "nickname": "余弦寄长风", "text": "我喜欢喝咖啡"}],
                     },
                 },
             },
@@ -135,15 +176,15 @@ def test_memory_admin_person_summary_merges_private_and_group_member(
     assert [item["id"] for item in summary["items"]] == ["person:10001"]
     assert summary["items"][0]["messages"] == 5
     assert summary["items"][0]["related_count"] == 2
-    assert "浣欏鸡瀵勯暱椋? in summary["items"][0]["display_name"]
+    assert "余弦寄长风" in summary["items"][0]["display_name"]
     assert detail["ok"] is True
     assert detail["id"] == "person:10001"
     assert detail["storage_id"] == "private:10001"
     assert detail["group_infos"][0]["group_id"] == "20001"
     assert detail["group_infos"][0]["messages"] == 3
     values = json.dumps(detail["content"]["structured_memory"], ensure_ascii=False)
-    assert "8鏈?2鏃? in values
-    assert "鍜栧暋" in values
+    assert "8月12日" in values
+    assert "咖啡" in values
 
 
 def test_memory_admin_backs_up_before_atomic_save(tmp_path: Path) -> None:
@@ -193,8 +234,8 @@ def test_memory_admin_normalizes_manual_structured_entries(tmp_path: Path) -> No
                 "l1": [
                     {
                         "category": "interest",
-                        "key": "鍏磋叮:鍜栧暋",
-                        "value": "鍜栧暋",
+                        "key": "兴趣:咖啡",
+                        "value": "咖啡",
                         "confidence": 0.8,
                     }
                 ],
@@ -206,8 +247,8 @@ def test_memory_admin_normalizes_manual_structured_entries(tmp_path: Path) -> No
 
     saved = json.loads(memory_path.read_text(encoding="utf-8"))
     entry = saved["conversations"]["private:10001"]["structured_memory"]["l1"][0]
-    assert entry["memory_key"] == "interest:鍏磋叮:鍜栧暋"
-    assert entry["id"] == "l1:interest:鍏磋叮:鍜栧暋"
+    assert entry["memory_key"] == "interest:兴趣:咖啡"
+    assert entry["id"] == "l1:interest:兴趣:咖啡"
     assert entry["source"] == "webui"
     assert entry["locked"] is True
 
@@ -239,7 +280,7 @@ def test_memory_admin_relationship_patch_preserves_other_memory_fields(tmp_path:
     original_item = {
         "target": {"message_type": "private", "user_id": 10001},
         "message_count": 18,
-        "history": [{"role": "user", "text": "涓嶈鏀硅繖娈靛巻鍙?}],
+        "history": [{"role": "user", "text": "不要改这段历史"}],
         "structured_memory": {"l1": [], "l2": [], "candidates": []},
         "affection_score": 20,
     }
@@ -259,6 +300,7 @@ def test_memory_admin_relationship_patch_preserves_other_memory_fields(tmp_path:
         "affection_score": 88.5,
         "group_activity_score": None,
         "proactive_override": "deny",
+        "trust_tier": "probation",
     }
     assert saved["message_count"] == 18
     assert saved["history"] == original_item["history"]
@@ -274,7 +316,7 @@ def test_memory_admin_updates_group_activity_without_creating_affection(tmp_path
         "target": {"message_type": "group", "group_id": 1054646184},
         "message_count": 120,
         "group_activity_score": 12,
-        "history": [{"role": "user", "text": "缇ゆ秷鎭?}],
+        "history": [{"role": "user", "text": "群消息"}],
     }
     memory_path.write_text(
         json.dumps(
@@ -320,8 +362,8 @@ def test_memory_admin_private_edit_cleans_same_person_group_stale_values(
                             "l1": [
                                 {
                                     "category": "interest",
-                                    "key": "鍏磋叮:濂惰尪",
-                                    "value": "濂惰尪",
+                                    "key": "兴趣:奶茶",
+                                    "value": "奶茶",
                                 }
                             ],
                             "l2": [],
@@ -333,8 +375,8 @@ def test_memory_admin_private_edit_cleans_same_person_group_stale_values(
                             "l1": [
                                 {
                                     "category": "interest",
-                                    "key": "鍏磋叮:濂惰尪",
-                                    "value": "濂惰尪",
+                                    "key": "兴趣:奶茶",
+                                    "value": "奶茶",
                                 }
                             ],
                             "l2": [],
@@ -356,8 +398,8 @@ def test_memory_admin_private_edit_cleans_same_person_group_stale_values(
                 "l1": [
                     {
                         "category": "interest",
-                        "key": "鍏磋叮:鍜栧暋",
-                        "value": "鍜栧暋",
+                        "key": "兴趣:咖啡",
+                        "value": "咖啡",
                     }
                 ],
                 "l2": [],
@@ -372,7 +414,7 @@ def test_memory_admin_private_edit_cleans_same_person_group_stale_values(
     ]["l1"]
     private_entries = saved["conversations"]["private:10001"]["structured_memory"]["l1"]
     assert not group_entries
-    assert private_entries[0]["value"] == "鍜栧暋"
+    assert private_entries[0]["value"] == "咖啡"
 
 
 def test_memory_admin_serializes_concurrent_writes(tmp_path: Path) -> None:
@@ -479,7 +521,7 @@ def test_local_ollama_models_root_accepts_direct_manifest_layout(tmp_path: Path)
 
 def test_model_profiles_payload_includes_provider_catalog(tmp_path: Path) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -509,7 +551,7 @@ def test_model_profiles_payload_tracks_active_profiles_by_type(
                 "profiles": [
                     {
                         "id": "chat-qwen",
-                        "name": "鑱婂ぉ Qwen",
+                        "name": "聊天 Qwen",
                         "model_type": "chat",
                         "provider": "Ollama",
                         "base_url": "http://127.0.0.1:11434/v1",
@@ -518,7 +560,7 @@ def test_model_profiles_payload_tracks_active_profiles_by_type(
                     },
                     {
                         "id": "vision-qwen",
-                        "name": "瑙嗚 Qwen",
+                        "name": "视觉 Qwen",
                         "model_type": "vision",
                         "provider": "Ollama",
                         "base_url": "http://127.0.0.1:11434/v1",
@@ -532,7 +574,7 @@ def test_model_profiles_payload_tracks_active_profiles_by_type(
         encoding="utf-8",
     )
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -570,7 +612,7 @@ def test_activate_vision_profile_does_not_replace_chat_model(
                 "profiles": [
                     {
                         "id": "vision-qwen",
-                        "name": "瑙嗚 Qwen",
+                        "name": "视觉 Qwen",
                         "model_type": "vision",
                         "provider": "Ollama",
                         "base_url": "http://127.0.0.1:11434/v1",
@@ -630,7 +672,7 @@ def test_upsert_vision_profile_prefers_existing_vision_api_key(
 
     profile = upsert_model_profile(
         {
-            "name": "瑙嗚妯″瀷",
+            "name": "视觉模型",
             "model_type": "vision",
             "provider": "Ollama",
             "base_url": "http://127.0.0.1:11434/v1",
@@ -654,7 +696,7 @@ def test_builtin_profile_collision_is_repaired_without_losing_local_profile(
                 "profiles": [
                     {
                         "id": "deepseek-official-chat",
-                        "name": "鏈湴 Ollama deepseek-r1:8b",
+                        "name": "本地 Ollama deepseek-r1:8b",
                         "model_type": "chat",
                         "provider": "Ollama",
                         "base_url": "http://127.0.0.1:11434/v1",
@@ -735,7 +777,7 @@ def test_model_page_shows_feedback_for_local_model_actions() -> None:
     assert "beginNewModelProfileFromFill" in html
     assert "testCurrentChatModel" in html
     assert "model-workspace" in html
-    assert "浠呭彂鐜版ā鍨嬫枃浠? in html
+    assert "仅发现模型文件" in html
 
 
 def test_voice_page_has_separate_policy_profile_and_preview_controls() -> None:
@@ -746,8 +788,10 @@ def test_voice_page_has_separate_policy_profile_and_preview_controls() -> None:
     assert 'id="voiceTtsEnabled"' in html
     assert '<select id="voiceProfileId"' in html
     assert 'id="voiceReferenceFile"' in html
+    assert 'id="voicePreviewLanguage"' in html
     assert 'id="voicePreviewAudio"' in html
     assert "async function previewVoice()" in html
+    assert "language:$(\'voicePreviewLanguage\').value" in html
     assert 'id="voiceAsrLexicon"' in html
     assert "asr_lexicon_text:$('voiceAsrLexicon').value" in html
     assert 'id="voiceTtsPronunciations"' in html
@@ -758,7 +802,7 @@ def test_advanced_reply_settings_include_voice_probability_control() -> None:
     html = render_index()
 
     assert 'id="replyVoiceProbabilityNumber"' in html
-    assert '["REPLY_VOICE_PROBABILITY","璇煶姒傜巼锛?锛?,"voice-probability"]' in html
+    assert '["REPLY_VOICE_PROBABILITY","语音概率（%）","voice-probability"]' in html
     assert 'if(type===\'voice-probability\') continue;' in html
     assert "async function loadReplyVoiceProbability()" in html
     assert "async function saveReplyVoiceProbability()" in html
@@ -835,7 +879,7 @@ def test_webui_test_chat_reports_when_fallback_is_used(
 
     monkeypatch.setattr(webui_server, "AtriReplyEngine", FailingEngine)
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -847,25 +891,96 @@ def test_webui_test_chat_reports_when_fallback_is_used(
         memory_path=tmp_path / "users.json",
     )
 
-    result = asyncio.run(webui_server.test_chat(config, "浣犲ソ"))
+    result = asyncio.run(webui_server.test_chat(config, "你好"))
 
     assert result["used_ai"] is False
     assert result["reply"] == "fallback reply"
     assert "backend unavailable" in result["error"]
 
 
+def test_webui_test_chat_uses_the_same_relaxed_quality_mode_as_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    finalized: list[bool] = []
+
+    class ToolReplyEngine:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        async def _reply_with_guarded_api(self, *args, **kwargs) -> str:
+            return "联网结果第一条。\n联网结果第二条。\n联网结果第三条。\n来源链接。"
+
+        def _finalize_reply(
+            self,
+            conversation_id: str,
+            text: str,
+            reply: str,
+            *,
+            strict_quality: bool = True,
+        ) -> str:
+            finalized.append(strict_quality)
+            if strict_quality:
+                raise RuntimeError("工具型回复被误判为长段说明")
+            return reply
+
+        def _fallback_reply(self, conversation_id: str, text: str) -> str:
+            return "fallback reply"
+
+    monkeypatch.setattr(webui_server, "AtriReplyEngine", ToolReplyEngine)
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.8,
+        max_tokens=350,
+        memory_path=tmp_path / "users.json",
+        human_reply_pipeline_enabled=True,
+    )
+
+    result = asyncio.run(webui_server.test_chat(config, "查一下今天的新闻"))
+
+    assert finalized == [False]
+    assert result["used_ai"] is True
+    assert "联网结果第一条" in result["reply"]
+
+
+def test_voice_preview_enables_safe_best_effort_quality_fallback() -> None:
+    options = webui_server._voice_preview_synthesis_options(
+        {
+            "original_clip_enabled": True,
+            "quality_gate_enabled": True,
+            "quality_max_error_rate": 0.12,
+            "quality_retries": 1,
+        }
+    )
+
+    assert options["quality_gate"] is True
+    assert options["quality_max_error_rate"] == 0.12
+    assert options["allow_best_effort"] is True
+
+
 def test_runtime_status_keeps_webui_contract(monkeypatch) -> None:
-    calls: list[int] = []
+    snapshots: list[bool] = []
 
-    def fake_is_port_listening(port: int) -> bool:
-        calls.append(port)
-        return port == 8765
+    def fake_tcp_rows():
+        snapshots.append(True)
+        return [
+            {"local_port": 8765, "remote_port": 0, "state": "LISTENING", "pid": 100},
+            {"local_port": 8765, "remote_port": 59351, "state": "ESTABLISHED", "pid": 100},
+        ]
 
-    monkeypatch.setattr("atri_qq_bot.runtime.control.is_port_listening", fake_is_port_listening)
-    monkeypatch.setattr("atri_qq_bot.runtime.control.has_established_port", lambda port: port == 8765)
+    monkeypatch.setattr("atri_qq_bot.runtime.control.tcp_rows", fake_tcp_rows)
+    monkeypatch.setattr(
+        "atri_qq_bot.runtime.control._recent_napcat_state",
+        lambda: {"state": "connected", "detail": "NapCat 已连接"},
+    )
 
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="mention",
@@ -884,7 +999,7 @@ def test_runtime_status_keeps_webui_contract(monkeypatch) -> None:
     assert status["voice"] is False
     assert status["onebot"] == "ws://127.0.0.1:8765/onebot"
     assert status["webui_url"] == "http://127.0.0.1:8787"
-    assert calls == [8765, 11434, 8790]
+    assert snapshots == [True]
 
 
 def test_sticker_admin_payload_and_path_guard(tmp_path: Path, monkeypatch) -> None:
@@ -900,6 +1015,19 @@ def test_sticker_admin_payload_and_path_guard(tmp_path: Path, monkeypatch) -> No
     assert payload["url"].endswith("happy%2Fatri%20smile.png")
     assert resolve_under(sticker_root, "happy/atri%20smile.png") == image.resolve()
     assert resolve_under(sticker_root, "../secret.png") is None
+
+
+def test_sticker_admin_lists_flat_root_images(tmp_path: Path, monkeypatch) -> None:
+    sticker_root = tmp_path / "聊天表情"
+    sticker_root.mkdir()
+    (sticker_root / "调皮.gif").write_bytes(b"GIF89a")
+    monkeypatch.setattr("atri_webui.sticker_admin.STICKER_ROOT", sticker_root)
+
+    payload = sticker_summary()
+
+    assert payload["path"] == str(sticker_root)
+    assert payload["folders"][0]["name"] == "根目录"
+    assert payload["folders"][0]["files"][0]["name"] == "调皮.gif"
 
 
 def test_multipart_upload_parser_reads_text_and_file() -> None:

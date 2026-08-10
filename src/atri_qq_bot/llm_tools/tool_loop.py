@@ -7,9 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .time_tool import get_current_time
-from .weather_tool import get_weather
+from ..application.contracts import ToolReceipt as ToolExecutionReceipt
 from .web_search_tool import search_web
+from .registry import ToolRegistry
 
 
 def tool_calls_from_message(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -37,6 +37,8 @@ async def append_tool_results(
     executor: Callable[[str, dict[str, Any], Any], Awaitable[str | None]] | None = None,
     max_calls: int | None = None,
     context_id: str = "",
+    receipts: list[ToolExecutionReceipt] | None = None,
+    registry: ToolRegistry | None = None,
 ) -> int:
     call_limit = (
         max(1, int(getattr(config, "llm_tool_max_calls", 2) or 2))
@@ -44,27 +46,44 @@ async def append_tool_results(
         else max(1, int(max_calls))
     )
     selected_calls = tool_calls[:call_limit]
+    tool_registry = registry or _runtime_tool_registry(config)
     messages.append(_assistant_tool_call_message(assistant_message, selected_calls))
 
     executed = 0
     for call in selected_calls:
         name = _tool_name(call)
-        arguments = _tool_arguments(call)
+        arguments, arguments_error = _parse_tool_arguments(call)
         started = time.perf_counter()
-        try:
-            content = await executor(name, arguments, config) if executor is not None else None
-            if content is None:
-                content = await _execute_tool(name, arguments, config)
-        except Exception as exc:
-            content = f"工具执行失败：{_short_error(exc)}。不要编造工具结果。"
+        if arguments_error:
+            content = f"工具参数无效：{arguments_error}。请修正参数后重新调用，不要编造结果。"
+        else:
+            try:
+                content = await executor(name, arguments, config) if executor is not None else None
+                if content is None:
+                    content = await tool_registry.execute(name, arguments)
+            except Exception as exc:
+                content = f"工具执行失败：{_short_error(exc)}。不要编造工具结果。"
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        ok = not _tool_result_failed(content)
         _log_tool_event(
             context_id=context_id,
             name=name,
             arguments=arguments,
             content=content,
-            elapsed_seconds=time.perf_counter() - started,
+            elapsed_seconds=elapsed_ms / 1000,
         )
         messages.append(_tool_message(call, name, content))
+        if receipts is not None:
+            receipts.append(
+                ToolExecutionReceipt(
+                    call_id=str(call.get("id") or "tool-call"),
+                    name=name,
+                    arguments=arguments,
+                    ok=ok,
+                    content=content,
+                    elapsed_ms=elapsed_ms,
+                )
+            )
         executed += 1
     return executed
 
@@ -97,31 +116,59 @@ def _tool_name(call: dict[str, Any]) -> str:
 
 
 def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
+    arguments, _ = _parse_tool_arguments(call)
+    return arguments
+
+
+def _parse_tool_arguments(call: dict[str, Any]) -> tuple[dict[str, Any], str]:
     function = call.get("function")
     raw = function.get("arguments") if isinstance(function, dict) else {}
     if isinstance(raw, dict):
-        return raw
+        return raw, ""
     if not isinstance(raw, str) or not raw.strip():
-        return {}
+        return {}, ""
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return {}, "参数不是合法 JSON"
+    if not isinstance(parsed, dict):
+        return {}, "参数必须是 JSON 对象"
+    return parsed, ""
 
 
 async def _execute_tool(name: str, arguments: dict[str, Any], config: Any) -> str:
-    if name == "get_current_time":
-        return get_current_time(arguments)
-    if name == "get_weather":
-        if not bool(getattr(config, "web_search_enabled", True)):
-            return "天气查询未启用。不要编造实时天气，可以说明当前无法获取天气数据。"
-        return await get_weather(arguments, config)
-    if name == "search_web":
-        if not bool(getattr(config, "web_search_enabled", True)):
-            return "联网搜索未启用。不要编造实时信息，可以说明当前不能搜索网页。"
-        return await search_web(arguments, config)
-    return f"未知工具：{name}。不要编造这个工具的结果。"
+    """Compatibility shim for callers that still target the legacy helper."""
+    return await _runtime_tool_registry(config).execute(name, arguments)
+
+
+def _runtime_tool_registry(config: Any) -> ToolRegistry:
+    """Keep the historic module patch seam while moving execution to a registry."""
+    return ToolRegistry(
+        config,
+        handlers={
+            "search_web": _web_search_handler,
+        },
+    )
+
+
+async def _web_search_handler(arguments: dict[str, Any], config: Any) -> str:
+    if not bool(getattr(config, "web_search_enabled", True)):
+        return "联网搜索未启用。不要编造实时信息，可以说明当前不能搜索网页。"
+    return await search_web(arguments, config)
+
+
+def _tool_result_failed(content: str) -> bool:
+    text = str(content or "")
+    return text.startswith(
+        (
+            "工具执行失败",
+            "工具参数无效",
+            "搜索失败",
+            "天气查询失败",
+            "网页读取失败",
+            "未知工具",
+        )
+    ) or any(marker in text for marker in ("当前未启用", "未获允许"))
 
 
 def _log_tool_event(
@@ -133,9 +180,7 @@ def _log_tool_event(
 ) -> None:
     if not context_id:
         return
-    failed = content.startswith(
-        ("工具执行失败", "搜索失败", "天气查询失败", "未知工具")
-    ) or any(marker in content for marker in ("当前未启用", "未获允许"))
+    failed = _tool_result_failed(content)
     event = {
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
         "context_id": context_id,

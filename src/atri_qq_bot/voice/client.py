@@ -111,21 +111,34 @@ class SpeechServiceClient:
         text: str,
         source_audio_path: Path,
         profile: str,
+        reference_audio_path: Path | None = None,
         language: str = "auto",
         preview_seconds: int = 15,
         pitch_shift: float = 0.0,
+        prefer_original: bool = False,
     ) -> dict[str, Any]:
+        request_payload: dict[str, object] = {
+            "text": text,
+            "source_audio_path": str(Path(source_audio_path).expanduser().resolve()),
+            "profile": profile or "atri",
+            "language": language or "auto",
+            "preview_seconds": preview_seconds,
+            "pitch_shift": pitch_shift,
+            "prefer_original": prefer_original,
+        }
+        if reference_audio_path is not None:
+            request_payload["reference_audio_path"] = str(
+                Path(reference_audio_path).expanduser().resolve()
+            )
         payload = await self._post_json(
             "/v1/singing/jobs",
-            {
-                "text": text,
-                "source_audio_path": str(Path(source_audio_path).expanduser().resolve()),
-                "profile": profile or "atri",
-                "language": language or "auto",
-                "preview_seconds": preview_seconds,
-                "pitch_shift": pitch_shift,
-            },
+            request_payload,
         )
+        _require_ok(payload)
+        return payload
+
+    async def singing_jobs(self) -> dict[str, Any]:
+        payload = await self._get_json("/v1/singing/jobs")
         _require_ok(payload)
         return payload
 

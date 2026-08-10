@@ -10,127 +10,147 @@ def render_index() -> str:
   <title>亚托莉控制台</title>
   <style>
     :root {
-      --bg:#f5f6f8; --panel:#fff; --ink:#20242c; --muted:#667085; --line:#d8dde8;
-      --blue:#2563eb; --blue-soft:#edf3ff; --green:#16803c; --red:#c02626;
-      --amber:#a15c07; --soft:#f8fafc; --dark:#111827;
+      --bg:#faf5ff; --panel:rgba(255,255,255,.58); --ink:#312e4a; --muted:#6f6680; --line:rgba(167,139,250,.2);
+      --blue:#7dd3fc; --blue-soft:rgba(125,211,252,.14); --violet:#a78bfa; --green:#15803d; --red:#e11d48;
+      --amber:#a16207; --soft:rgba(253,246,249,.72); --dark:#312e4a;
     }
     * { box-sizing:border-box; }
-    body { margin:0; font-family:"Microsoft YaHei UI","Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--ink); }
-    header { background:#fff; border-bottom:1px solid var(--line); padding:18px 24px; position:sticky; top:0; z-index:8; }
-    h1 { margin:0 0 6px; font-size:22px; letter-spacing:0; }
-    h2 { margin:0 0 14px; font-size:17px; }
-    h3 { margin:16px 0 10px; font-size:14px; }
-    p { margin:8px 0; }
-    main { max-width:1480px; margin:0 auto; padding:18px; display:grid; grid-template-columns:310px 1fr; gap:18px; }
+    body { margin:0; font-family:"Quicksand","Nunito","PingFang SC","Rounded Mplus 1c","Microsoft YaHei",sans-serif; background:radial-gradient(circle at 8% 4%,rgba(125,211,252,.22),transparent 30%),radial-gradient(circle at 92% 12%,rgba(167,139,250,.18),transparent 28%),linear-gradient(135deg,#faf5ff,#fdf6f9 58%,#f4f8ff); background-attachment:fixed; color:var(--ink); font-size:14px; line-height:1.65; }
+    header { background:rgba(255,255,255,.62); border-bottom:1px solid rgba(255,255,255,.72); padding:22px 24px; position:sticky; top:0; z-index:8; backdrop-filter:blur(18px); box-shadow:0 8px 24px rgba(120,80,200,.06); }
+    h1 { margin:0 0 6px; font-size:22px; font-weight:700; letter-spacing:.02em; background:linear-gradient(135deg,#38bdf8,#8b5cf6); -webkit-background-clip:text; background-clip:text; color:transparent; }
+    h2 { margin:0 0 14px; font-size:16px; font-weight:600; color:var(--ink); }
+    h3 { margin:16px 0 10px; font-size:14px; font-weight:600; color:var(--ink); }
+    p { margin:1.2em 0; }
+    main { max-width:1480px; margin:0 auto; padding:18px; display:block; }
     main > section { min-width:0; }
-    aside, section, .surface { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
-    .sub,.note,.hint { color:var(--muted); font-size:13px; line-height:1.65; }
-    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
-    button { border:0; border-radius:6px; background:var(--blue); color:#fff; padding:9px 13px; cursor:pointer; font-weight:700; }
-    button.secondary { background:#475467; }
-    button.ghost { background:var(--blue-soft); color:#1e3a8a; }
-    button.warn { background:var(--amber); }
-    button.danger { background:var(--red); }
+    aside, section, .surface { background:var(--panel); border:1px solid rgba(255,255,255,.72); border-radius:20px; padding:20px; box-shadow:0 8px 32px rgba(120,80,200,.08),0 2px 8px rgba(120,80,200,.04); backdrop-filter:blur(16px); }
+    .global-status { max-width:1480px; margin:18px auto 0; padding:20px 22px; }
+    .global-status .section-head { margin-bottom:12px; }
+    .global-status .status { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
+    .sub,.note,.hint { color:var(--muted); font-size:12px; line-height:1.65; }
+    .tabs { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:18px; position:sticky; top:78px; z-index:7; padding:8px; background:rgba(255,255,255,.56); border:1px solid rgba(255,255,255,.76); border-radius:999px; box-shadow:0 8px 24px rgba(120,80,200,.08); backdrop-filter:blur(16px); }
+    button { min-height:40px; border:1px solid rgba(255,255,255,.45); border-radius:999px; background:linear-gradient(135deg,#7dd3fc,#a78bfa); color:#312e4a; padding:9px 16px; cursor:pointer; font-weight:700; transition:transform .18s cubic-bezier(.2,1.4,.4,1),filter .18s ease,box-shadow .18s ease; box-shadow:0 4px 12px rgba(125,211,252,.18); }
+    button:hover { filter:brightness(1.03); transform:scale(1.02); box-shadow:0 7px 18px rgba(125,211,252,.28); }
+    button:active { transform:scale(.96); }
+    button.secondary { background:rgba(255,255,255,.52); color:#645879; border-color:rgba(167,139,250,.25); box-shadow:none; }
+    button.ghost { background:rgba(255,255,255,.44); color:#6350b2; border-color:rgba(167,139,250,.3); box-shadow:none; }
+    button.warn { background:linear-gradient(135deg,#fcd34d,#fbbf24); color:#5b4300; }
+    button.danger { background:linear-gradient(135deg,#fb7185,#f43f5e); color:#fff; }
     button:disabled { opacity:.55; cursor:not-allowed; }
-    .tab { background:#edf0f5; color:#344054; }
-    .tab.active { background:var(--blue); color:#fff; }
+    .tab { background:rgba(255,255,255,.34); color:var(--muted); border-color:transparent; box-shadow:none; }
+    .tab.active { background:linear-gradient(135deg,#7dd3fc,#a78bfa); color:#312e4a; box-shadow:0 4px 12px rgba(125,211,252,.4); }
     .panel { display:none; }
     .panel.active { display:block; }
     .status { display:grid; gap:10px; }
-    .pill { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:10px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; }
-    .ok { color:var(--green); font-weight:700; }
-    .bad { color:var(--red); font-weight:700; }
+    .pill { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:12px 14px; border:1px solid rgba(255,255,255,.76); border-radius:16px; background:rgba(255,255,255,.46); min-height:62px; }
+    .ok { color:#047857; font-weight:700; }
+    .bad { color:#be123c; font-weight:700; }
     .grid { display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:12px; }
+    .form-grid { display:grid; gap:10px; }
+    .form-grid > label { display:grid; grid-template-columns:minmax(120px,1fr) minmax(0,3fr); align-items:center; gap:12px; }
+    .form-grid > label > input, .form-grid > label > select, .form-grid > label > textarea { min-width:0; }
     .three { display:grid; grid-template-columns:repeat(3,minmax(160px,1fr)); gap:12px; }
     .split { display:grid; grid-template-columns:minmax(360px,.95fr) minmax(420px,1.05fr); gap:14px; }
-    .model-workspace { display:grid; grid-template-columns:minmax(360px,.9fr) minmax(460px,1.1fr); gap:14px; align-items:start; }
-    .model-profile-surface { margin-top:14px; }
-    #modelProfileEditor { position:sticky; top:84px; }
-    label { display:grid; gap:6px; color:#344054; font-size:13px; }
-    input, select, textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
+    #model.panel.active { display:block; }
+    .model-workspace { display:block; }
+    .model-profile-surface { margin-top:20px; }
+    #model .model-profile-surface { margin-top:20px; }
+    #modelProfileEditor { position:static; margin-top:20px; }
+    label { display:grid; gap:6px; color:var(--muted); font-size:14px; font-weight:500; }
+    input, select, textarea { width:100%; border:1px solid rgba(167,139,250,.2); border-radius:14px; padding:11px 13px; font:inherit; background:rgba(255,255,255,.52); color:var(--ink); outline:none; transition:border-color .18s ease,box-shadow .18s ease,background .18s ease; }
+    input:focus, select:focus, textarea:focus { border-color:var(--violet); background:rgba(255,255,255,.75); box-shadow:0 0 0 4px rgba(167,139,250,.15); }
     textarea { min-height:130px; resize:vertical; line-height:1.5; }
     .json-editor { min-height:340px; font-family:Consolas,"Microsoft YaHei UI",monospace; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:14px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:16px; }
     .stack { display:grid; gap:12px; }
     .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin:10px 0 14px; }
     .toolbar label { min-width:170px; flex:1; }
-    .scroll { max-height:640px; overflow:auto; border:1px solid var(--line); border-radius:7px; background:#fff; }
+    .scroll { max-height:640px; overflow:auto; border:1px solid rgba(167,139,250,.18); border-radius:16px; background:rgba(255,255,255,.42); }
+    .log-view { min-height:420px; max-height:68vh; overflow:auto; margin:0; padding:16px; border:1px solid rgba(167,139,250,.18); border-radius:16px; background:rgba(49,46,74,.92); color:#e9e3ff; font:12px/1.7 Consolas,"Microsoft YaHei UI",monospace; white-space:pre-wrap; word-break:break-word; }
+    .developer-links { display:grid; gap:10px; }
+    .developer-links a { color:#6350b2; font-weight:700; overflow-wrap:anywhere; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
-    th,td { text-align:left; border-bottom:1px solid var(--line); padding:9px; vertical-align:top; }
-    tr:hover { background:#f8fafc; }
-    .profile-list { display:grid; gap:10px; }
-    .current-models { display:grid; gap:10px; }
-    .profile-columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; align-items:start; }
-    .profile-column { display:grid; gap:10px; border:1px solid var(--line); border-radius:7px; padding:10px; background:#f8fafc; min-width:0; }
+    th,td { text-align:left; border-bottom:1px dashed rgba(167,139,250,.18); padding:12px; vertical-align:top; }
+    thead { background:rgba(167,139,250,.05); }
+    tbody tr:nth-child(even) { background:rgba(255,255,255,.2); }
+    tr:hover { background:rgba(125,211,252,.08) !important; }
+    .profile-list { display:grid; gap:16px; }
+    .current-models { display:grid; gap:12px; border-left:3px solid var(--violet); padding-left:16px; }
+    .profile-columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:20px; align-items:start; }
+    .profile-column { display:grid; gap:14px; border:1px solid rgba(255,255,255,.72); border-radius:18px; padding:16px; background:rgba(253,246,249,.56); min-width:0; }
     .profile-column h3 { margin:0; display:flex; justify-content:space-between; gap:8px; align-items:center; }
-    .profile-column .profile { background:#fff; }
-    .profile { border:1px solid var(--line); border-radius:7px; padding:12px; background:#fff; display:grid; gap:7px; }
-    .profile.active { border-color:var(--blue); box-shadow:0 0 0 2px rgba(37,99,235,.12); }
+    .profile-column .profile { background:rgba(255,255,255,.64); }
+    .profile { border:1px solid rgba(255,255,255,.78); border-radius:18px; padding:18px; background:rgba(255,255,255,.58); display:grid; gap:10px; }
+    .profile.active { border-color:var(--violet); box-shadow:0 0 0 3px rgba(167,139,250,.14),0 10px 28px rgba(120,80,200,.1); }
     .profile-title { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
     .section-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; }
     .section-head h2 { margin:0; }
     .section-head .row { margin:0; }
-    .preset-panel { border:1px solid var(--line); border-radius:7px; background:#f8fafc; padding:12px; margin-bottom:14px; display:grid; gap:10px; }
+    .preset-panel { border:1px solid rgba(255,255,255,.74); border-radius:18px; background:rgba(253,246,249,.62); padding:16px; margin-bottom:18px; display:grid; gap:12px; }
     .preset-panel h3 { margin:0; }
-    .model-card { border:1px solid var(--line); border-radius:7px; background:#fff; padding:10px; display:grid; gap:8px; }
-    .model-card.selected { border-color:var(--blue); box-shadow:0 0 0 2px rgba(37,99,235,.12); }
+    .model-card { border:1px solid rgba(255,255,255,.78); border-radius:18px; background:rgba(255,255,255,.56); padding:16px; display:grid; gap:10px; }
+    .model-card.selected { border-color:var(--violet); box-shadow:0 0 0 3px rgba(167,139,250,.14),0 10px 28px rgba(120,80,200,.1); }
     .model-card-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
     .model-card strong { overflow-wrap:anywhere; }
     .model-card .row { margin-top:2px; }
     .model-feedback { display:none; border:1px solid #bfdbfe; background:#eff6ff; color:#1d4ed8; border-radius:7px; padding:9px 10px; margin:10px 0 0; }
     .model-feedback.show { display:block; }
-    .badge { display:inline-flex; align-items:center; border-radius:999px; padding:2px 8px; font-size:12px; background:#eef2f6; color:#344054; white-space:nowrap; }
-    .badge.active { background:#dcfce7; color:#166534; }
-    .badge.warn { background:#fef3c7; color:#92400e; }
-    .badge.red { background:#fee2e2; color:#991b1b; }
+    .badge { display:inline-flex; align-items:center; border-radius:999px; padding:4px 10px; font-size:12px; background:rgba(196,181,253,.3); color:#4c1d95; white-space:nowrap; box-shadow:inset 0 1px 0 rgba(255,255,255,.7); }
+    .badge.active { background:#6ee7b7; color:#064e3b; }
+    .badge.warn { background:#fcd34d; color:#713f12; }
+    .badge.red { background:#fb7185; color:#fff; }
     .mono { font-family:Consolas,monospace; }
-    .out,.natural-box { white-space:pre-wrap; background:#101828; color:#f2f4f7; border-radius:7px; padding:12px; min-height:90px; line-height:1.55; }
-    .natural-box { background:#f8fafc; color:#1f2937; border:1px solid var(--line); }
+    .out,.natural-box { white-space:pre-wrap; background:rgba(49,46,74,.9); color:#fff; border-radius:16px; padding:16px; min-height:90px; line-height:1.65; }
+    .natural-box { background:rgba(255,255,255,.48); color:var(--ink); border:1px solid rgba(255,255,255,.72); }
     .thumbs { display:grid; grid-template-columns:repeat(auto-fill,minmax(112px,1fr)); gap:10px; }
-    .thumb { border:1px solid var(--line); border-radius:7px; padding:8px; background:#fff; }
-    .thumb img { width:100%; height:92px; object-fit:contain; background:#f2f4f7; border-radius:5px; }
+    .thumb { border:1px solid rgba(255,255,255,.72); border-radius:16px; padding:10px; background:rgba(255,255,255,.52); }
+    .thumb img { width:100%; height:92px; object-fit:contain; background:rgba(255,255,255,.5); border-radius:12px; }
     .thumb small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); margin:6px 0; }
-    details { border:1px solid var(--line); border-radius:7px; padding:10px 12px; background:#fff; }
+    details { border:1px solid rgba(255,255,255,.72); border-radius:16px; padding:12px 14px; background:rgba(255,255,255,.5); }
     summary { cursor:pointer; font-weight:700; }
-    .toast { position:fixed; right:18px; bottom:18px; max-width:420px; background:#111827; color:#fff; padding:12px 14px; border-radius:7px; box-shadow:0 10px 28px rgba(15,23,42,.25); opacity:0; pointer-events:none; transform:translateY(8px); transition:.18s ease; z-index:30; }
+    .toast { position:fixed; right:18px; bottom:18px; max-width:420px; background:rgba(49,46,74,.86); color:#fff; padding:13px 16px 13px 40px; border:1px solid rgba(255,255,255,.35); border-radius:18px; box-shadow:0 10px 28px rgba(120,80,200,.22); backdrop-filter:blur(16px); opacity:0; pointer-events:none; transform:translateY(8px); transition:.18s ease; z-index:30; }
+    .toast::before { content:'✦'; position:absolute; left:16px; color:#7dd3fc; animation:twinkle 1.4s ease-in-out infinite; }
     .toast.show { opacity:1; transform:translateY(0); }
     .memory-name { font-weight:700; margin-bottom:4px; }
     .memory-meta { color:var(--muted); font-size:12px; line-height:1.55; }
     .memory-summary { line-height:1.6; max-width:620px; }
     .empty { color:var(--muted); padding:22px; text-align:center; }
-    .modal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(15,23,42,.46); padding:22px; z-index:20; }
+    .modal { position:fixed; inset:0; display:none; align-items:stretch; justify-content:flex-end; background:rgba(15,23,42,.38); padding:0; z-index:20; }
     .modal.show { display:flex; }
-    .dialog { width:min(1180px,96vw); max-height:92vh; overflow:hidden; background:#fff; border-radius:8px; border:1px solid var(--line); box-shadow:0 24px 70px rgba(15,23,42,.32); display:grid; grid-template-rows:auto auto 1fr auto; }
+    .dialog { width:min(560px,100vw); height:100%; max-height:none; overflow:hidden; background:rgba(255,255,255,.78); border-radius:22px 0 0 22px; border:1px solid rgba(255,255,255,.8); box-shadow:-18px 0 45px rgba(120,80,200,.2); backdrop-filter:blur(20px); display:grid; grid-template-rows:auto auto 1fr auto; }
     .dialog-head { padding:16px 18px; border-bottom:1px solid var(--line); display:flex; gap:12px; justify-content:space-between; align-items:flex-start; }
     .dialog-title { font-size:18px; font-weight:800; }
-    .dialog-body { overflow:auto; padding:16px 18px; background:#fbfcfe; }
-    .dialog-foot { padding:12px 18px; border-top:1px solid var(--line); background:#fff; display:flex; justify-content:space-between; gap:12px; align-items:center; }
-    .mini-tabs { display:flex; gap:8px; flex-wrap:wrap; padding:10px 18px; border-bottom:1px solid var(--line); background:#fff; }
-    .mini-tab { background:#eef2f6; color:#344054; }
-    .mini-tab.active { background:var(--blue); color:#fff; }
+    .dialog-body { overflow:auto; padding:18px; background:rgba(253,246,249,.48); }
+    .dialog-foot { padding:14px 18px; border-top:1px solid rgba(167,139,250,.16); background:rgba(255,255,255,.5); display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    .mini-tabs { display:flex; gap:8px; flex-wrap:wrap; padding:12px 18px; border-bottom:1px solid rgba(167,139,250,.16); background:rgba(255,255,255,.44); }
+    .mini-tab { background:rgba(255,255,255,.45); color:var(--muted); }
+    .mini-tab.active { background:linear-gradient(135deg,#7dd3fc,#a78bfa); color:#312e4a; }
     .stat-grid { display:grid; grid-template-columns:repeat(4,minmax(130px,1fr)); gap:10px; margin:12px 0; }
-    .stat { border:1px solid var(--line); border-radius:7px; background:#fff; padding:10px; }
+    .stat { border:1px solid rgba(255,255,255,.72); border-radius:16px; background:rgba(255,255,255,.48); padding:14px; }
     .stat strong { display:block; font-size:18px; margin-bottom:2px; }
     .fact-grid { display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:10px; margin:12px 0; }
-    .fact { border:1px solid var(--line); border-radius:7px; background:#fff; padding:10px 12px; min-width:0; }
+    .fact { border:1px solid rgba(255,255,255,.72); border-radius:16px; background:rgba(255,255,255,.48); padding:14px; min-width:0; }
     .fact span { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; }
     .fact strong { display:block; font-size:14px; overflow-wrap:anywhere; }
     .group-info-list { display:grid; gap:10px; margin-top:8px; }
-    .group-info { border:1px solid var(--line); border-radius:7px; background:#fff; padding:12px; display:grid; gap:8px; }
+    .group-info { border:1px solid rgba(255,255,255,.72); border-radius:16px; background:rgba(255,255,255,.48); padding:14px; display:grid; gap:8px; }
     .group-info-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
     .group-info-title { font-weight:800; overflow-wrap:anywhere; }
     .entry-list { display:grid; gap:10px; }
-    .entry { border:1px solid var(--line); border-radius:7px; background:#fff; padding:12px; display:grid; gap:10px; }
+    .entry { border:1px solid rgba(255,255,255,.72); border-radius:16px; background:rgba(255,255,255,.48); padding:14px; display:grid; gap:10px; }
     .entry-head { display:flex; justify-content:space-between; gap:10px; align-items:center; }
     .entry-grid { display:grid; grid-template-columns:180px 1fr 130px 130px; gap:10px; }
-    .history-item { border:1px solid var(--line); border-radius:7px; background:#fff; padding:10px; display:grid; gap:8px; margin-bottom:8px; }
+    .history-item { border:1px solid rgba(255,255,255,.72); border-radius:16px; background:rgba(255,255,255,.48); padding:14px; display:grid; gap:8px; margin-bottom:8px; }
     .dirty { color:var(--amber); font-weight:700; }
     .saved { color:var(--green); font-weight:700; }
-    .settings-section { border-top:1px solid var(--line); padding:18px 0 4px; margin-top:18px; }
+    .settings-section { border:1px solid var(--line); border-radius:8px; padding:0 14px 14px; margin-top:14px; background:#fff; }
+    .settings-section > h3, .settings-section > .section-head { padding:14px 0 10px; margin:0; border-bottom:1px solid var(--line); }
+    .settings-section.accordion-section.collapsed > :not(h3):not(.section-head) { display:none; }
+    .settings-section.accordion-section > h3, .settings-section.accordion-section > .section-head { cursor:pointer; }
     .settings-section h3 { margin-top:0; }
     .proactive-layout { display:grid; grid-template-columns:minmax(0,1.18fr) minmax(320px,.82fr); gap:14px; align-items:start; }
     .proactive-layout > * { min-width:0; }
-    .proactive-block { border:1px solid var(--line); border-radius:7px; padding:14px; background:#fff; min-width:0; }
+    .proactive-block { border:1px solid rgba(255,255,255,.72); border-radius:18px; padding:16px; background:rgba(255,255,255,.48); min-width:0; }
     .proactive-block h3 { margin-top:0; }
     .proactive-block .grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .proactive-block label { min-width:0; }
@@ -147,22 +167,130 @@ def render_index() -> str:
     .relationship-controls { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:14px 0; margin:14px 0; }
     .relationship-controls h3 { margin-top:0; }
     .voice-status { display:grid; grid-template-columns:repeat(3,minmax(160px,1fr)); gap:10px; }
+    .voice-module-nav { display:grid; grid-template-columns:repeat(2,minmax(260px,1fr)); gap:12px; }
+    .voice-module-tab { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 18px; border:1px solid rgba(255,255,255,.72); border-radius:18px; background:rgba(255,255,255,.48); color:var(--ink); text-align:left; }
+    .voice-module-tab:hover { border-color:#9bb7f5; background:var(--blue-soft); }
+    .voice-module-tab.active { border-color:var(--blue); background:var(--blue-soft); box-shadow:0 0 0 2px rgba(37,99,235,.1); }
+    .voice-module-tab strong,.voice-module-tab small { display:block; }
+    .voice-module-tab strong { font-size:16px; }
+    .voice-module-tab small { margin-top:4px; color:var(--muted); font-weight:500; }
+    .service-owner { flex:0 0 auto; border:1px solid #b8c9ee; border-radius:999px; padding:5px 9px; color:#315da8; background:#fff; font:700 11px Consolas,monospace; }
+    .voice-module-panel { display:none; }
+    .voice-module-panel.active { display:grid; gap:12px; }
+    .voice-module-hero { border-left:4px solid var(--blue); }
+    .voice-module-hero.music { border-left-color:#7c3aed; }
+    .voice-module-hero .section-head { margin-bottom:12px; }
+    .voice-primary-action { border:1px solid #c7d7fa; background:linear-gradient(135deg,#f8fbff,#edf3ff); }
+    .music-primary-action { border:1px solid #d8c8fb; background:linear-gradient(135deg,#fbfaff,#f3efff); }
     .voice-compare { display:grid; grid-template-columns:repeat(2,minmax(260px,1fr)); gap:12px; margin-top:14px; }
-    .voice-result { border:1px solid var(--line); border-radius:7px; padding:12px; min-width:0; }
+    .voice-result { border:1px solid rgba(255,255,255,.72); border-radius:18px; padding:16px; background:rgba(255,255,255,.48); min-width:0; }
     .voice-result h3 { margin:0 0 10px; }
     .voice-result audio { margin-top:10px; }
+    .singing-test-grid { display:grid; grid-template-columns:minmax(280px,0.9fr) minmax(360px,1.1fr); gap:14px; }
+    .singing-test-block { border:1px solid rgba(255,255,255,.72); border-radius:18px; padding:16px; background:rgba(255,255,255,.48); min-width:0; }
+    .singing-test-block h3 { margin:0 0 12px; }
+    .singing-job-list { display:grid; gap:8px; margin-top:10px; }
+    .singing-job { display:grid; grid-template-columns:minmax(140px,1fr) 90px 56px auto; gap:10px; align-items:center; border:1px solid rgba(255,255,255,.72); border-radius:16px; padding:14px; background:rgba(255,255,255,.48); }
+    .singing-job strong,.singing-job small { display:block; }
+    .singing-job small { color:var(--muted); margin-top:3px; overflow-wrap:anywhere; }
+    .singing-progress { height:6px; border-radius:999px; background:#e8ecf2; overflow:hidden; margin-top:6px; }
+    .singing-progress span { display:block; height:100%; background:var(--blue); }
+    .singing-state { font-weight:800; font-size:12px; }
+    .singing-state.succeeded { color:var(--green); }
+    .singing-state.failed,.singing-state.cancelled { color:var(--red); }
+    .singing-state.running,.singing-state.queued { color:var(--blue); }
+    .singing-job button { padding:6px 9px; font-size:12px; }
+    .music-project-toolbar { display:grid; grid-template-columns:minmax(240px,1fr) auto; gap:12px; align-items:end; }
+    .music-stage-grid { display:grid; grid-template-columns:1fr; gap:14px; align-items:start; }
+    .music-stage-card { border:1px solid rgba(255,255,255,.72); border-radius:20px; background:rgba(255,255,255,.48); padding:18px; min-width:0; }
+    .music-stage-layout { display:grid; grid-template-columns:minmax(260px,.72fr) minmax(0,1.28fr); gap:16px; align-items:start; }
+    .music-control-grid { display:grid; grid-template-columns:repeat(3,minmax(150px,1fr)); gap:10px; }
+    .music-stage-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .music-editor { border:1px solid #cad6ea; background:#f8fbff; border-radius:7px; padding:12px; margin-top:10px; }
+    .music-range-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:9px; }
+    .music-quality { display:grid; grid-template-columns:repeat(4,minmax(130px,1fr)); gap:8px; margin-top:10px; }
+    .music-quality-item { padding:8px; border-radius:6px; background:#f2f4f7; font-size:12px; }
+    .music-quality-item.pass { background:#eaf7ef; color:#176b36; }
+    .music-quality-item.fail { background:#fff0f0; color:#a32626; }
+    .music-revision-bar { display:grid; grid-template-columns:minmax(220px,1fr) auto auto; gap:8px; align-items:end; margin-top:10px; }
+    .music-stage-card.ready { border-color:#8eb0f5; box-shadow:0 0 0 2px rgba(37,99,235,.08); }
+    .music-stage-card.succeeded { border-color:#8fd1a4; }
+    .music-stage-card.failed { border-color:#e9a3a3; }
+    .music-stage-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; margin-bottom:10px; }
+    .music-stage-head h3 { margin:0; }
+    .music-stage-index { display:inline-grid; place-items:center; width:24px; height:24px; border-radius:999px; margin-right:7px; background:var(--blue-soft); color:var(--blue); font-size:12px; }
+    .music-stage-state { font-size:12px; font-weight:800; color:var(--muted); }
+    .music-stage-state.running { color:var(--blue); }
+    .music-stage-state.succeeded { color:var(--green); }
+    .music-stage-state.failed { color:var(--red); }
+    .stepper { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; padding:0; margin:0; list-style:none; counter-reset:stage; }
+    .stepper li { position:relative; padding:10px 12px 10px 38px; border:1px solid var(--line); border-radius:8px; background:#f8fafc; color:var(--muted); font-weight:700; }
+    .stepper li::before { counter-increment:stage; content:counter(stage); position:absolute; left:11px; top:10px; width:20px; height:20px; display:grid; place-items:center; border-radius:50%; background:#e2e8f0; color:#475569; font-size:12px; }
+    .stepper li.active { color:var(--blue); border-color:#9bb7f5; background:var(--blue-soft); }
+    .stepper li.active::before { background:var(--blue); color:#fff; }
+    .stepper li.done { color:var(--green); border-color:#9fd6ae; background:#f0fdf4; }
+    .stepper li.done::before { content:'✓'; background:var(--green); color:#fff; }
+    .music-track { border-top:1px solid var(--line); padding-top:10px; margin-top:10px; }
+    .music-track strong { display:block; font-size:12px; margin-bottom:5px; }
+    .music-waveform { width:100%; height:78px; display:block; border-radius:5px; background:#eef2f7; }
+    .music-waveform.selectable { cursor:crosshair; touch-action:none; outline:1px solid #bfcee8; }
+    .music-track audio { margin-top:6px; }
+    .music-preview-button { margin-top:7px; width:100%; }
+    .param-help { display:block; color:var(--muted); font-size:11px; font-weight:500; line-height:1.45; margin-top:4px; }
+    .music-section-list { display:grid; gap:7px; margin-top:10px; }
+    .music-section-item { display:grid; grid-template-columns:36px minmax(0,1fr) auto; gap:9px; align-items:center; border:1px solid var(--line); border-radius:7px; padding:8px 10px; background:#f8fafc; }
+    .music-section-item .index { color:var(--blue); font-weight:800; }
+    .music-section-item .time { color:var(--muted); font:12px ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .music-terminal { min-height:150px; max-height:320px; overflow:auto; white-space:pre-wrap; word-break:break-word; border:1px solid #bfd0e8; border-radius:8px; background:#f4f8fd; color:#18324f; padding:12px; font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .music-stage-card .grid { grid-template-columns:1fr; }
+    .minecraft-grid { display:grid; grid-template-columns:minmax(320px,.85fr) minmax(440px,1.15fr); gap:14px; align-items:start; }
+    .minecraft-status { display:grid; grid-template-columns:repeat(3,minmax(140px,1fr)); gap:10px; margin:12px 0; }
+    .minecraft-maids { display:grid; gap:10px; margin-top:12px; }
+    .minecraft-maid { border:1px solid rgba(255,255,255,.72); border-radius:18px; padding:16px; background:rgba(255,255,255,.48); display:grid; gap:10px; }
+    .minecraft-maid.selected { border-color:var(--blue); box-shadow:0 0 0 2px rgba(37,99,235,.12); }
+    .minecraft-maid-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .minecraft-maid-meta { display:grid; grid-template-columns:repeat(4,minmax(90px,1fr)); gap:8px; }
+    .minecraft-maid-meta div { background:#f8fafc; border-radius:6px; padding:8px; min-width:0; }
+    .minecraft-maid-meta span { display:block; color:var(--muted); font-size:11px; margin-bottom:3px; }
+    .minecraft-command-grid { display:grid; grid-template-columns:repeat(4,minmax(90px,1fr)); gap:8px; margin-top:12px; }
     audio { width:100%; min-height:42px; }
+    .surface,.profile,.model-card,.profile-column,.proactive-block,.voice-result,.singing-test-block,.singing-job,.music-stage-card,.minecraft-maid,.stat,.fact,.group-info,.entry,.history-item,.thumb,.pill { transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease; animation:fadeUp .55s ease both; }
+    .surface:hover,.profile:hover,.model-card:hover,.profile-column:hover,.proactive-block:hover,.voice-result:hover,.singing-test-block:hover,.singing-job:hover,.music-stage-card:hover,.minecraft-maid:hover,.stat:hover,.fact:hover,.group-info:hover,.entry:hover,.history-item:hover,.thumb:hover { transform:translateY(-4px); box-shadow:0 14px 34px rgba(120,80,200,.12); }
+    .panel.active { animation:panelIn .25s ease both; }
+    .status:empty::after { content:'●  ●  ●'; display:block; color:#7dd3fc; letter-spacing:5px; text-align:center; animation:breathe 1.1s ease-in-out infinite; }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes panelIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes breathe { 0%,100% { opacity:.35; transform:translateY(0); } 50% { opacity:1; transform:translateY(-2px); } }
+    @keyframes twinkle { 0%,100% { transform:rotate(0) scale(.85); opacity:.55; } 50% { transform:rotate(18deg) scale(1.18); opacity:1; } }
     @media (max-width:1280px) {
-      main { grid-template-columns:1fr; }
+      #model.panel.active { display:block; }
+      .model-workspace { display:block; }
+      #model .model-profile-surface { margin-top:14px; }
       #modelProfileEditor { position:static; }
     }
     @media (max-width:980px) {
-      .model-workspace,.split { grid-template-columns:1fr; }
-      .grid,.three,.profile-columns,.stat-grid,.fact-grid,.entry-grid,.proactive-layout,.weight-grid,.voice-status,.voice-compare { grid-template-columns:1fr; }
+      .global-status .status,.model-workspace,.split,.singing-test-grid,.minecraft-grid,.voice-module-nav,.music-stage-grid,.music-project-toolbar,.music-stage-layout,.music-control-grid,.music-range-grid,.music-quality,.music-revision-bar,.stepper { grid-template-columns:1fr; }
+      .grid,.three,.profile-columns,.stat-grid,.fact-grid,.entry-grid,.proactive-layout,.weight-grid,.voice-status,.voice-compare,.minecraft-status,.minecraft-maid-meta,.minecraft-command-grid { grid-template-columns:1fr; }
+      .form-grid > label { grid-template-columns:1fr; gap:6px; }
+      button { min-height:44px; }
       .proactive-block .grid { grid-template-columns:1fr; }
       .section-head { flex-direction:column; }
       .section-head .row { width:100%; }
       .dialog { width:98vw; }
+    }
+    @media (max-width:640px) {
+      body { background:#faf5ff; }
+      header,aside,section,.surface,.tabs { backdrop-filter:none; }
+      header { padding:18px 16px; }
+      main { padding:12px; }
+      .global-status { margin:12px; padding:16px; }
+      .tabs { top:70px; border-radius:20px; }
+      .tabs .tab { flex:1 1 calc(33.333% - 8px); }
+      .surface,aside,section { border-radius:18px; padding:16px; }
+      .dialog { border-radius:20px 0 0 20px; }
+    }
+    @media (prefers-reduced-motion:reduce) {
+      *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
     }
   </style>
 </head>
@@ -171,16 +299,20 @@ def render_index() -> str:
     <h1>亚托莉控制台</h1>
     <div class="sub">本地 WebUI，只监听 127.0.0.1。这里可以切换模型、管理表情包、查看和编辑记忆。</div>
   </header>
-  <main>
-    <aside>
-      <h2>运行状态</h2>
-      <div class="status" id="status"></div>
+  <section class="global-status" aria-label="运行状态">
+    <div class="section-head">
+      <div>
+        <h2>运行状态</h2>
+        <p class="note">核心服务、模型和连接状态一眼可见。API Key 只显示保存状态，不会展示原文。</p>
+      </div>
       <div class="row">
-        <button class="ghost" onclick="loadStatus()">刷新</button>
+        <button class="ghost" onclick="loadStatus()">↻ 刷新</button>
         <button class="secondary" onclick="restartServices()">后台重启</button>
       </div>
-      <p class="note">API Key 会隐藏显示。输入框变空不是丢失，显示“已保存”就代表仍在配置里。</p>
-    </aside>
+    </div>
+    <div class="status" id="status"></div>
+  </section>
+  <main>
     <section>
       <div class="tabs">
         <button class="tab active" onclick="showTab(event,'model')">模型</button>
@@ -188,6 +320,8 @@ def render_index() -> str:
         <button class="tab" onclick="showTab(event,'stickers')">表情包</button>
         <button class="tab" onclick="showTab(event,'memory')">记忆</button>
         <button class="tab" onclick="showTab(event,'test')">测试</button>
+        <button class="tab" onclick="showTab(event,'developer')">开发</button>
+        <button class="tab" onclick="showTab(event,'minecraft')">Minecraft</button>
         <button class="tab" onclick="showTab(event,'advanced')">高级</button>
       </div>
 
@@ -221,7 +355,7 @@ def render_index() -> str:
             <input id="profileId" type="hidden">
             <div class="preset-panel">
               <h3>从厂商模型库填入</h3>
-              <div class="grid">
+              <div class="form-grid">
                 <label>厂商<select id="providerPreset" onchange="selectProviderPreset()"></select></label>
                 <label>模型<select id="providerModelPreset" onchange="selectProviderModelPreset()"></select></label>
               </div>
@@ -231,7 +365,7 @@ def render_index() -> str:
               <p class="note">这里只负责自动填接口地址、模型名和推荐参数；保存、启用仍由你手动确认。</p>
             </div>
             <h3>档案参数</h3>
-            <div class="grid">
+            <div class="form-grid">
               <label>档案名称<input id="profileName" placeholder="例如：DeepSeek 官方"></label>
               <label>用途<select id="profileModelType">
                 <option value="chat">聊天模型</option>
@@ -252,12 +386,6 @@ def render_index() -> str:
               <button class="secondary" onclick="newProfile()">新建空档案</button>
               <button class="danger" onclick="deleteSelectedProfile()">删除档案</button>
             </div>
-            <h3>快速填入</h3>
-            <div class="row">
-              <button class="ghost" onclick="quickFillDeepSeek()">DeepSeek 官方</button>
-              <button class="ghost" onclick="quickFillOllama()">本地 Ollama</button>
-              <button class="ghost" onclick="quickFillOpenAICompatible()">OpenAI 兼容</button>
-            </div>
           </div>
         </div>
         <div class="surface model-profile-surface">
@@ -276,130 +404,286 @@ def render_index() -> str:
 
       <div id="voice" class="panel">
         <div class="stack">
-          <div class="surface">
-            <div class="section-head">
-              <div>
-                <h2>语音服务</h2>
-                <p class="note">识别与合成在独立进程运行。未就绪或推理失败时，QQ 回复会自动回退为文字。</p>
-              </div>
-              <div class="row"><button class="ghost" onclick="loadVoice()">刷新</button></div>
-            </div>
-            <div id="voiceServiceStatus" class="voice-status"></div>
+          <div class="voice-module-nav" aria-label="语音模块分类">
+            <button id="voiceSpeechTab" class="voice-module-tab active" type="button" onclick="showVoiceModule('speech')">
+              <span><strong>语音合成</strong><small>说话、识别、音色档案与通话策略</small></span>
+              <span class="service-owner">atri_voice_service</span>
+            </button>
+            <button id="voiceMusicTab" class="voice-module-tab" type="button" onclick="showVoiceModule('music')">
+              <span><strong>歌曲合成</strong><small>导唱转换、歌声音色与试听任务</small></span>
+              <span class="service-owner">AI_music</span>
+            </button>
           </div>
-          <div class="split">
-            <div class="surface">
-              <h2>使用策略</h2>
-              <div class="grid">
-                <label class="switch-line"><input id="voiceAsrEnabled" type="checkbox">识别用户语音</label>
-                <label class="switch-line"><input id="voiceTtsEnabled" type="checkbox">允许模型自主发语音</label>
-                <label class="switch-line"><input id="voiceGroupEnabled" type="checkbox">允许群聊语音</label>
-                <label class="switch-line"><input id="voiceReplyToVoice" type="checkbox">语音消息优先考虑语音回复</label>
-                <label>语音服务地址<input id="voiceServiceUrl" value="http://127.0.0.1:8790"></label>
-                <label>当前角色档案<select id="voiceProfileId" onchange="loadSelectedVoiceProfile()"></select></label>
-                <label>单条最大字数<input id="voiceMaxChars" type="number" min="20" max="500"></label>
-                <label>同会话冷却秒数<input id="voiceCooldown" type="number" min="0" max="3600"></label>
+
+          <div id="voiceSpeechPanel" class="voice-module-panel active">
+            <div class="surface voice-module-hero">
+              <div class="section-head">
+                <div>
+                  <h2>语音合成</h2>
+                  <p class="note">由 <span class="mono">atri_voice_service · 127.0.0.1:8790</span> 负责语音识别、GPT-SoVITS 合成和质量检查。失败时 QQ 回复自动回退为文字。</p>
+                </div>
+                <div class="row"><button class="ghost" onclick="loadVoice()">刷新语音状态</button></div>
               </div>
-              <div class="row"><button onclick="saveVoice()">保存语音配置</button></div>
+              <div id="voiceServiceStatus" class="voice-status"></div>
             </div>
             <div class="surface">
-              <h2>亚托莉语音档案</h2>
+              <ol class="stepper" aria-label="语音处理流程">
+                <li class="active">输入文本与语言</li>
+                <li>模型推理</li>
+                <li>生成试听</li>
+              </ol>
+            </div>
+
+            <div class="surface voice-primary-action">
+              <div class="section-head">
+                <div><h2>语音试听</h2><p class="note">输入文字后生成可播放音频，不会发送到 QQ 或直播前端。</p></div>
+              </div>
               <div class="grid">
-                <label>显示名称<input id="voiceDisplayName" value="亚托莉"></label>
-                <label>合成引擎<select id="voiceProvider"><option value="gpt_sovits">GPT-SoVITS</option></select></label>
-                <label>引擎接口<input id="voiceApiUrl" value="http://127.0.0.1:9880/tts"></label>
-                <label>参考音频语言<select id="voicePromptLanguage"><option value="ja">日语</option><option value="zh">中文</option><option value="en">英语</option></select></label>
+                <label>试听文本<input id="voicePreviewText" value="主人，我一直都在这里哦。"></label>
+                <label>语言<select id="voicePreviewLanguage" onchange="useVoicePreviewLanguageSample()"><option value="zh">中文</option><option value="en">English</option><option value="ja">日本語</option></select></label>
+                <label>情绪<select id="voicePreviewEmotion"><option value="gentle">温柔</option><option value="neutral">自然</option><option value="happy">开心</option><option value="shy">害羞</option><option value="sad">难过</option><option value="sleepy">困倦</option><option value="serious">认真</option><option value="surprised">惊讶</option></select></label>
+                <label>声音来源<select id="voicePreviewMode"><option value="speech">模型语音合成</option><option value="singing">匹配原声素材</option></select></label>
               </div>
-              <label>参考音频原文<textarea id="voicePromptText" placeholder="必须与参考音频实际台词一致"></textarea></label>
-              <label>参考音频路径<input id="voiceReferencePath" readonly placeholder="尚未上传"></label>
-              <div class="row">
-                <input id="voiceReferenceFile" type="file" accept=".wav,.flac,.mp3,.ogg,.m4a,.aac,audio/*">
-                <button class="ghost" onclick="uploadVoiceReference()">上传参考音频</button>
-              </div>
-              <p class="note">只使用你有权使用的清晰、单人、无背景音乐音频。参考原文和音频不一致会明显降低音色与发音质量。</p>
+              <div class="row"><button id="voicePreviewButton" onclick="previewVoice()">生成语音试听</button></div>
+              <p class="note" id="voicePreviewInfo">选择中文、English 或日本語会自动切换测试文本。</p>
+              <audio id="voicePreviewAudio" controls preload="metadata"></audio>
             </div>
-          </div>
-          <div class="surface">
-            <div class="section-head">
-              <div>
-                <h2>自主语音与通话</h2>
-                <p class="note">模型负责判断语境是否适合；这里仅设置边界。明确要求语音可独立放行，自主语音仍需达到关系阈值。</p>
-              </div>
-            </div>
-            <div class="three voice-policy-grid">
-              <div class="proactive-block">
-                <h3>触发方式</h3>
+
+            <div class="split">
+              <div class="surface">
+                <h2>使用策略</h2>
                 <div class="grid">
-                  <label class="switch-line"><input id="voiceBehaviorEnabled" type="checkbox">启用语音决策策略</label>
-                  <label class="switch-line"><input id="voiceExplicitEnabled" type="checkbox">明确要求时允许语音</label>
-                  <label class="switch-line"><input id="voiceExplicitGuardEnabled" type="checkbox">模型漏调工具时仍强制语音</label>
-                  <label class="switch-line"><input id="voiceInputReplyEnabled" type="checkbox">允许用语音回应语音</label>
-                  <label class="switch-line"><input id="voiceProactiveEnabled" type="checkbox">主动消息可自主使用语音</label>
-                  <label class="switch-line"><input id="voiceOriginalClipEnabled" type="checkbox">优先使用匹配的完整原声</label>
-                  <label class="switch-line"><input id="voiceQualityGateEnabled" type="checkbox">发送前检查漏字错字</label>
-                  <label class="switch-line"><input id="voiceSingingEnabled" type="checkbox">启用歌唱素材回复</label>
-                  <label>允许回读错误率<input id="voiceQualityMaxError" type="number" min="0" max="1" step="0.01"></label>
-                  <label>质量检查重试次数<input id="voiceQualityRetries" type="number" min="0" max="3"></label>
-                  <label>免打扰开始<input id="voiceQuietStart" type="time"></label>
-                  <label>免打扰结束<input id="voiceQuietEnd" type="time"></label>
+                  <label class="switch-line"><input id="voiceAsrEnabled" type="checkbox">识别用户语音</label>
+                  <label class="switch-line"><input id="voiceTtsEnabled" type="checkbox">允许模型自主发语音</label>
+                  <label class="switch-line"><input id="voiceGroupEnabled" type="checkbox">允许群聊语音</label>
+                  <label class="switch-line"><input id="voiceReplyToVoice" type="checkbox">语音消息优先考虑语音回复</label>
+                  <label>语音服务地址<input id="voiceServiceUrl" value="http://127.0.0.1:8790"></label>
+                  <label>当前角色档案<select id="voiceProfileId" onchange="loadSelectedVoiceProfile()"></select></label>
+                  <label>单条最大字数<input id="voiceMaxChars" type="number" min="20" max="500"></label>
+                  <label>同会话冷却秒数<input id="voiceCooldown" type="number" min="0" max="3600"></label>
                 </div>
+                <div class="row"><button onclick="saveVoice()">保存语音配置</button></div>
               </div>
-              <div class="proactive-block">
-                <h3>关系阈值</h3>
+              <div class="surface">
+                <h2>亚托莉语音档案</h2>
                 <div class="grid">
-                  <label class="switch-line"><input id="voicePrivateAutoEnabled" type="checkbox">私聊可自主发语音</label>
-                  <label>私聊最低好感<input id="voicePrivateAffection" type="number" min="0" max="100" step="1"></label>
-                  <label>私聊最低消息量<input id="voicePrivateMessages" type="number" min="0" max="100000"></label>
-                  <label class="switch-line"><input id="voiceGroupAutoEnabled" type="checkbox">群聊可自主发语音</label>
-                  <label>群最低活跃度<input id="voiceGroupActivity" type="number" min="0" max="100" step="1"></label>
-                  <label>群最低消息量<input id="voiceGroupMessages" type="number" min="0" max="100000"></label>
+                  <label>显示名称<input id="voiceDisplayName" value="亚托莉"></label>
+                  <label>合成引擎<select id="voiceProvider"><option value="gpt_sovits">GPT-SoVITS</option></select></label>
+                  <label>引擎接口<input id="voiceApiUrl" value="http://127.0.0.1:9880/tts"></label>
+                  <label>参考音频语言<select id="voicePromptLanguage"><option value="ja">日语</option><option value="zh">中文</option><option value="en">英语</option></select></label>
                 </div>
-              </div>
-              <div class="proactive-block">
-                <h3>浏览器通话</h3>
-                <div class="grid">
-                  <label class="switch-line"><input id="voiceCallsEnabled" type="checkbox">允许模型邀请私聊通话</label>
-                  <label>通话最低好感<input id="voiceCallAffection" type="number" min="0" max="100" step="1"></label>
-                  <label>通话最低消息量<input id="voiceCallMessages" type="number" min="0" max="100000"></label>
-                  <label>邀请有效分钟<input id="voiceCallExpiry" type="number" min="1" max="1440"></label>
-                  <label>最长通话分钟<input id="voiceCallMaxMinutes" type="number" min="1" max="240"></label>
+                <label>参考音频原文<textarea id="voicePromptText" placeholder="必须与参考音频实际台词一致"></textarea></label>
+                <label>参考音频路径<input id="voiceReferencePath" readonly placeholder="尚未上传"></label>
+                <div class="row">
+                  <input id="voiceReferenceFile" type="file" accept=".wav,.flac,.mp3,.ogg,.m4a,.aac,audio/*">
+                  <button class="ghost" onclick="uploadVoiceReference()">上传参考音频</button>
                 </div>
-                <label>用户可访问的通话地址<input id="voiceCallBaseUrl" placeholder="http://127.0.0.1:8787"></label>
-                <p class="note">跨设备使用需填写 HTTPS 公网地址，否则浏览器通常无法授权麦克风。</p>
-                <div class="row"><button class="ghost" onclick="createVoiceCallTest()">创建本机测试通话</button></div>
-                <div class="natural-box" id="voiceCallTestOut">保存配置后可生成一次性测试链接，不会发送 QQ 消息。</div>
+                <p class="note">只使用你有权使用的清晰、单人、无背景音乐音频。参考原文和音频不一致会明显降低音色与发音质量。</p>
               </div>
             </div>
-          </div>
-          <div class="surface">
-            <div class="section-head">
-              <div>
+
+            <div class="split">
+              <div class="surface">
                 <h2>语音识别优化</h2>
                 <p class="note">每行填写“正确词 = 常见误识别1, 常见误识别2”，保存后立即生效。</p>
+                <label>角色名与专有词纠错<textarea id="voiceAsrLexicon" rows="6" placeholder="亚托莉 = 亚托利, 亚托丽"></textarea></label>
               </div>
-            </div>
-            <label>角色名与专有词纠错<textarea id="voiceAsrLexicon" rows="6" placeholder="亚托莉 = 亚托利, 亚托丽"></textarea></label>
-            <p class="note">音频会先统一为 16kHz 单声道 PCM，再由 VAD 去除长停顿并分段；此处只纠正明确别名，不会改写普通句子。</p>
-          </div>
-          <div class="surface">
-            <div class="section-head">
-              <div>
+              <div class="surface">
                 <h2>语音合成优化</h2>
                 <p class="note">每行填写“原文 = 中文读法 | English pronunciation | 日本語の読み方”。</p>
+                <label>中英日发音词典<textarea id="voiceTtsPronunciations" rows="6" placeholder="ATRI = 亚托莉 | Atri | アトリ"></textarea></label>
               </div>
             </div>
-            <label>中英日发音词典<textarea id="voiceTtsPronunciations" rows="6" placeholder="ATRI = 亚托莉 | Atri | アトリ"></textarea></label>
-            <p class="note">保存后立即生效。合成结果会自动裁掉异常首尾静音，并在不削波的前提下统一响度。</p>
-          </div>
-          <div class="surface">
-            <h2>合成试听</h2>
-            <div class="grid">
-              <label>试听文本<input id="voicePreviewText" value="主人，我一直都在这里哦。"></label>
-              <label>情绪<select id="voicePreviewEmotion"><option value="gentle">温柔</option><option value="neutral">自然</option><option value="happy">开心</option><option value="shy">害羞</option><option value="sad">难过</option><option value="sleepy">困倦</option><option value="serious">认真</option><option value="surprised">惊讶</option></select></label>
-              <label>表达方式<select id="voicePreviewMode"><option value="speech">普通语音</option><option value="singing">歌唱素材</option></select></label>
+
+            <div class="surface">
+              <div class="section-head"><div><h2>自主语音与通话</h2><p class="note">模型负责判断语境是否适合；这里仅设置边界。</p></div></div>
+              <div class="three voice-policy-grid">
+                <div class="proactive-block">
+                  <h3>触发方式</h3>
+                  <div class="grid">
+                    <label class="switch-line"><input id="voiceBehaviorEnabled" type="checkbox">启用语音决策策略</label>
+                    <label class="switch-line"><input id="voiceExplicitEnabled" type="checkbox">明确要求时允许语音</label>
+                    <label class="switch-line"><input id="voiceExplicitGuardEnabled" type="checkbox">漏调工具时仍强制语音</label>
+                    <label class="switch-line"><input id="voiceInputReplyEnabled" type="checkbox">允许用语音回应语音</label>
+                    <label class="switch-line"><input id="voiceProactiveEnabled" type="checkbox">主动消息可使用语音</label>
+                    <label class="switch-line"><input id="voiceOriginalClipEnabled" type="checkbox">优先使用匹配原声</label>
+                    <label class="switch-line"><input id="voiceQualityGateEnabled" type="checkbox">发送前检查漏字错字</label>
+                    <label class="switch-line"><input id="voiceSingingEnabled" type="checkbox">启用歌唱素材回复</label>
+                    <label>允许回读错误率<input id="voiceQualityMaxError" type="number" min="0" max="1" step="0.01"></label>
+                    <label>质量检查重试次数<input id="voiceQualityRetries" type="number" min="0" max="3"></label>
+                    <label>免打扰开始<input id="voiceQuietStart" type="time"></label>
+                    <label>免打扰结束<input id="voiceQuietEnd" type="time"></label>
+                  </div>
+                </div>
+                <div class="proactive-block">
+                  <h3>关系阈值</h3>
+                  <div class="grid">
+                    <label class="switch-line"><input id="voicePrivateAutoEnabled" type="checkbox">私聊可自主发语音</label>
+                    <label>私聊最低好感<input id="voicePrivateAffection" type="number" min="0" max="100" step="1"></label>
+                    <label>私聊最低消息量<input id="voicePrivateMessages" type="number" min="0" max="100000"></label>
+                    <label class="switch-line"><input id="voiceGroupAutoEnabled" type="checkbox">群聊可自主发语音</label>
+                    <label>群最低活跃度<input id="voiceGroupActivity" type="number" min="0" max="100" step="1"></label>
+                    <label>群最低消息量<input id="voiceGroupMessages" type="number" min="0" max="100000"></label>
+                  </div>
+                </div>
+                <div class="proactive-block">
+                  <h3>浏览器通话</h3>
+                  <div class="grid">
+                    <label class="switch-line"><input id="voiceCallsEnabled" type="checkbox">允许模型邀请私聊通话</label>
+                    <label>通话最低好感<input id="voiceCallAffection" type="number" min="0" max="100" step="1"></label>
+                    <label>通话最低消息量<input id="voiceCallMessages" type="number" min="0" max="100000"></label>
+                    <label>邀请有效分钟<input id="voiceCallExpiry" type="number" min="1" max="1440"></label>
+                    <label>最长通话分钟<input id="voiceCallMaxMinutes" type="number" min="1" max="240"></label>
+                  </div>
+                  <label>用户可访问的通话地址<input id="voiceCallBaseUrl" placeholder="http://127.0.0.1:8787"></label>
+                  <div class="row"><button class="ghost" onclick="createVoiceCallTest()">创建本机测试通话</button></div>
+                  <div class="natural-box" id="voiceCallTestOut">测试链接不会发送 QQ 消息。</div>
+                </div>
+              </div>
             </div>
-            <div class="row"><button onclick="previewVoice()">生成试听</button></div>
-            <p class="note" id="voicePreviewInfo">试听不会发送到 QQ。</p>
-            <audio id="voicePreviewAudio" controls></audio>
+          </div>
+
+          <div id="voiceMusicPanel" class="voice-module-panel">
+            <div class="surface voice-module-hero music">
+              <div class="section-head">
+                <div>
+                  <h2>歌曲合成</h2>
+                  <p class="note">由 <span class="mono">AI_music</span> 负责导唱处理、Seed-VC 歌声转换、伴奏混音和任务管理；音源目录与语音服务保持同步。</p>
+                </div>
+                <div class="row"><button class="ghost" onclick="loadSingingJobs()">刷新歌曲任务</button></div>
+              </div>
+              <div id="musicServiceStatus" class="voice-status"></div>
+            </div>
+            <div class="surface">
+              <ol class="stepper" aria-label="歌曲处理流程">
+                <li class="active">人声分离</li>
+                <li>模型推理</li>
+                <li>混音与导出</li>
+              </ol>
+            </div>
+
+            <div class="surface music-primary-action">
+              <div class="section-head">
+                <div><h2>新建歌曲工程</h2><p class="note">上传一次原曲，然后依次完成人声分离、模型推理和后期混音。每个阶段都会保存产物，可单独试听和重新运行。</p></div>
+              </div>
+              <div class="grid">
+                <label>歌曲名称<input id="singingSongName" value="亚托莉歌曲工程" maxlength="120"></label>
+                <label>亚托莉歌声参考<select id="singingReferencePath"></select></label>
+                <label>素材库原曲<select id="musicSourceLibrary" onchange="selectMusicSource()"><option value="">从固定目录选择，或在下方上传</option></select><span class="param-help">固定目录：C:\\Users\\YOUR_NAME\\Music\\QQmusic-MP3\\</span></label>
+                <label>原曲文件路径<input id="singingSourcePath" readonly placeholder="上传或从素材库选择后自动填写"></label>
+                <label>乐理分段数量<select id="musicSectionCount"><option value="0">自动（推荐，3–5 段）</option><option value="3">固定 3 段</option><option value="4">固定 4 段</option><option value="5">固定 5 段</option></select><span class="param-help">推荐值：自动。依据节拍、小节、和声色度、音色与能量变化寻找边界，不按固定秒数切割。</span></label>
+                <label>工程流程<select id="musicWorkflowMode"><option value="guided">分阶段确认（推荐）</option><option value="automatic">全自动三阶段</option></select><span class="param-help">全自动遇到质量检查失败仍会暂停，避免坏结果继续混音。</span></label>
+              </div>
+              <div class="row">
+                <input id="singingSourceFile" type="file" accept=".wav,.flac,.mp3,.ogg,.m4a,.aac,audio/*">
+                <button class="ghost" onclick="uploadSingingSource()">上传原曲</button>
+                <button id="musicCreateProjectButton" onclick="createMusicProject()">创建三阶段工程</button>
+              </div>
+              <p class="note">上传只创建可恢复的歌曲工程，不覆盖成品。确认导出后才保存到 <span class="mono">C:\\Users\\YOUR_NAME\\Music\\AI合成音乐</span>。</p>
+            </div>
+
+            <div class="surface">
+              <div class="music-project-toolbar">
+                <label>当前歌曲工程<select id="musicProjectSelect" onchange="selectMusicProject()"><option value="">尚未创建工程</option></select></label>
+                <div class="row"><button id="musicRunPipeline" onclick="runMusicPipeline()">运行完整三阶段</button><button class="ghost" onclick="loadMusicProjects()">刷新工程</button></div>
+              </div>
+              <div class="natural-box" id="musicProjectState">创建工程后，可以逐阶段生成并试听。</div>
+              <div id="musicSectionList" class="music-section-list"><div class="note">完成人声分离后显示自动乐理分段。</div></div>
+              <div class="music-revision-bar"><label>历史版本<select id="musicRevisionSelect"><option value="">暂无版本</option></select></label><button class="ghost" onclick="rollbackMusicProject()">恢复选中版本</button><button class="ghost" onclick="recoverMusicProject()">恢复最近自动备份</button></div>
+            </div>
+
+            <div class="music-stage-grid">
+              <div id="musicStageSeparation" class="music-stage-card">
+                <div class="music-stage-head">
+                  <h3><span class="music-stage-index">1</span>人声分离</h3>
+                  <span id="musicSeparationState" class="music-stage-state">等待</span>
+                </div>
+                <div class="music-stage-layout">
+                  <div>
+                    <p class="note">自动乐理分析后，将结构边界吸附到换气/低能量点，输出主唱、和声与立体声伴奏。</p>
+                    <div class="grid">
+                      <label>分离模型<select id="musicSeparationModel"><option value="mdx_net">MDX-Net（低资源）</option><option value="bs_roformer">BS-Roformer（高质量）</option><option value="demucs">Demucs v4（不同架构）</option></select><span class="param-help">本机推荐先用 MDX；BS-Roformer 权重已就绪；Demucs 首次选择会获取模型权重。</span></label>
+                      <label>质量预设<select id="musicSeparationPreset"><option value="quick">快速</option><option value="standard" selected>标准（推荐）</option><option value="extreme">极致</option></select><span class="param-help">极致会提高重叠和 shifts，只建议最终成片使用。</span></label>
+                      <label><span>和声处理</span><span class="row"><input id="musicSeparateHarmony" type="checkbox" checked> 分离主唱与和声</span><span class="param-help">快速模式会安全输出空和声轨，避免额外模型负载。</span></label>
+                    </div>
+                    <div class="music-stage-actions"><button id="musicRunSeparation" onclick="runMusicStage('separation')">开始人声分离</button><button class="ghost" onclick="confirmMusicStage('separation')">确认并继续</button><button class="ghost" onclick="resetMusicStage('separation')">重置本阶段</button></div>
+                  </div>
+                  <div>
+                    <div class="music-track"><strong>主唱（单声道）</strong><canvas id="musicVocalWave" width="900" height="96" class="music-waveform"></canvas><button class="ghost music-preview-button" onclick="loadMusicPreview('musicVocalAudio','musicVocalWave','vocal')">按需加载试听与波形</button><audio id="musicVocalAudio" controls preload="none"></audio></div>
+                    <div class="music-track"><strong>和声</strong><canvas id="musicHarmonyWave" width="900" height="96" class="music-waveform"></canvas><button class="ghost music-preview-button" onclick="loadMusicPreview('musicHarmonyAudio','musicHarmonyWave','harmony')">按需加载试听与波形</button><audio id="musicHarmonyAudio" controls preload="none"></audio></div>
+                    <div class="music-track"><strong>伴奏（保持立体声）</strong><canvas id="musicInstrumentalWave" width="900" height="96" class="music-waveform"></canvas><button class="ghost music-preview-button" onclick="loadMusicPreview('musicInstrumentalAudio','musicInstrumentalWave','instrumental')">按需加载试听与波形</button><audio id="musicInstrumentalAudio" controls preload="none"></audio></div>
+                  </div>
+                </div>
+              </div>
+
+              <div id="musicStageInference" class="music-stage-card">
+                <div class="music-stage-head">
+                  <h3><span class="music-stage-index">2</span>模型推理</h3>
+                  <span id="musicInferenceState" class="music-stage-state">等待</span>
+                </div>
+                <p class="note">Seed-VC 44.1k 歌声模型使用 RMVPE 提取 F0；每组保留 2–4 秒上下文并以 equal-power overlap-add 拼接。</p>
+                <div class="music-control-grid">
+                  <label>移调（半音）<input id="musicPitchShift" type="number" min="-12" max="12" step="0.5" value="0"><span class="param-help">推荐值：0。每 ±12 为一个八度；音区不合适时先在 -2～+2 内试听。</span></label>
+                  <label>推理步数<input id="musicDiffusionSteps" type="number" min="10" max="50" value="35"><span class="param-help">参考：20 快速预览，35 推荐，45–50 更细致但更慢、占用更高。</span></label>
+                  <label>演唱质感<select id="musicStyle"><option value="natural">自然（推荐）</option><option value="gentle">温柔</option><option value="bright">明亮</option><option value="soft">轻柔</option></select><span class="param-help">调整 Seed-VC 引导强度：自然 0.70、温柔 0.62、明亮 0.82、轻柔 0.56。</span></label>
+                  <label>上下文（秒）<input id="musicContextSeconds" type="number" min="2" max="4" step="0.5" value="3"><span class="param-help">推荐 3 秒；越长越平滑但推理更慢。</span></label>
+                </div>
+                <div class="music-stage-actions"><button id="musicRunInference" onclick="runMusicStage('inference')">开始整曲模型推理</button><button class="ghost" onclick="confirmMusicStage('inference')">确认并继续</button><button class="ghost" onclick="resetMusicStage('inference')">重置本阶段</button></div>
+                <div class="music-track"><strong>亚托莉转换人声（拖动波形选择局部）</strong><canvas id="musicConvertedWave" width="1200" height="110" class="music-waveform selectable"></canvas><button class="ghost music-preview-button" onclick="loadMusicPreview('musicConvertedAudio','musicConvertedWave','converted',true)">按需加载可编辑波形与试听</button><audio id="musicConvertedAudio" controls preload="none"></audio></div>
+                <div id="musicInferenceQuality" class="music-quality"><div class="note">整曲推理后显示接缝、静音、音高与削波检查。</div></div>
+                <div class="music-editor">
+                  <strong>局部片段精修</strong><span class="param-help">可拖动上方波形，或直接输入时间；只替换选区，选区外采样保持不变。</span>
+                  <div class="music-range-grid">
+                    <label>开始（秒或 MM:SS）<input id="musicSelectionStart" type="text" inputmode="decimal" placeholder="0 或 2:58" value="0"></label>
+                    <label>结束（秒或 MM:SS）<input id="musicSelectionEnd" type="text" inputmode="decimal" placeholder="15 或 3:01" value="15"></label>
+                    <label>情感强度<input id="musicEmotionStrength" type="range" min="0" max="1" step="0.01" value="0.55"><span class="param-help">参考 0.45–0.65。</span></label>
+                    <label>气声比例<input id="musicBreathiness" type="range" min="0" max="1" step="0.01" value="0.08"><span class="param-help">参考 0.05–0.15，默认极少原声高频残差。</span></label>
+                    <label>颤音<input id="musicVibrato" type="range" min="0" max="1" step="0.01" value="0.15"><span class="param-help">参考 0.10–0.25。</span></label>
+                    <label>咬字<input id="musicArticulation" type="range" min="0" max="1" step="0.01" value="0.60"><span class="param-help">日语 0.55–0.65；英语 0.60–0.72。</span></label>
+                    <label>共振峰<input id="musicFormantShift" type="number" min="-4" max="4" step="0.1" value="0.6"><span class="param-help">ATRI 参考 +0.3～+1.2，轻微年轻化。</span></label>
+                    <label>片段音调（半音）<input id="musicSegmentPitch" type="number" min="-12" max="12" step="0.5" value="0"></label>
+                  </div>
+                  <div class="music-stage-actions"><button id="musicRerunSegment" onclick="rerunMusicSegment()">只重生成选中片段</button><button class="ghost" onclick="previewSelectedMusicRange()">试听选区</button></div>
+                </div>
+              </div>
+
+              <div id="musicStageMix" class="music-stage-card">
+                <div class="music-stage-head">
+                  <h3><span class="music-stage-index">3</span>后期混音</h3>
+                  <span id="musicMixState" class="music-stage-state">等待</span>
+                </div>
+                <p class="note">Pedalboard：高通 → 动态 EQ → 齿音抑制 → 压缩 → 饱和 → Reverb/Delay → Limiter；人声单声道，伴奏保持立体声。</p>
+                <div class="music-control-grid">
+                  <label>人声增益 dB<input id="musicVocalGain" type="number" min="-12" max="12" step="0.5" value="0"><span class="param-help">推荐值：0 dB。人声靠后可加 +1～+3 dB，刺耳或过近可减 -1～-3 dB。</span></label>
+                  <label>伴奏增益 dB<input id="musicInstrumentalGain" type="number" min="-18" max="6" step="0.5" value="-1.7"><span class="param-help">推荐 -1.7 dB；人声被盖住可降至 -3～-5 dB。</span></label>
+                  <label>Ducking dB<input id="musicDucking" type="number" min="0" max="12" step="0.5" value="3"><span class="param-help">推荐 2–4 dB，按人声包络自动闪避伴奏。</span></label>
+                  <label>存在感 EQ dB<input id="musicEqPresence" type="number" min="-9" max="6" step="0.5" value="-1"><span class="param-help">2.5–5.2 kHz 动态处理；机械刺耳时降低。</span></label>
+                  <label>空气感 EQ dB<input id="musicEqAir" type="number" min="-6" max="9" step="0.5" value="1.2"><span class="param-help">9 kHz 高架；ATRI 建议 +0.5～+2 dB。</span></label>
+                  <label>压缩阈值 dB<input id="musicCompressorThreshold" type="number" min="-40" max="-6" step="1" value="-18"></label>
+                  <label>压缩比<input id="musicCompressorRatio" type="number" min="1" max="10" step="0.1" value="2.5"><span class="param-help">推荐 2:1～3:1。</span></label>
+                  <label>齿音抑制<input id="musicDeesser" type="range" min="0" max="1" step="0.01" value="0.35"><span class="param-help">推荐 0.25–0.45。</span></label>
+                  <label>饱和 drive dB<input id="musicSaturation" type="number" min="0" max="9" step="0.5" value="1"><span class="param-help">推荐 0.5–1.5 dB。</span></label>
+                  <label>混响<input id="musicReverb" type="range" min="0" max="0.45" step="0.01" value="0.08"><span class="param-help">推荐值：0.08。自然空间感通常 0.05–0.12；0 为完全干声。</span></label>
+                  <label>延迟 ms<input id="musicDelayMs" type="number" min="0" max="500" step="5" value="90"></label>
+                  <label>延迟比例<input id="musicDelayMix" type="range" min="0" max="0.35" step="0.01" value="0.04"><span class="param-help">推荐 0.02–0.08。</span></label>
+                </div>
+                <div class="music-stage-actions"><button id="musicRunMix" onclick="runMusicStage('mix')">生成工程内混音</button><button class="ghost" onclick="confirmMusicStage('mix')">确认混音</button><button class="ghost" onclick="resetMusicStage('mix')">重置本阶段</button></div>
+                <div class="music-track"><strong>最终混音</strong><canvas id="musicMixWave" width="1200" height="96" class="music-waveform"></canvas><button class="ghost music-preview-button" onclick="loadMusicPreview('musicMixAudio','musicMixWave','mix')">按需加载试听与波形</button><audio id="musicMixAudio" controls preload="none"></audio></div>
+                <div class="music-editor">
+                  <strong>导出成品</strong>
+                  <div class="music-control-grid">
+                    <label>导出预设<select id="musicExportPreset"><option value="preview">试听</option><option value="live" selected>直播</option><option value="conservative_master">保守母带</option><option value="custom">自定义</option></select></label>
+                    <label>格式<select id="musicExportFormat"><option value="wav">WAV 24-bit</option><option value="flac">FLAC</option><option value="mp3">MP3</option></select></label>
+                    <label>目标响度 LUFS<input id="musicExportLufs" type="number" min="-24" max="-8" step="0.5" value="-14"><span class="param-help">直播 -14；试听 -16；保守母带 -13。</span></label>
+                  </div>
+                  <div class="music-stage-actions"><button id="musicExportButton" onclick="exportMusicProject()">导出到 AI合成音乐</button></div>
+                </div>
+              </div>
+            </div>
+            <div class="surface">
+              <div class="section-head"><div><h2>合成终端 · 简洁进度</h2><p class="note">这里只显示阶段、百分比与可读字幕；模型原始调试日志写入歌曲工程 logs/*.debug.log，不刷屏、不影响桌面。</p></div></div>
+              <pre id="musicTerminal" class="music-terminal">选择歌曲工程后显示阶段字幕。</pre>
+            </div>
           </div>
         </div>
       </div>
@@ -443,6 +727,8 @@ def render_index() -> str:
             <option value="memories">记忆数量</option>
             <option value="affection">亲密状态</option>
           </select></label>
+          <label class="switch-line"><input id="memoryImportantOnly" type="checkbox" onchange="renderMemoryRows()">只看重要</label>
+          <label class="switch-line"><input id="memoryRecentOnly" type="checkbox" onchange="renderMemoryRows()">最近 7 天</label>
         </div>
         <div class="row">
           <button class="ghost" onclick="loadMemory()">刷新记忆</button>
@@ -507,6 +793,86 @@ def render_index() -> str:
         </div>
       </div>
 
+      <div id="developer" class="panel">
+        <div class="stack">
+          <div class="surface">
+            <div class="section-head">
+              <div><h2>开发者状态与访问入口</h2><p class="note">NapCat Token 仅展示在本机页面；请勿把该链接截图或分享给他人。</p></div>
+              <div class="row"><button class="ghost" onclick="loadDeveloper(true)">刷新状态</button></div>
+            </div>
+            <div id="developerLinks" class="developer-links"><span class="note">正在读取本机服务信息...</span></div>
+          </div>
+          <div class="surface">
+            <div class="section-head">
+              <div><h2>实时项目日志</h2><p class="note" id="developerLogHint">每 3 秒读取一次当天日志；聊天正文和 Token 不会写入统一日志。</p></div>
+              <div class="row">
+                <label>级别<select id="developerLogLevel" onchange="loadDeveloperLogs()"><option value="all">全部</option><option value="debug">Debug</option><option value="info">Info</option><option value="warning">Warn</option><option value="error">Error</option></select></label>
+                <button class="ghost" onclick="loadDeveloperLogs()">刷新日志</button>
+              </div>
+            </div>
+            <pre id="developerLog" class="log-view">日志加载中...</pre>
+          </div>
+        </div>
+      </div>
+
+      <div id="minecraft" class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Minecraft 女仆桥接测试</h2>
+            <p class="note">独立测试区：后台通过本机桥接服务控制 UMU Little Maid，不会登录第二个账号，也不会向服务器发送任意命令。</p>
+          </div>
+          <div class="row">
+            <button class="ghost" onclick="loadMinecraft()">刷新状态</button>
+          </div>
+        </div>
+        <div class="minecraft-grid">
+          <div class="stack">
+            <div class="surface">
+              <h2>连接配置</h2>
+              <label class="switch-line"><input id="minecraftEnabled" type="checkbox">允许亚托莉控制自己的女仆</label>
+              <label>本地桥接地址<input id="minecraftBridgeUrl" value="http://127.0.0.1:8792"></label>
+              <div class="row">
+                <button onclick="saveMinecraftConfig()">保存配置</button>
+                <button class="ghost" onclick="loadMinecraft()">放弃修改</button>
+              </div>
+              <p class="note">只允许 127.0.0.1 或 localhost。先运行 AI_game 中的 <span class="mono">scripts\\start_bridge.ps1</span>，再启动测试 Minecraft。</p>
+            </div>
+            <div class="surface">
+              <h2>安全边界</h2>
+              <div class="stack note">
+                <div>• 只识别当前玩家拥有的 UMU 女仆。</div>
+                <div>• 切换模式时女仆需在 4.5 格内，且玩家主手为空。</div>
+                <div>• 只允许跟随、待命、自由、停止和状态刷新。</div>
+                <div>• 守卫、治疗、农夫等职业仍由女仆装备决定。</div>
+              </div>
+            </div>
+          </div>
+          <div class="stack">
+            <div class="surface">
+              <div class="section-head">
+                <div>
+                  <h2>实时状态</h2>
+                  <p class="note" id="minecraftStatusText">尚未连接桥接服务。</p>
+                </div>
+              </div>
+              <div id="minecraftStatusCards" class="minecraft-status"></div>
+              <label>控制对象<select id="minecraftMaidSelect" onchange="renderMinecraftMaidSelection()"></select></label>
+              <div class="minecraft-command-grid">
+                <button onclick="sendMinecraftCommand('follow')">跟随</button>
+                <button class="secondary" onclick="sendMinecraftCommand('wait')">待命</button>
+                <button class="ghost" onclick="sendMinecraftCommand('free')">自由活动</button>
+                <button class="danger" onclick="sendMinecraftCommand('stop')">停止</button>
+              </div>
+              <div id="minecraftMaidList" class="minecraft-maids"><div class="note">等待女仆遥测。</div></div>
+            </div>
+            <div class="surface">
+              <h2>最近执行结果</h2>
+              <div class="out" id="minecraftCommandOut">尚未执行测试命令。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div id="advanced" class="panel">
         <div class="section-head">
           <div>
@@ -514,7 +880,7 @@ def render_index() -> str:
             <p class="note">集中管理消息发送方式和主动互动策略。模型、接口和视觉能力统一在“模型”页面配置。</p>
           </div>
         </div>
-        <div class="settings-section">
+        <div class="settings-section accordion-section">
           <h3>回复与发送</h3>
           <div class="grid" id="configForm"></div>
           <p class="note">语音概率仅影响普通消息；用户明显难受或疲惫时会提高到至少 70%。明确要求语音和回应用户语音不受该概率限制。</p>
@@ -523,7 +889,7 @@ def render_index() -> str:
             <button class="ghost" onclick="loadConfig()">放弃页面修改</button>
           </div>
         </div>
-        <div class="settings-section">
+        <div class="settings-section accordion-section">
           <div class="section-head">
             <div>
               <h3>主动互动</h3>
@@ -621,17 +987,15 @@ def render_index() -> str:
       </div>
       <div class="mini-tabs">
         <button class="mini-tab active" onclick="showMemoryPane(event,'memoryOverview')">概览</button>
-        <button class="mini-tab" onclick="showMemoryPane(event,'memoryProfile')">用户档案</button>
-        <button class="mini-tab" onclick="showMemoryPane(event,'memoryEvents')">事件</button>
-        <button class="mini-tab" onclick="showMemoryPane(event,'memoryStyle')">习惯</button>
-        <button class="mini-tab" onclick="showMemoryPane(event,'memoryHistory')">最近聊天</button>
+        <button class="mini-tab" onclick="showMemoryPane(event,'memoryProfile')">L1 用户特点</button>
+        <button class="mini-tab" onclick="showMemoryPane(event,'memoryEvents')">L2 事件</button>
+        <button class="mini-tab" onclick="showMemoryPane(event,'memoryHistory')">L3 最近聊天</button>
         <button class="mini-tab" onclick="showMemoryPane(event,'memoryRaw')">高级 JSON</button>
       </div>
       <div class="dialog-body">
         <div id="memoryOverview" class="memory-pane"></div>
         <div id="memoryProfile" class="memory-pane" style="display:none"></div>
         <div id="memoryEvents" class="memory-pane" style="display:none"></div>
-        <div id="memoryStyle" class="memory-pane" style="display:none"></div>
         <div id="memoryHistory" class="memory-pane" style="display:none"></div>
         <div id="memoryRaw" class="memory-pane" style="display:none"></div>
       </div>
@@ -656,6 +1020,11 @@ const fields = [
   ["MESSAGE_SEND_DELAY_MAX","最长发送间隔","number"],
   ["STICKER_CHANCE","表情概率","number"],
   ["STICKER_COOLDOWN_SECONDS","表情冷却秒数","number"],
+  ["TOOLBOX_OCR_ENABLED","独立 OCR 文字识别","checkbox"],
+  ["TOOLBOX_VISION_FALLBACK_MODEL","视觉资源不足兜底模型","text"],
+  ["TOOLBOX_VISION_RETRY_COUNT","视觉资源错误重试次数","number"],
+  ["TOOLBOX_VISION_RESOURCE_WAIT_SECONDS","视觉等待 GPU 秒数","number"],
+  ["TOOLBOX_VISION_UNLOAD_OTHER_OLLAMA_MODELS","视觉前释放其它 Ollama 模型","checkbox"],
   ["REPLY_VOICE_PROBABILITY","语音概率（%）","voice-probability"]
 ];
 const categoryLabels = {
@@ -675,6 +1044,7 @@ window._selectedLocalModelName = "";
 window._activeProfileIds = {};
 window._profileTypes = [];
 window._proactive = null;
+window._minecraftData = null;
 function $(id) { return document.getElementById(id); }
 function toast(text) {
   const el = $('toast'); el.textContent = text; el.classList.add('show');
@@ -693,13 +1063,140 @@ function escapeHtml(value) {
 function showTab(event, id) {
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
-  event.target.classList.add('active'); $(id).classList.add('active');
+  (event.currentTarget || event.target).classList.add('active'); $(id).classList.add('active');
   if(id==='stickers') loadStickers();
   if(id==='memory') loadMemory();
   if(id==='advanced') { loadConfig(); loadReplyVoiceProbability(); loadProactive(); }
   if(id==='model') loadProfiles();
   if(id==='voice') loadVoice();
   if(id==='test') loadVoiceTestState();
+  if(id==='developer') loadDeveloper(true);
+  if(id==='minecraft') loadMinecraft();
+}
+function showVoiceModule(module) {
+  const speech = module !== 'music';
+  $('voiceSpeechTab').classList.toggle('active', speech);
+  $('voiceMusicTab').classList.toggle('active', !speech);
+  $('voiceSpeechPanel').classList.toggle('active', speech);
+  $('voiceMusicPanel').classList.toggle('active', !speech);
+  $('voiceSpeechTab').setAttribute('aria-selected', String(speech));
+  $('voiceMusicTab').setAttribute('aria-selected', String(!speech));
+  window._voiceMusicActive = !speech;
+  if(speech) {
+    clearTimeout(window._musicProjectTimer);
+    releaseMusicMedia();
+  } else if(!window._musicProjectsLoaded) {
+    loadMusicSources();
+    loadMusicProjects();
+  }
+}
+
+function minecraftMaidTelemetry() {
+  const state = window._minecraftData?.bridge?.state || {};
+  const telemetry = state.telemetry || {};
+  return Array.isArray(telemetry.maids) ? telemetry.maids : [];
+}
+function renderMinecraftMaidSelection() {
+  const maids = minecraftMaidTelemetry();
+  const selected = $('minecraftMaidSelect')?.value || '';
+  const out = $('minecraftMaidList');
+  if(!out) return;
+  if(!maids.length) {
+    out.innerHTML = '<div class="note">当前没有收到属于玩家的 UMU 女仆。1.21.11 冒烟测试只验证连接，不会显示女仆。</div>';
+    return;
+  }
+  out.innerHTML = maids.map(maid=>{
+    const active = maid.uuid===selected;
+    const health = Number(maid.health ?? 0);
+    const maxHealth = Number(maid.maxHealth ?? 0);
+    return `<div class="minecraft-maid ${active?'selected':''}">
+      <div class="minecraft-maid-head">
+        <div><strong>${escapeHtml(maid.name || 'UMU 女仆')}</strong><div class="memory-meta mono">${escapeHtml(maid.uuid || '')}</div></div>
+        <span class="badge ${String(maid.mode || '').toUpperCase()==='FOLLOW'?'active':''}">${escapeHtml(maid.mode || 'UNKNOWN')}</span>
+      </div>
+      <div class="minecraft-maid-meta">
+        <div><span>职业</span><strong>${escapeHtml(maid.job || 'UNKNOWN')}</strong></div>
+        <div><span>生命</span><strong>${health.toFixed(1)} / ${maxHealth.toFixed(1)}</strong></div>
+        <div><span>距离</span><strong>${Number(maid.distance || 0).toFixed(1)} 格</strong></div>
+        <div><span>坐标</span><strong>${Number(maid.x || 0).toFixed(0)}, ${Number(maid.y || 0).toFixed(0)}, ${Number(maid.z || 0).toFixed(0)}</strong></div>
+      </div>
+      ${active ? '<div class="ok">当前控制对象</div>' : `<button class="ghost" onclick="selectMinecraftMaid('${escapeHtml(maid.uuid || '')}')">选择</button>`}
+    </div>`;
+  }).join('');
+}
+function selectMinecraftMaid(uuid) {
+  $('minecraftMaidSelect').value = uuid;
+  renderMinecraftMaidSelection();
+}
+function renderMinecraft(data) {
+  window._minecraftData = data;
+  const config = data.config || {};
+  const bridge = data.bridge || {};
+  const health = bridge.health || {};
+  const state = bridge.state || {};
+  const telemetry = state.telemetry || {};
+  const maids = minecraftMaidTelemetry();
+  $('minecraftEnabled').checked = !!config.enabled;
+  $('minecraftBridgeUrl').value = config.bridge_url || 'http://127.0.0.1:8792';
+  const connected = !!(health.minecraftConnected || state.minecraftConnected);
+  $('minecraftStatusText').textContent = !bridge.reachable
+    ? `桥接服务不可达：${bridge.error || '请先启动本地桥接'}`
+    : (connected ? 'Minecraft 已连接，遥测正常。' : '桥接服务已启动，等待 Minecraft 客户端连接。');
+  $('minecraftStatusCards').innerHTML = [
+    ['控制开关', !!config.enabled, config.enabled ? '已允许' : '已禁用'],
+    ['本地桥接', !!bridge.reachable, bridge.reachable ? '在线' : '离线'],
+    ['Minecraft', connected, connected ? '已连接' : '未连接']
+  ].map(([name,ok,text])=>`<div class="stat"><span class="${ok?'ok':'bad'}">${escapeHtml(text)}</span><div class="memory-meta">${escapeHtml(name)}</div></div>`).join('');
+  const select = $('minecraftMaidSelect');
+  const previous = select.value;
+  select.innerHTML = maids.map(maid=>`<option value="${escapeHtml(maid.uuid)}">${escapeHtml(maid.name || 'UMU 女仆')} · ${escapeHtml(maid.mode || 'UNKNOWN')} · ${Number(maid.distance || 0).toFixed(1)}格</option>`).join('');
+  if(maids.some(maid=>maid.uuid===previous)) select.value = previous;
+  if(!select.options.length) select.innerHTML = '<option value="">没有可控制的女仆</option>';
+  renderMinecraftMaidSelection();
+  const lastResult = state.lastResult || {};
+  if(lastResult.requestId) {
+    $('minecraftCommandOut').textContent = `${lastResult.ok ? '执行成功' : '执行失败'}\n${lastResult.detail || ''}\n请求：${lastResult.requestId}`;
+  } else if(telemetry.smokeTest) {
+    $('minecraftCommandOut').textContent = `1.21.11 冒烟连接成功\nMinecraft ${telemetry.minecraftVersion || ''}\n下一步可以进入 UMU 3.11a 隔离副本测试。`;
+  }
+  clearTimeout(window._minecraftRefreshTimer);
+  if($('minecraft').classList.contains('active')) {
+    window._minecraftRefreshTimer = setTimeout(loadMinecraft, connected ? 1800 : 3500);
+  }
+}
+async function loadMinecraft() {
+  try {
+    renderMinecraft(await api('/api/minecraft'));
+  } catch(error) {
+    $('minecraftStatusText').textContent = '后台读取失败：' + error.message;
+  }
+}
+async function saveMinecraftConfig() {
+  try {
+    await api('/api/minecraft/config', {method:'POST', body:JSON.stringify({
+      enabled:$('minecraftEnabled').checked,
+      bridge_url:$('minecraftBridgeUrl').value.trim()
+    })});
+    toast('Minecraft 桥接配置已保存');
+    await loadMinecraft();
+  } catch(error) {
+    toast('保存失败：' + error.message);
+  }
+}
+async function sendMinecraftCommand(command) {
+  const maidUuid = $('minecraftMaidSelect').value || null;
+  const out = $('minecraftCommandOut');
+  out.textContent = `正在发送 ${command}...`;
+  try {
+    const result = await api('/api/minecraft/command', {method:'POST', body:JSON.stringify({
+      command,
+      maidUuid
+    })});
+    out.textContent = `命令已接收\n请求：${result.result?.requestId || '状态刷新'}`;
+    setTimeout(loadMinecraft, 650);
+  } catch(error) {
+    out.textContent = '发送失败：' + error.message;
+  }
 }
 
 function voiceConfigValue(cfg, key) {
@@ -754,16 +1251,41 @@ async function loadVoice() {
   loadSelectedVoiceProfile();
   const profile = (data.profiles || []).find(p=>p.id===profileSelect.value) || {};
   const library = service.original_library || {};
+  const conversationSpeech = service.conversation_speech || {};
   const quality = service.quality_gate || {};
   const singing = service.singing || {};
   $('voiceServiceStatus').innerHTML = [
-    ['独立服务', service.ok, service.error || '127.0.0.1'],
+    ['atri_voice_service', service.ok, service.error || '127.0.0.1:8790'],
+    ['语音合成', conversationSpeech.ready, conversationSpeech.ready ? (conversationSpeech.engine || 'GPT-SoVITS') : '等待合成引擎'],
     ['语音识别', asr.dependency_available && !asr.load_error, asr.loaded ? `模型已加载 · ${asr.audio_format || '原始音频'} · ${Number((asr.hotwords || []).length)} 个专有词` : (asr.loading ? '模型正在预热' : (asr.load_error || asr.model || '依赖未安装'))],
     ['角色音色', profile.ready, profile.ready ? '参考音频有效' : '等待参考音频'],
     ['原声素材库', library.available, library.available ? `${Number(library.clips || 0)} 条可检索原声` : (library.root || '素材目录不存在')],
-    ['语音质量门', quality.enabled, quality.enabled ? `回读错误率上限 ${Math.round(Number(quality.maximum_error_rate || 0)*100)}% · 最多重试 ${Number(quality.retries || 0)} 次` : '服务端未启用'],
-    ['歌唱素材', singing.ready, singing.ready ? `${Number(singing.clips || 0)} 条完整歌声` : '等待在歌唱目录加入完整素材']
+    ['语音质量门', quality.enabled, quality.enabled ? `回读错误率上限 ${Math.round(Number(quality.maximum_error_rate || 0)*100)}% · 最多重试 ${Number(quality.retries || 0)} 次` : '当前未启用']
   ].map(([name,ok,detail])=>`<div class="pill"><div><strong>${escapeHtml(name)}</strong><div class="memory-meta">${escapeHtml(detail)}</div></div><span class="${ok?'ok':'bad'}">${ok?'就绪':'未就绪'}</span></div>`).join('');
+  const singingJobs = service.singing_jobs || {};
+  const external = singingJobs.external_pipeline || {};
+  const manifest = external.manifest || {};
+  const musicService = data.music_service || {};
+  const projectService = musicService.projects || {};
+  $('musicServiceStatus').innerHTML = [
+    ['AI_music', musicService.ok, musicService.ok ? `${musicService.url || '127.0.0.1:8793'} · ${manifest.id || external.engine || 'Seed-VC'}` : (musicService.error || '本地桥接未启动')],
+    ['三阶段工程', projectService.ready, projectService.ready ? (projectService.busy ? '正在处理歌曲阶段' : '分离、推理、混音均可用') : '工程管线未就绪'],
+    ['歌声音色', singing.ready, singing.ready ? `${Number(singing.clips || 0)} 条亚托莉参考音源` : '等待歌唱参考音源'],
+    ['任务队列', service.ok, `${Number(singingJobs.running || 0)} 个运行 · ${Number(singingJobs.queued || 0)} 个等待`]
+  ].map(([name,ok,detail])=>`<div class="pill"><div><strong>${escapeHtml(name)}</strong><div class="memory-meta">${escapeHtml(detail)}</div></div><span class="${ok?'ok':'bad'}">${ok?'就绪':'未就绪'}</span></div>`).join('');
+  const singingState = $('singingTestState');
+  if(singingState) {
+    singingState.textContent = external.ready
+      ? `管线就绪：${manifest.id || 'Seed-VC'} · ${manifest.has_separator ? '人声分离已启用' : '不分离人声'} · ${manifest.has_mixer ? '伴奏混音已启用' : '仅输出人声'}`
+      : `歌声转换管线未就绪：${external.load_error || '请检查语音服务配置'}`;
+  }
+  const referenceSelect = $('singingReferencePath');
+  if(referenceSelect) {
+    const previousReference = referenceSelect.value;
+    referenceSelect.innerHTML = (data.singing_references || []).map(item=>`<option value="${escapeHtml(item.path)}">${escapeHtml(item.relative_path || item.name)}</option>`).join('');
+    if((data.singing_references || []).some(item=>item.path===previousReference)) referenceSelect.value = previousReference;
+    if(!referenceSelect.options.length) referenceSelect.innerHTML = '<option value="">没有找到唱歌素材</option>';
+  }
 }
 function loadSelectedVoiceProfile() {
   const profile = (window._voiceData?.profiles || []).find(item=>item.id===$('voiceProfileId').value) || {};
@@ -841,6 +1363,586 @@ async function uploadVoiceReference() {
   await loadVoice();
   toast('参考音频已保存');
 }
+async function uploadSingingSource() {
+  const file = $('singingSourceFile').files[0];
+  if(!file) return toast('先选择导唱或歌曲音频');
+  const out = $('musicProjectState');
+  out.textContent = '正在上传原曲到固定素材库...';
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const result = await api('/api/voice/singing/source', {method:'POST', body:form});
+    $('singingSourcePath').value = result.path || '';
+    await loadMusicSources(result.path || '');
+    out.textContent = `原曲已进入 QQmusic-MP3 素材库：${result.name || file.name}`;
+  } catch(error) {
+    out.textContent = '上传失败：' + error.message;
+  }
+}
+async function loadMusicSources(preferredPath='') {
+  const select = $('musicSourceLibrary');
+  if(!select) return;
+  try {
+    const data = await api('/api/music/sources');
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    const current = preferredPath || $('singingSourcePath').value || select.value;
+    select.innerHTML = '<option value="">从固定目录选择，或在下方上传</option>' + sources.map(source=>`<option value="${escapeHtml(source.path)}">${escapeHtml(source.name)}</option>`).join('');
+    if(sources.some(source=>source.path===current)) select.value = current;
+    if(select.value) $('singingSourcePath').value = select.value;
+  } catch(error) {
+    toast('歌曲素材库读取失败：' + error.message);
+  }
+}
+function selectMusicSource() {
+  $('singingSourcePath').value = $('musicSourceLibrary').value || '';
+}
+function musicStageLabel(status) {
+  return ({pending:'等待',running:'处理中',succeeded:'已完成',failed:'失败'})[status] || status || '等待';
+}
+function musicArtifactUrl(project, name) {
+  const path = project?.artifact_urls?.[name];
+  return path ? `/api/music/project/audio?id=${encodeURIComponent(project.id)}&name=${encodeURIComponent(name)}` : '';
+}
+function setMusicAudio(audioId, canvasId, url) {
+  const audio = $(audioId);
+  const canvas = $(canvasId);
+  if(!audio || !canvas) return;
+  if(audio.dataset.audioUrl !== (url || '')) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    audio.dataset.audioUrl = url || '';
+    canvas.dataset.waveKey = '';
+    drawEmptyMusicWaveform(canvas);
+  }
+}
+function releaseMusicMedia() {
+  for(const [audioId,canvasId] of [
+    ['musicVocalAudio','musicVocalWave'],
+    ['musicHarmonyAudio','musicHarmonyWave'],
+    ['musicInstrumentalAudio','musicInstrumentalWave'],
+    ['musicConvertedAudio','musicConvertedWave'],
+    ['musicMixAudio','musicMixWave']
+  ]) {
+    const audio = $(audioId), canvas = $(canvasId);
+    if(audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); }
+    if(canvas) { canvas.dataset.waveKey=''; drawEmptyMusicWaveform(canvas); }
+  }
+}
+function drawEmptyMusicWaveform(canvas) {
+  const width = Math.max(240, Math.floor(canvas.clientWidth || 480));
+  const height = Math.max(64, Math.floor(canvas.clientHeight || 78));
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#eef2f7'; context.fillRect(0,0,width,height);
+  context.strokeStyle = '#cbd5e1'; context.beginPath(); context.moveTo(0,height/2); context.lineTo(width,height/2); context.stroke();
+}
+async function loadMusicPreview(audioId, canvasId, name, selectable=false) {
+  const project = window._musicProject;
+  const audio = $(audioId), canvas = $(canvasId);
+  if(!project || !audio || !canvas) return toast('当前音轨尚未生成');
+  const url = musicArtifactUrl(project, name);
+  if(!url) return toast('当前音轨尚未生成');
+  if(audio.getAttribute('src') !== url) {
+    audio.src = url;
+    audio.load();
+  }
+  await drawMusicWaveform(canvas, project.id, name);
+  if(selectable) setupMusicSelection(canvas);
+  toast('试听已按需加载，不会在进入页面时占用整曲内存');
+}
+async function drawMusicWaveform(canvas, projectId, name) {
+  const key = `${projectId}:${name}`;
+  if(canvas.dataset.waveKey === key) return;
+  drawEmptyMusicWaveform(canvas);
+  try {
+    const data = await api(`/api/music/project/waveform?id=${encodeURIComponent(projectId)}&name=${encodeURIComponent(name)}`);
+    const peaks = Array.isArray(data.peaks) ? data.peaks : [];
+    if(!peaks.length) throw new Error('波形为空');
+    window._musicWaveData = window._musicWaveData || {};
+    window._musicWaveData[canvas.id] = {peaks,duration:Number(data.duration_seconds || 0)};
+    paintMusicWaveform(canvas);
+    canvas.dataset.waveKey = key;
+  } catch(error) {
+    canvas.dataset.waveKey = '';
+    toast('波形加载失败：' + error.message);
+  }
+}
+function paintMusicWaveform(canvas) {
+  const data = window._musicWaveData?.[canvas.id];
+  if(!data) return drawEmptyMusicWaveform(canvas);
+  const width = canvas.width, height = canvas.height, center = height/2;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#eef2f7'; context.fillRect(0,0,width,height);
+  context.strokeStyle = '#2563eb'; context.lineWidth = 1; context.beginPath();
+  for(let x=0; x<width; x++) {
+    const peak = Number(data.peaks[Math.min(data.peaks.length-1, Math.floor(x * data.peaks.length / width))] || 0);
+    context.moveTo(x, center - peak * center * .9); context.lineTo(x, center + peak * center * .9);
+  }
+  context.stroke();
+  if(canvas.id==='musicConvertedWave' && data.duration>0) {
+    const start = Math.max(0, parseMusicTimeSeconds($('musicSelectionStart').value || 0));
+    const end = Math.min(data.duration, parseMusicTimeSeconds($('musicSelectionEnd').value || 0));
+    if(end>start) {
+      const left = start / data.duration * width, right = end / data.duration * width;
+      context.fillStyle = 'rgba(37,99,235,.18)'; context.fillRect(left,0,right-left,height);
+      context.strokeStyle = '#1d4ed8'; context.lineWidth = 2; context.strokeRect(left+1,1,Math.max(1,right-left-2),height-2);
+    }
+  }
+}
+function parseMusicTimeSeconds(value) {
+  const text = String(value ?? '').trim();
+  if(text.includes(':')) {
+    const parts = text.split(':');
+    if(parts.length !== 2 && parts.length !== 3) return NaN;
+    const seconds = Number(parts[parts.length - 1]);
+    const minutes = Number(parts[parts.length - 2]);
+    const hours = parts.length === 3 ? Number(parts[0]) : 0;
+    if(!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds) || hours < 0 || minutes < 0 || seconds < 0 || seconds >= 60) return NaN;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+  const seconds = Number(text);
+  return Number.isFinite(seconds) ? seconds : NaN;
+}
+function setupMusicSelection(canvas) {
+  if(canvas.dataset.selectionReady==='1') return;
+  canvas.dataset.selectionReady = '1';
+  let anchor = null;
+  const secondsAt = event => {
+    const data = window._musicWaveData?.[canvas.id];
+    const rect = canvas.getBoundingClientRect();
+    return data ? Math.max(0,Math.min(data.duration,(event.clientX-rect.left)/rect.width*data.duration)) : 0;
+  };
+  canvas.addEventListener('pointerdown', event=>{ anchor=secondsAt(event); canvas.setPointerCapture(event.pointerId); });
+  canvas.addEventListener('pointermove', event=>{
+    if(anchor===null) return;
+    const cursor=secondsAt(event), start=Math.min(anchor,cursor), end=Math.max(anchor,cursor);
+    $('musicSelectionStart').value=start.toFixed(2); $('musicSelectionEnd').value=Math.max(start+.05,end).toFixed(2); paintMusicWaveform(canvas);
+  });
+  canvas.addEventListener('pointerup', event=>{ if(anchor!==null){ const cursor=secondsAt(event); selectMusicRange(Math.min(anchor,cursor),Math.max(anchor,cursor)); } anchor=null; });
+}
+function selectMusicRange(start,end) {
+  $('musicSelectionStart').value=Math.max(0,start).toFixed(2);
+  $('musicSelectionEnd').value=Math.max(start+.05,end).toFixed(2);
+  const canvas=$('musicConvertedWave'); if(canvas) paintMusicWaveform(canvas);
+}
+function previewSelectedMusicRange() {
+  const audio=$('musicConvertedAudio'), project=window._musicProject;
+  if(!audio || !project) return;
+  const url=musicArtifactUrl(project,'converted');
+  if(!url) return toast('请先完成整曲推理');
+  if(audio.getAttribute('src')!==url){ audio.src=url; audio.load(); }
+  const start=parseMusicTimeSeconds($('musicSelectionStart').value||0), end=parseMusicTimeSeconds($('musicSelectionEnd').value||0);
+  if(!Number.isFinite(start) || !Number.isFinite(end) || end<=start) return toast('请输入有效的秒数或 MM:SS 时间');
+  if(end-start<.25) return toast('局部精修至少选择 0.25 秒，避免模型在断句处产生卡顿');
+  audio.currentTime=start; audio.play();
+  clearTimeout(window._musicRangeTimer); window._musicRangeTimer=setTimeout(()=>audio.pause(),Math.max(50,(end-start)*1000));
+}
+function formatMusicTime(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  const minutes = Math.floor(value / 60);
+  return `${minutes}:${String(Math.floor(value % 60)).padStart(2,'0')}`;
+}
+function renderMusicSections(analysis, phrasePlan) {
+  const out = $('musicSectionList');
+  if(!out) return;
+  const sections = Array.isArray(analysis?.sections) ? analysis.sections : [];
+  if(!sections.length) {
+    out.innerHTML = '<div class="note">完成人声分离后显示自动乐理分段。</div>';
+    return;
+  }
+  const summary = `<div class="note">${escapeHtml(analysis.tempo_bpm || '—')} BPM · ${escapeHtml(analysis.estimated_key || '调性待定')} · ${escapeHtml(analysis.meter_hint || '')} · ${sections.length} 段</div>`;
+  const phrases = Array.isArray(phrasePlan?.phrases) ? phrasePlan.phrases : [];
+  const phraseButtons = phrases.length ? `<div class="row"><span class="param-help">换气乐句：</span>${phrases.slice(0,30).map(phrase=>`<button class="ghost" onclick="selectMusicRange(${Number(phrase.start_seconds)},${Number(phrase.end_seconds)})">${escapeHtml(phrase.id)} · ${formatMusicTime(phrase.start_seconds)}–${formatMusicTime(phrase.end_seconds)}</button>`).join('')}</div>` : '';
+  out.innerHTML = summary + sections.map(section=>`<div class="music-section-item"><span class="index">${Number(section.index || 0)}</span><span><strong>${escapeHtml(section.label || '乐段')}</strong><span class="param-help">${escapeHtml(section.reason || '')}</span></span><span class="time">${formatMusicTime(section.start_seconds)}–${formatMusicTime(section.end_seconds)}</span></div>`).join('') + phraseButtons;
+}
+function renderMusicQuality(quality) {
+  const out=$('musicInferenceQuality'); if(!out) return;
+  const checks=Array.isArray(quality?.checks)?quality.checks:[];
+  if(!checks.length){ out.innerHTML='<div class="note">整曲推理后显示接缝、静音、音高与削波检查。</div>'; return; }
+  out.innerHTML=checks.map(check=>`<div class="music-quality-item ${check.passed?'pass':'fail'}"><strong>${check.passed?'通过':'需检查'} · ${escapeHtml(check.label||check.id)}</strong><span class="param-help">${escapeHtml(check.reference||'')} · 实测 ${escapeHtml(check.value??'无有效音高')}</span></div>`).join('');
+}
+function renderMusicRevisions(project) {
+  const select=$('musicRevisionSelect'); if(!select) return;
+  const revisions=Array.isArray(project?.revisions)?project.revisions:[];
+  select.innerHTML=revisions.length?revisions.slice().reverse().map(revision=>`<option value="${escapeHtml(revision.id)}">${escapeHtml(revision.label||revision.stage)} · ${escapeHtml(revision.id)}</option>`).join(''):'<option value="">暂无版本</option>';
+}
+async function loadMusicTerminal(projectId, stage) {
+  const terminal = $('musicTerminal');
+  if(!terminal || !projectId || !stage) return;
+  try {
+    const data = await api(`/api/music/project/log?id=${encodeURIComponent(projectId)}&stage=${encodeURIComponent(stage)}`);
+    terminal.textContent = data.log || '当前阶段尚未产生终端字幕。';
+    terminal.scrollTop = terminal.scrollHeight;
+  } catch(error) {
+    terminal.textContent = '终端字幕读取失败：' + error.message;
+  }
+}
+function renderMusicProject(project) {
+  window._musicProject = project || null;
+  if(!project) {
+    $('musicProjectState').textContent = '创建工程后，可以逐阶段生成并试听。';
+    ['Separation','Inference','Mix'].forEach(name=>{
+      $('music'+name+'State').textContent = '等待';
+      $('music'+name+'State').className = 'music-stage-state';
+    });
+    renderMusicSections(null, null);
+    renderMusicQuality(null);
+    renderMusicRevisions(null);
+    releaseMusicMedia();
+    $('musicTerminal').textContent = '选择歌曲工程后显示阶段字幕。';
+    return;
+  }
+  const stages = project.stages || {};
+  const separation = stages.separation || {};
+  const inference = stages.inference || {};
+  const mix = stages.mix || {};
+  const exportPath = project.artifacts?.export ? ` · 已导出：${project.artifacts.export}` : '';
+  $('musicProjectState').textContent = `${project.name} · ${project.message || ''}${project.error ? ' · '+project.error : ''}${exportPath}`;
+  renderMusicSections(project.analysis, project.phrase_plan);
+  renderMusicQuality(project.quality?.inference);
+  renderMusicRevisions(project);
+  for(const [name,stage] of [['Separation',separation],['Inference',inference],['Mix',mix]]) {
+    const state = stage.status || 'pending';
+    $('music'+name+'State').textContent = musicStageLabel(state);
+    $('music'+name+'State').className = 'music-stage-state ' + state;
+    const card = $('musicStage'+name);
+    card.classList.remove('ready','running','succeeded','failed');
+    card.classList.add(state==='pending' ? 'ready' : state);
+  }
+  const busy = project.state === 'running' || project.state === 'exporting';
+  const guided = project.parameters?.workflow?.mode !== 'automatic';
+  $('musicRunSeparation').disabled = busy;
+  $('musicRunInference').disabled = busy || separation.status !== 'succeeded' || (guided && separation.confirmation!=='confirmed');
+  $('musicRunMix').disabled = busy || inference.status !== 'succeeded' || (guided && inference.confirmation!=='confirmed');
+  $('musicRunPipeline').disabled = busy;
+  $('musicRerunSegment').disabled = busy || inference.status !== 'succeeded';
+  $('musicExportButton').disabled = busy || mix.status !== 'succeeded';
+  const params = project.parameters || {};
+  $('musicWorkflowMode').value = params.workflow?.mode || 'guided';
+  $('musicSectionCount').value = params.separation?.section_count ?? 0;
+  $('musicSeparationModel').value = params.separation?.model || 'mdx_net';
+  $('musicSeparationPreset').value = params.separation?.preset || 'standard';
+  $('musicSeparateHarmony').checked = params.separation?.separate_harmony !== false;
+  $('musicPitchShift').value = params.inference?.pitch_shift ?? 0;
+  $('musicDiffusionSteps').value = params.inference?.diffusion_steps ?? 35;
+  $('musicStyle').value = params.inference?.style || 'natural';
+  $('musicContextSeconds').value = params.inference?.context_seconds ?? 3;
+  $('musicEmotionStrength').value = params.inference?.emotion_strength ?? .55;
+  $('musicBreathiness').value = params.inference?.breathiness ?? .08;
+  $('musicVibrato').value = params.inference?.vibrato ?? .15;
+  $('musicArticulation').value = params.inference?.articulation ?? .60;
+  $('musicFormantShift').value = params.inference?.formant_shift ?? .6;
+  $('musicSegmentPitch').value = params.inference?.pitch_shift ?? 0;
+  $('musicVocalGain').value = params.mix?.vocal_gain_db ?? 0;
+  $('musicInstrumentalGain').value = params.mix?.instrumental_gain_db ?? -1.7;
+  $('musicDucking').value = params.mix?.ducking_db ?? 3;
+  $('musicEqPresence').value = params.mix?.eq_presence_db ?? -1;
+  $('musicEqAir').value = params.mix?.eq_air_db ?? 1.2;
+  $('musicCompressorThreshold').value = params.mix?.compressor_threshold_db ?? -18;
+  $('musicCompressorRatio').value = params.mix?.compressor_ratio ?? 2.5;
+  $('musicDeesser').value = params.mix?.deesser_strength ?? .35;
+  $('musicSaturation').value = params.mix?.saturation_db ?? 1;
+  $('musicReverb').value = params.mix?.reverb ?? 0.08;
+  $('musicDelayMs').value = params.mix?.delay_ms ?? 90;
+  $('musicDelayMix').value = params.mix?.delay_mix ?? .04;
+  $('musicExportPreset').value = params.export?.preset || 'live';
+  $('musicExportFormat').value = params.export?.format || 'wav';
+  $('musicExportLufs').value = params.export?.lufs ?? -14;
+  if(window._musicSelectionProject!==project.id) {
+    const firstPhrase=project.phrase_plan?.phrases?.[0];
+    selectMusicRange(Number(firstPhrase?.start_seconds||0),Number(firstPhrase?.end_seconds||Math.min(15,project.phrase_plan?.duration_seconds||15)));
+    window._musicSelectionProject=project.id;
+  }
+  setMusicAudio('musicVocalAudio','musicVocalWave',musicArtifactUrl(project,'vocal'));
+  setMusicAudio('musicHarmonyAudio','musicHarmonyWave',musicArtifactUrl(project,'harmony'));
+  setMusicAudio('musicInstrumentalAudio','musicInstrumentalWave',musicArtifactUrl(project,'instrumental'));
+  setMusicAudio('musicConvertedAudio','musicConvertedWave',musicArtifactUrl(project,'converted'));
+  setMusicAudio('musicMixAudio','musicMixWave',musicArtifactUrl(project,'mix'));
+  clearTimeout(window._musicProjectTimer);
+  if(busy && window._voiceMusicActive) window._musicProjectTimer = setTimeout(()=>loadMusicProject(project.id), 2500);
+}
+async function loadMusicProjects() {
+  if(window._musicProjectsPromise) return window._musicProjectsPromise;
+  const state = $('musicProjectState');
+  if(!state) return;
+  window._musicProjectsPromise = (async()=>{ try {
+    const data = await api('/api/music/projects');
+    const projects = Array.isArray(data.projects) ? data.projects : [];
+    const select = $('musicProjectSelect');
+    const current = select.value || window._musicProject?.id || '';
+    select.innerHTML = projects.map(project=>`<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)} · ${escapeHtml(project.message || project.state)}</option>`).join('');
+    if(projects.some(project=>project.id===current)) select.value = current;
+    if(!select.options.length) {
+      select.innerHTML = '<option value="">尚未创建工程</option>';
+      renderMusicProject(null);
+      return;
+    }
+    await loadMusicProject(select.value);
+    window._musicProjectsLoaded = true;
+  } catch(error) {
+    state.textContent = '歌曲工程读取失败：' + error.message;
+  } finally {
+    window._musicProjectsPromise = null;
+  }})();
+  return window._musicProjectsPromise;
+}
+async function loadMusicProject(projectId) {
+  if(!projectId) return renderMusicProject(null);
+  try {
+    const data = await api('/api/music/project?id=' + encodeURIComponent(projectId));
+    renderMusicProject(data.project);
+    await loadMusicTerminal(data.project.id, data.project.current_stage || 'separation');
+  } catch(error) {
+    $('musicProjectState').textContent = '工程读取失败：' + error.message;
+  }
+}
+function selectMusicProject() {
+  loadMusicProject($('musicProjectSelect').value);
+}
+async function createMusicProject() {
+  const source = $('singingSourcePath').value.trim();
+  const reference = $('singingReferencePath').value.trim();
+  if(!source) return toast('请先上传原曲');
+  if(!reference) return toast('没有可用的亚托莉歌声参考');
+  const button = $('musicCreateProjectButton');
+  button.disabled = true;
+  $('musicProjectState').textContent = '正在创建歌曲工程并复制素材...';
+  try {
+    const data = await api('/api/music/project/create', {method:'POST', body:JSON.stringify({
+      name:$('singingSongName').value.trim() || '亚托莉歌曲工程',
+      source_audio_path:source,
+      reference_audio_path:reference,
+      workflow_mode:$('musicWorkflowMode').value,
+      section_count:Number($('musicSectionCount').value || 0),
+      model:$('musicSeparationModel').value,
+      preset:$('musicSeparationPreset').value,
+      separate_harmony:$('musicSeparateHarmony').checked,
+      context_seconds:Number($('musicContextSeconds').value || 3)
+    })});
+    await loadMusicProjects();
+    $('musicProjectSelect').value = data.project.id;
+    await loadMusicProject(data.project.id);
+    toast('歌曲工程已创建');
+  } catch(error) {
+    $('musicProjectState').textContent = '工程创建失败：' + error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+function musicStageParameters(stage) {
+  if(stage==='separation') return {
+    section_count:Number($('musicSectionCount').value || 0),
+    model:$('musicSeparationModel').value,
+    preset:$('musicSeparationPreset').value,
+    separate_harmony:$('musicSeparateHarmony').checked
+  };
+  if(stage==='inference') return {
+    pitch_shift:Number($('musicPitchShift').value || 0),
+    diffusion_steps:Number($('musicDiffusionSteps').value || 35),
+    style:$('musicStyle').value,
+    context_seconds:Number($('musicContextSeconds').value || 3),
+    emotion_strength:Number($('musicEmotionStrength').value || .55),
+    breathiness:Number($('musicBreathiness').value || .08),
+    vibrato:Number($('musicVibrato').value || .15),
+    articulation:Number($('musicArticulation').value || .60),
+    formant_shift:Number($('musicFormantShift').value || 0)
+  };
+  return {
+    vocal_gain_db:Number($('musicVocalGain').value || 0),
+    instrumental_gain_db:Number($('musicInstrumentalGain').value || -1.7),
+    eq_presence_db:Number($('musicEqPresence').value || -1),
+    eq_air_db:Number($('musicEqAir').value || 1.2),
+    compressor_threshold_db:Number($('musicCompressorThreshold').value || -18),
+    compressor_ratio:Number($('musicCompressorRatio').value || 2.5),
+    deesser_strength:Number($('musicDeesser').value || .35),
+    saturation_db:Number($('musicSaturation').value || 1),
+    reverb:Number($('musicReverb').value || .08),
+    delay_ms:Number($('musicDelayMs').value || 90),
+    delay_mix:Number($('musicDelayMix').value || .04),
+    ducking_db:Number($('musicDucking').value || 3)
+  };
+}
+async function runMusicStage(stage) {
+  const project = window._musicProject;
+  if(!project) return toast('请先创建或选择歌曲工程');
+  const parameters = musicStageParameters(stage);
+  const button = $({separation:'musicRunSeparation',inference:'musicRunInference',mix:'musicRunMix'}[stage]);
+  button.disabled = true;
+  try {
+    const data = await api('/api/music/project/stage', {method:'POST', body:JSON.stringify({id:project.id,stage,parameters})});
+    renderMusicProject(data.project);
+  } catch(error) {
+    $('musicProjectState').textContent = '阶段提交失败：' + error.message;
+    button.disabled = false;
+  }
+}
+async function runMusicPipeline() {
+  const project=window._musicProject; if(!project) return toast('请先创建歌曲工程');
+  const button=$('musicRunPipeline'); button.disabled=true;
+  try {
+    const data=await api('/api/music/project/pipeline',{method:'POST',body:JSON.stringify({
+      id:project.id,
+      mode:$('musicWorkflowMode').value,
+      parameters:{separation:musicStageParameters('separation'),inference:musicStageParameters('inference'),mix:musicStageParameters('mix')}
+    })});
+    renderMusicProject(data.project);
+  } catch(error) { $('musicProjectState').textContent='完整流程启动失败：'+error.message; button.disabled=false; }
+}
+async function confirmMusicStage(stage) {
+  const project=window._musicProject; if(!project) return;
+  try {
+    const data=await api('/api/music/project/confirm',{method:'POST',body:JSON.stringify({id:project.id,stage})});
+    renderMusicProject(data.project);
+  } catch(error) { toast('阶段确认失败：'+error.message); }
+}
+async function resetMusicStage(stage) {
+  const project=window._musicProject; if(!project) return;
+  if(!confirm('重置会切回该阶段，但历史版本仍可恢复。继续吗？')) return;
+  try {
+    const data=await api('/api/music/project/reset',{method:'POST',body:JSON.stringify({id:project.id,stage})});
+    renderMusicProject(data.project);
+  } catch(error) { toast('阶段重置失败：'+error.message); }
+}
+async function rollbackMusicProject() {
+  const project=window._musicProject, revisionId=$('musicRevisionSelect').value;
+  if(!project || !revisionId) return toast('请选择历史版本');
+  if(!confirm('恢复后当前状态也会先自动备份。确认恢复所选版本吗？')) return;
+  try {
+    const data=await api('/api/music/project/rollback',{method:'POST',body:JSON.stringify({id:project.id,revision_id:revisionId})});
+    renderMusicProject(data.project);
+  } catch(error) { toast('版本恢复失败：'+error.message); }
+}
+async function recoverMusicProject() {
+  const project=window._musicProject; if(!project) return;
+  try {
+    const data=await api('/api/music/project/recover',{method:'POST',body:JSON.stringify({id:project.id})});
+    renderMusicProject(data.project);
+  } catch(error) { toast('自动备份恢复失败：'+error.message); }
+}
+async function rerunMusicSegment() {
+  const project=window._musicProject; if(!project) return;
+  const start=parseMusicTimeSeconds($('musicSelectionStart').value||0), end=parseMusicTimeSeconds($('musicSelectionEnd').value||0);
+  if(!Number.isFinite(start) || !Number.isFinite(end) || end<=start) return toast('请输入有效的秒数或 MM:SS 时间');
+  if(end-start<.25) return toast('局部精修至少选择 0.25 秒，避免模型在断句处产生卡顿');
+  const button=$('musicRerunSegment'); button.disabled=true;
+  try {
+    const data=await api('/api/music/project/segment',{method:'POST',body:JSON.stringify({
+      id:project.id,start_seconds:start,end_seconds:end,
+      pitch_shift:Number($('musicSegmentPitch').value||0),
+      diffusion_steps:Number($('musicDiffusionSteps').value||35),style:$('musicStyle').value,
+      context_seconds:Number($('musicContextSeconds').value||3),
+      emotion_strength:Number($('musicEmotionStrength').value||.55),
+      breathiness:Number($('musicBreathiness').value||.08),vibrato:Number($('musicVibrato').value||.15),
+      articulation:Number($('musicArticulation').value||.60),formant_shift:Number($('musicFormantShift').value||0)
+    })});
+    renderMusicProject(data.project);
+  } catch(error) { toast('局部重跑失败：'+error.message); button.disabled=false; }
+}
+async function exportMusicProject() {
+  const project=window._musicProject; if(!project) return;
+  const button=$('musicExportButton'); button.disabled=true;
+  try {
+    const data=await api('/api/music/project/export',{method:'POST',body:JSON.stringify({
+      id:project.id,preset:$('musicExportPreset').value,format:$('musicExportFormat').value,
+      lufs:Number($('musicExportLufs').value||-14),true_peak_db:-1
+    })});
+    renderMusicProject(data.project);
+  } catch(error) { toast('导出失败：'+error.message); button.disabled=false; }
+}
+function singingStateText(state) {
+  return ({queued:'等待',running:'处理中',succeeded:'完成',failed:'失败',cancelled:'已取消'})[state] || state || '未知';
+}
+function renderSingingJobs(jobs) {
+  const out = $('singingJobList');
+  if(!out) return;
+  if(!jobs.length) {
+    out.innerHTML = '<div class="note">还没有歌声转换任务。</div>';
+    return;
+  }
+  out.innerHTML = jobs.slice(0,8).map(job=>{
+    const state = String(job.state || '');
+    const canCancel = state==='queued' || state==='running';
+    const canPlay = state==='succeeded' && job.audio_path;
+    const action = canCancel
+      ? `<button class="danger" onclick="cancelSingingJob('${job.id}')">取消</button>`
+      : (canPlay ? `<button onclick="playSingingJob('${job.id}','${encodeURIComponent(job.audio_path)}')">播放</button>` : '<span></span>');
+    return `<div class="singing-job">
+      <div><strong>${escapeHtml(job.request?.text || '未命名歌曲')}</strong><small>${escapeHtml(job.message || job.error || '')}</small><div class="singing-progress"><span style="width:${Math.max(0,Math.min(100,Number(job.progress || 0)))}%"></span></div></div>
+      <span class="singing-state ${escapeHtml(state)}">${escapeHtml(singingStateText(state))}</span>
+      <strong>${Number(job.progress || 0)}%</strong>
+      ${action}
+    </div>`;
+  }).join('');
+  const active = jobs.find(job=>job.state==='queued' || job.state==='running');
+  clearTimeout(window._singingJobsTimer);
+  if(active) window._singingJobsTimer = setTimeout(loadSingingJobs, 1800);
+}
+async function loadSingingJobs() {
+  const out = $('singingJobList');
+  if(!out) return;
+  try {
+    const result = await api('/api/voice/singing/jobs');
+    const jobs = Array.isArray(result.jobs) ? result.jobs : [];
+    window._singingJobs = jobs;
+    renderSingingJobs(jobs);
+    const newest = jobs[0];
+    if(newest?.state==='succeeded' && newest.audio_path && window._activeSingingJob===newest.id) {
+      playSingingJob(newest.id, encodeURIComponent(newest.audio_path), false);
+      $('singingTestState').textContent = `转换完成：${newest.source || 'Seed-VC'} · 可以播放试听`;
+      window._activeSingingJob = '';
+    } else if(newest?.state==='failed' && window._activeSingingJob===newest.id) {
+      $('singingTestState').textContent = '转换失败：' + (newest.error || newest.message || '未知错误');
+      window._activeSingingJob = '';
+    }
+  } catch(error) {
+    out.innerHTML = `<div class="note">任务读取失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+async function createSingingTest() {
+  const source = $('singingSourcePath').value.trim();
+  const reference = $('singingReferencePath').value.trim();
+  if(!source) return toast('请上传导唱，或填写本机音频绝对路径');
+  if(!reference) return toast('没有可用的亚托莉歌声参考');
+  const out = $('singingTestState');
+  const button = $('singingCreateButton');
+  button.disabled = true;
+  out.textContent = '正在提交歌声转换任务...';
+  try {
+    const result = await api('/api/voice/singing/create', {method:'POST', body:JSON.stringify({
+      text:$('singingSongName').value.trim() || '亚托莉歌声测试',
+      source_audio_path:source,
+      reference_audio_path:reference,
+      profile:$('voiceProfileId').value.trim() || 'atri',
+      preview_seconds:Number($('singingPreviewSeconds').value || 15),
+      pitch_shift:Number($('singingPitchShift').value || 0)
+    })});
+    window._activeSingingJob = result.id;
+    out.textContent = `任务已提交：${result.message || '等待处理'}`;
+    await loadSingingJobs();
+  } catch(error) {
+    out.textContent = '提交失败：' + error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+async function cancelSingingJob(jobId) {
+  try {
+    await api('/api/voice/singing/cancel', {method:'POST', body:JSON.stringify({id:jobId})});
+    if(window._activeSingingJob===jobId) window._activeSingingJob = '';
+    $('singingTestState').textContent = '任务已取消';
+    await loadSingingJobs();
+  } catch(error) {
+    $('singingTestState').textContent = '取消失败：' + error.message;
+  }
+}
+function playSingingJob(jobId, encodedPath, announce=true) {
+  const audio = $('singingPreviewAudio');
+  audio.src = 'http://127.0.0.1:8793/api/jobs/' + encodeURIComponent(jobId) + '/audio';
+  audio.load();
+  if(announce) $('singingTestState').textContent = `正在试听任务 ${jobId.slice(0,8)}`;
+}
 async function createVoiceCallTest() {
   const out = $('voiceCallTestOut');
   out.textContent = '正在保存配置并创建通话...';
@@ -854,12 +1956,17 @@ async function createVoiceCallTest() {
 }
 async function previewVoice() {
   const out = $('voicePreviewInfo');
+  const button = $('voicePreviewButton');
+  const text = $('voicePreviewText').value.trim();
+  if(!text) return toast('请输入试听文本');
+  button.disabled = true;
   const started = Date.now();
   out.textContent = '正在切换模型并合成 · 0 秒';
   const ticker = setInterval(()=>{ out.textContent = `正在切换模型并合成 · ${Math.floor((Date.now()-started)/1000)} 秒`; }, 1000);
   try {
     const result = await api('/api/voice/preview', {method:'POST', body:JSON.stringify({
-      text:$('voicePreviewText').value,
+      text,
+      language:$('voicePreviewLanguage').value,
       emotion:$('voicePreviewEmotion').value,
       mode:$('voicePreviewMode').value,
       profile:$('voiceProfileId').value.trim() || 'atri'
@@ -874,14 +1981,56 @@ async function previewVoice() {
     out.textContent = '试听失败：' + error.message;
   } finally {
     clearInterval(ticker);
+    button.disabled = false;
   }
 }
 async function loadStatus() {
   const s = await api('/api/status');
-  $('status').innerHTML = [
-    ['Atri 服务', s.atri], ['NapCat 连接', s.napcat], ['Ollama', s.ollama], ['语音服务', s.voice], ['WebUI', s.webui]
-  ].map(([k,v])=>`<div class="pill"><span>${k}</span><span class="${v?'ok':'bad'}">${v?'正常':'未连接'}</span></div>`).join('')
-  + `<p class="note">机器人 QQ：${escapeHtml(s.bot_qq)}<br>模型：${escapeHtml(s.model)}<br>接口：${escapeHtml(s.base_url)}<br>回复模式：${escapeHtml(s.reply_mode)}</p>`;
+  const cards = [
+    ['Atri 服务', s.atri, s.atri ? '正常' : '未连接'],
+    ['NapCat 连接', s.napcat, s.napcat ? '正常' : '未连接'],
+    ['Ollama', s.ollama, s.ollama ? '正常' : '未连接'],
+    ['语音服务', s.voice, s.voice ? '正常' : '未连接'],
+    ['WebUI', s.webui, s.webui ? '正常' : '未连接'],
+    ['聊天模型', Boolean(s.model), s.model || '未配置'],
+    ['视觉模型', Boolean(s.vision_model), s.vision_model || '未配置']
+  ];
+  if(s.napcat_webui && s.napcat_webui.url) {
+    cards.push(['NapCat WebUI', Boolean(s.napcat_webui.reachable), s.napcat_webui.reachable ? '可访问（开发页可打开链接）' : '端口未响应']);
+  }
+  $('status').innerHTML = cards.map(([k,v,text])=>`<div class="pill"><span>${k}</span><span class="${v?'ok':'bad'}">${escapeHtml(text)}</span></div>`).join('')
+  + `<p class="note">机器人 QQ：${escapeHtml(s.bot_qq)}<br>接口：${escapeHtml(s.base_url)}<br>回复模式：${escapeHtml(s.reply_mode)}${s.napcat_detail ? '<br>NapCat：' + escapeHtml(s.napcat_detail) : ''}</p>`;
+}
+async function loadDeveloper(force=false) {
+  try {
+    const data = await api('/api/developer');
+    const napcat = data.status?.napcat_webui || {};
+    const entries = [
+      ['ATRI OneBot', data.status?.onebot || '', data.status?.atri],
+      ['NapCat WebUI', napcat.url || '', napcat.reachable]
+    ];
+    $('developerLinks').innerHTML = entries.map(([label,url,ok]) => {
+      // 用字符串拼接生成链接片段，避免嵌套模板字符串导致页面脚本解析中断。
+      if (!url) {
+        return `<div class="pill"><span>${escapeHtml(label)}</span><span class="bad">未配置</span></div>`;
+      }
+      const destination = '<a href="' + escapeHtml(url) + '" target="_blank" rel="noreferrer">打开</a>';
+      return `<div class="pill"><span>${escapeHtml(label)}</span><span class="${ok ? 'ok' : 'bad'}">${ok ? '就绪' : '待检查'}</span>${destination}</div>`;
+    }).join('');
+    $('developerLogHint').textContent = `每 ${data.refresh_seconds || 3} 秒读取一次当天日志；聊天正文和 Token 不会写入统一日志。`;
+    await loadDeveloperLogs();
+    if(force) toast('开发者状态已刷新');
+  } catch(error) { $('developerLinks').textContent = '读取开发状态失败：' + error.message; }
+}
+async function loadDeveloperLogs() {
+  const output = $('developerLog');
+  if(!output) return;
+  try {
+    const level = $('developerLogLevel').value;
+    const data = await api('/api/logs?level=' + encodeURIComponent(level) + '&limit=320');
+    output.textContent = (data.lines || []).join('\\n') || '今天还没有统一项目日志。';
+    output.scrollTop = output.scrollHeight;
+  } catch(error) { output.textContent = '日志读取失败：' + error.message; }
 }
 async function testCurrentChatModel() {
   const feedback = $('modelFillFeedback');
@@ -946,7 +2095,7 @@ function renderProfileCard(p, index) {
     </div>`;
 }
 function renderCurrentModels(currentByType) {
-  return ['chat','vision'].map(type=>{
+  return ['chat','vision','embedding'].map(type=>{
     const c = currentByType[type] || {};
     const enabled = type === 'chat' ? true : !!c.enabled;
     const title = modelTypeLabel(type);
@@ -956,7 +2105,7 @@ function renderCurrentModels(currentByType) {
         <div><strong>${escapeHtml(title)}</strong><br><span class="note">${escapeHtml(c.name || '未配置')} · ${escapeHtml(c.model || '未填写')}</span></div>
         <span class="badge ${enabled && c.model ? 'active' : 'warn'}">${status}</span>
       </div>
-      <div class="note">接口：${escapeHtml(c.base_url || '未填写')}<br>API Key：${c.has_api_key ? '已保存（' + escapeHtml(c.api_key_masked) + '）' : '未填写'}${type === 'chat' ? `<br>参数：温度 ${escapeHtml(c.temperature ?? '')}，重复惩罚 ${escapeHtml(c.frequency_penalty ?? '')}，最大输出 ${escapeHtml(c.max_tokens ?? '')}` : ''}</div>
+      <div class="note">接口：${escapeHtml(c.base_url || '未填写')}<br>API Key：${c.has_api_key ? '已保存（' + escapeHtml(c.api_key_masked) + '）' : '未填写'}${type === 'embedding' ? `<br>向量索引：${escapeHtml(c.indexed_entries ?? 0)} 条（启用后按空闲策略构建）` : ''}${type === 'chat' ? `<br>参数：温度 ${escapeHtml(c.temperature ?? '')}，重复惩罚 ${escapeHtml(c.frequency_penalty ?? '')}，最大输出 ${escapeHtml(c.max_tokens ?? '')}` : ''}</div>
     </div>`;
   }).join('');
 }
@@ -966,7 +2115,7 @@ function modelTypeLabel(type) {
   return '聊天模型';
 }
 function modelTypeCanActivate(type) {
-  return type === 'chat' || type === 'vision';
+  return type === 'chat' || type === 'vision' || type === 'embedding';
 }
 function renderProviderSelectors() {
   const providers = window._providerCatalog || [];
@@ -1502,7 +2651,11 @@ async function loadMemory() {
   });
   const planItems = (proactive.schedule || {}).items || [];
   const eligibleCount = planItems.filter(item=>item.eligible).length;
-  $('memoryInfo').textContent = `记忆文件：${m.path}，显示对象：${m.conversations}，底层记录：${m.raw_conversations || m.conversations}；主动计划入选 ${eligibleCount}/${planItems.length}`;
+  const retrieval = m.retrieval || {};
+  const retrievalText = retrieval.ready
+    ? `；检索索引：FTS5 已就绪（${retrieval.entries || 0} 条）`
+    : '；检索索引：将在下一次聊天时轻量建立';
+  $('memoryInfo').textContent = `记忆文件：${m.path}，显示对象：${m.conversations}，底层记录：${m.raw_conversations || m.conversations}；主动计划入选 ${eligibleCount}/${planItems.length}${retrievalText}`;
   renderMemoryRows();
 }
 function formatScore(value) {
@@ -1552,6 +2705,12 @@ function memoryMatchesFilter(item) {
   if(filter === 'group' && item.kind !== 'group') return false;
   if(filter === 'member' && item.kind !== 'member') return false;
   if(filter === 'important' && !(item.memory_counts && item.memory_counts.total > 0)) return false;
+  if($('memoryImportantOnly')?.checked && !(item.memory_counts && item.memory_counts.total > 0)) return false;
+  if($('memoryRecentOnly')?.checked) {
+    const raw = Number(item.last_user_at || 0);
+    const seconds = raw > 100000000000 ? raw / 1000 : raw;
+    if(!seconds || (Date.now() / 1000 - seconds) > 7 * 86400) return false;
+  }
   const q = ($('memorySearch')?.value || '').trim().toLowerCase();
   if(!q) return true;
   return String(item.searchable || '').toLowerCase().includes(q);
@@ -1572,12 +2731,21 @@ function renderMemoryRows() {
       </td>
       <td class="memory-summary">${escapeHtml(x.summary || '暂无可读摘要')}</td>
       <td>
-        <div class="memory-score">${x.kind==='group' ? `活跃度 ${formatScore(x.activity)} · ${escapeHtml(x.activity_label || '普通')}` : `好感 ${formatScore(x.affection)} · ${escapeHtml(x.affection_label || '普通')}`}</div>
+        <div class="memory-score">${x.kind==='group' ? `活跃度 ${formatScore(x.activity)} · ${escapeHtml(x.activity_label || '普通')}` : `好感 ${formatScore(x.affection)} · ${escapeHtml(x.affection_label || '普通')} · ${escapeHtml(x.trust_label || '观察中')}`}</div>
+        ${x.kind==='group' ? '' : `<div class="memory-meta">信任：${escapeHtml(x.trust_label || '观察中')}</div>`}
         ${renderMemoryPlan(x)}
-        <div class="memory-meta" style="margin-top:6px">消息 ${x.messages||0} · 记忆 ${(x.memory_counts||{}).total||0}${x.related_count ? ' · 来源 ' + x.related_count : ''}</div>
+        <div class="memory-meta" style="margin-top:6px">消息 ${x.messages||0} · L1 ${((x.memory_counts||{}).l1)||0} · L2 ${((x.memory_counts||{}).l2)||0} · L3 ${((x.memory_counts||{}).l3)||0}${((x.memory_counts||{}).candidates) ? ' · 待确认 ' + x.memory_counts.candidates : ''}${x.related_count ? ' · 来源 ' + x.related_count : ''}</div>
       </td>
-      <td><button class="ghost" onclick="openMemory('${escapeHtml(x.id)}')">详情 / 编辑</button></td>
-    </tr>`).join('') || '<tr><td colspan="4"><div class="empty">没有匹配的记忆。</div></td></tr>';
+      <td><div class="row" style="margin-top:0"><button class="ghost" onclick="toggleMemoryInline(this)">展开</button><button class="ghost" onclick="openMemory('${escapeHtml(x.id)}')">详情 / 编辑</button></div></td>
+    </tr>
+    <tr class="memory-inline-row" style="display:none"><td colspan="4"><div class="natural-box"><strong>${escapeHtml(x.display_name || x.id)}</strong><br>${escapeHtml(x.summary || '暂无可读摘要')}<br><span class="memory-meta">${escapeHtml(x.type || '')} · L1 ${((x.memory_counts||{}).l1)||0} · L2 ${((x.memory_counts||{}).l2)||0} · L3 ${((x.memory_counts||{}).l3)||0}</span></div></td></tr>`).join('') || '<tr><td colspan="4"><div class="empty">没有匹配的记忆。</div></td></tr>';
+}
+function toggleMemoryInline(button) {
+  const row = button.closest('tr')?.nextElementSibling;
+  if(!row) return;
+  const open = row.style.display !== 'none';
+  row.style.display = open ? 'none' : 'table-row';
+  button.textContent = open ? '展开' : '收起';
 }
 async function openMemory(id) {
   if(memoryDirty && !confirm('当前记忆有未保存修改，确定切换吗？')) return;
@@ -1603,7 +2771,7 @@ function showMemoryPane(event, id) {
   activeMemoryPane = id;
   document.querySelectorAll('.mini-tab').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.memory-pane').forEach(p=>p.style.display='none');
-  event.target.classList.add('active'); $(id).style.display = 'block';
+  (event.currentTarget || event.target).classList.add('active'); $(id).style.display = 'block';
 }
 function setSaveState(text, dirty) {
   memoryDirty = dirty;
@@ -1616,14 +2784,15 @@ function markMemoryDirty() {
 }
 function structuredMemory() {
   selectedMemoryContent.structured_memory = selectedMemoryContent.structured_memory || {};
-  for (const key of ['l1','l2','candidates']) {
+  for (const key of ['l1','l2','l3','candidates']) {
     if(!Array.isArray(selectedMemoryContent.structured_memory[key])) selectedMemoryContent.structured_memory[key] = [];
   }
   return selectedMemoryContent.structured_memory;
 }
 function memoryEntryLayerForPane() {
   if(activeMemoryPane === 'memoryEvents') return 'l2';
-  if(activeMemoryPane === 'memoryProfile' || activeMemoryPane === 'memoryStyle') return 'l1';
+  if(activeMemoryPane === 'memoryHistory') return 'l3';
+  if(activeMemoryPane === 'memoryProfile') return 'l1';
   return 'l1';
 }
 function formatMemoryTime(value) {
@@ -1633,7 +2802,7 @@ function formatMemoryTime(value) {
 }
 function memoryCountText(counts) {
   counts = counts || {};
-  return `长期 ${counts.l1 || 0} / 事件 ${counts.l2 || 0} / 待确认 ${counts.candidates || 0}`;
+  return `L1 ${counts.l1 || 0} / L2 ${counts.l2 || 0} / L3 ${counts.l3 || 0} / 待确认 ${counts.candidates || 0}`;
 }
 function renderFactGrid(items) {
   return `<div class="fact-grid">${items.map(item=>`
@@ -1645,10 +2814,19 @@ function renderRelationshipControls() {
   const override = ['allow','deny'].includes(selectedMemoryContent.proactive_override)
     ? selectedMemoryContent.proactive_override
     : 'auto';
+  const trustTier = ['approved','trusted','blocked'].includes(selectedMemoryContent.trust_tier)
+    ? selectedMemoryContent.trust_tier
+    : 'probation';
   return `<div class="relationship-controls">
     <h3>关系与主动互动</h3>
     <div class="grid">
       ${isPerson ? `<label>好感度（0–100）<input id="memoryAffectionScore" type="number" min="0" max="100" step="0.1" value="${escapeHtml(selectedMemoryContent.affection_score ?? 0)}"></label>` : ''}
+      ${isPerson ? `<label>账号信任层级<select id="memoryTrustTier">
+        <option value="probation" ${trustTier==='probation'?'selected':''}>观察中（仅响应消息）</option>
+        <option value="approved" ${trustTier==='approved'?'selected':''}>白名单</option>
+        <option value="trusted" ${trustTier==='trusted'?'selected':''}>可信用户</option>
+        <option value="blocked" ${trustTier==='blocked'?'selected':''}>屏蔽回复</option>
+      </select></label>` : ''}
       ${!isPerson ? `<label>群聊活跃度（0–100）<input id="memoryGroupActivityScore" type="number" min="0" max="100" step="0.1" value="${escapeHtml(selectedMemoryContent.group_activity_score ?? 0)}"></label>` : ''}
       <label>主动互动<select id="memoryProactiveOverride">
         <option value="auto" ${override==='auto'?'selected':''}>跟随全局策略</option>
@@ -1665,6 +2843,7 @@ async function saveRelationshipControls() {
   const override = $('memoryProactiveOverride')?.value || 'auto';
   const scoreInput = $('memoryAffectionScore');
   const activityInput = $('memoryGroupActivityScore');
+  const trustTier = $('memoryTrustTier')?.value || 'probation';
   const score = scoreInput ? Number(scoreInput.value) : null;
   const activity = activityInput ? Number(activityInput.value) : null;
   if(scoreInput && (!Number.isFinite(score) || score < 0 || score > 100)) {
@@ -1678,7 +2857,8 @@ async function saveRelationshipControls() {
       id:currentMemoryId,
       affection_score:score,
       group_activity_score:activity,
-      proactive_override:override
+      proactive_override:override,
+      trust_tier:trustTier
     })});
     const relationship = result.relationship || {};
     if(scoreInput) {
@@ -1689,6 +2869,7 @@ async function saveRelationshipControls() {
       selectedMemoryContent.group_activity_score = relationship.group_activity_score;
     }
     selectedMemoryContent.proactive_override = relationship.proactive_override || 'auto';
+    if(scoreInput) selectedMemoryContent.trust_tier = relationship.trust_tier || 'probation';
     await loadMemory();
     const summary = (window._memoryItems || []).find(item=>item.id===currentMemoryId);
     if(summary) selectedMemory.affection_label = summary.affection_label;
@@ -1709,7 +2890,8 @@ function renderPersonOverview(counts) {
       {label:'底层保存位置', value:selectedMemory.storage_id || currentMemoryId},
       {label:'来源记录', value:String(sources.length || 1)},
       {label:'消息数量', value:String(selectedMemoryContent.message_count || 0)},
-      {label:'结构化记忆', value:memoryCountText(counts)},
+      {label:'L1 / L2 / L3', value:`${counts.l1 || 0} / ${counts.l2 || 0} / ${counts.l3 || 0}`},
+      {label:'待确认特点', value:String(counts.candidates || 0)},
       {label:'最近互动', value:formatMemoryTime(selectedMemoryContent.last_user_at)},
       {label:'亲密状态', value:`${selectedMemory.affection_label || '普通'}（好感 ${formatScore(selectedMemoryContent.affection_score)}）`},
       {label:'历史条数', value:String(selectedMemory.history_count || 0)}
@@ -1755,10 +2937,9 @@ function renderMemoryModal() {
     </div>
     ${renderRelationshipControls()}
     <p class="note">编辑下面的档案、事件、习惯或最近聊天后，点击底部“保存修改”。保存前会自动备份。</p>`;
-  $('memoryProfile').innerHTML = renderEntryEditor('l1', ['profile_fact','interest','preference','habit'], '用户档案、兴趣与习惯');
-  $('memoryEvents').innerHTML = renderEntryEditor('l2', ['event','schedule','important_interaction'], '事件、日程与重要互动');
-  $('memoryStyle').innerHTML = renderEntryEditor('l1', ['communication_style'], '聊天习惯') + renderRulesEditor();
-  $('memoryHistory').innerHTML = renderHistoryEditor();
+  $('memoryProfile').innerHTML = renderEntryEditor('l1', ['profile_fact','interest','preference','habit','communication_style'], 'L1 已确认的用户特点') + renderEntryEditor('candidates', ['profile_fact','interest','preference','habit','communication_style'], 'L1 待确认特点') + renderRulesEditor();
+  $('memoryEvents').innerHTML = renderEntryEditor('l2', ['event','schedule','important_interaction'], 'L2 事件、日程与重要互动');
+  $('memoryHistory').innerHTML = renderEntryEditor('l3', ['session_context'], 'L3 当前会话上下文') + renderHistoryEditor() + '<p class="note">L3 是短上下文；完整消息历史单独展示，供画像提取和人工核对使用，不会把全部历史一次性塞进回复提示词。</p>';
   $('memoryRaw').innerHTML = `<p class="note">高级模式会直接保存整个会话 JSON。改错 JSON 会被拦截，不会写入。</p><textarea id="memoryRawEditor" class="json-editor" spellcheck="false">${escapeHtml(JSON.stringify(selectedMemoryContent, null, 2))}</textarea><div class="row"><button class="ghost" onclick="applyRawMemory()">应用 JSON 到编辑器</button></div>`;
 }
 function renderEntryEditor(layer, categories, title) {
@@ -1783,7 +2964,7 @@ function renderEntry(layer, index, entry) {
         <option value="sleeping" ${entry.state === 'sleeping'?'selected':''}>休眠</option>
       </select></label>
     </div>
-    <label>内容<textarea oninput="updateMemoryEntry('${layer}',${index},'value',this.value)">${escapeHtml(entry.value || '')}</textarea></label>
+    <label>内容<textarea oninput="updateMemoryEntry('${layer}',${index},'value',this.value)${layer === 'l3' ? "; updateMemoryEntry('l3'," + index + ",'text',this.value)" : ''}">${escapeHtml(entry.value || entry.text || '')}</textarea></label>
   </div>`;
 }
 function renderRulesEditor() {
@@ -1799,8 +2980,8 @@ function renderRulesEditor() {
 }
 function renderHistoryEditor() {
   const history = Array.isArray(selectedMemoryContent.history) ? selectedMemoryContent.history : [];
-  const recent = history.map((entry,index)=>({entry,index})).slice(-30).reverse();
-  return `<h3>最近聊天</h3><p class="note">可删除污染项，也可以修正明显错误文本。这里改的是记忆里的历史上下文，不会撤回 QQ 消息。</p>${recent.map(({entry,index})=>`
+  const recent = history.map((entry,index)=>({entry,index})).slice(-300).reverse();
+  return `<h3>完整消息历史（最多保留 300 条）</h3><p class="note">这里展示当前人物档案保留的完整消息窗口，包含用户和亚托莉的消息；可修正或删除记忆副本，不会撤回 QQ 消息。</p>${recent.map(({entry,index})=>`
     <div class="history-item">
       <div class="entry-head">
         <strong>${entry.role === 'assistant' ? '亚托莉' : '用户'} ${entry.nickname ? ' · ' + escapeHtml(entry.nickname) : ''}</strong>
@@ -1829,13 +3010,14 @@ function addMemoryEntryFromActivePane() {
   const memory = structuredMemory();
   let category = 'profile_fact';
   if(activeMemoryPane === 'memoryEvents') category = 'event';
-  if(activeMemoryPane === 'memoryStyle') category = 'communication_style';
+  if(activeMemoryPane === 'memoryHistory') category = 'session_context';
   const now = Math.floor(Date.now() / 1000);
   memory[layer].push({
     layer: layer.toUpperCase(),
     category,
     key: category + ':新记忆',
     value: '',
+    text: layer === 'l3' ? '' : undefined,
     confidence: layer === 'l1' ? 0.8 : 0.7,
     activity: 1.0,
     source: 'webui',
@@ -1959,13 +3141,16 @@ function populateVoiceCandidateSelects(data) {
     second.dataset.initialized = 'true';
   }
 }
-function useVoiceLanguageSample() {
-  const samples = {
+const voiceLanguageSamples = {
     zh:'主人，今天也请让我陪在你身边。',
     en:'Master, please let me stay by your side today.',
     ja:'マスター、今日もあなたのそばにいさせてください。'
-  };
-  $('testTtsText').value = samples[$('testTtsLanguage').value] || samples.zh;
+};
+function useVoicePreviewLanguageSample() {
+  $('voicePreviewText').value = voiceLanguageSamples[$('voicePreviewLanguage').value] || voiceLanguageSamples.zh;
+}
+function useVoiceLanguageSample() {
+  $('testTtsText').value = voiceLanguageSamples[$('testTtsLanguage').value] || voiceLanguageSamples.zh;
 }
 function encodeWaveFile(audioBuffer) {
   const channels = audioBuffer.numberOfChannels;
@@ -2113,7 +3298,26 @@ async function restartServices() {
   const r = await api('/api/restart', {method:'POST', body:'{}'});
   toast(r.message || r.error || '已执行');
 }
+function setupAdvancedAccordions() {
+  document.querySelectorAll('#advanced .accordion-section').forEach(section=>{
+    const heading = section.querySelector(':scope > .section-head') || section.querySelector(':scope > h3');
+    if(!heading) return;
+    section.classList.add('collapsed');
+    heading.setAttribute('role','button');
+    heading.setAttribute('tabindex','0');
+    const toggle = ()=>section.classList.toggle('collapsed');
+    heading.addEventListener('click', event=>{
+      if(event.target.closest('button')) return;
+      toggle();
+    });
+    heading.addEventListener('keydown', event=>{
+      if(event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+    });
+  });
+}
+setupAdvancedAccordions();
 loadStatus(); loadProfiles(); loadConfig(); loadReplyVoiceProbability(); loadProactive();
+setInterval(()=>{ if($('developer')?.classList.contains('active')) loadDeveloperLogs(); }, 3000);
 </script>
 </body>
 </html>"""

@@ -1,16 +1,18 @@
 $ErrorActionPreference = "SilentlyContinue"
 
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
-$NapCatDir = "C:\Path\To\NapCat"  # TODO: set your NapCat path
+$NapCatSearchRoots = @(
+    "D:\Tools\NapCat\OneKey",
+    (Join-Path $env:LOCALAPPDATA "NapCat")
+)
+$NapCatDir = ""
 $QQExe = "C:\Program Files\Tencent\QQNT\QQ.exe"
-$QQUin = "YOUR_BOT_QQ"
+$QQUin = ""
 $BotPort = 8765
 $OllamaPort = 11434
 $VoicePort = 8790
-$DefaultLocalModelsRoot = "C:\Path\To\Local\Models"  # TODO: set your models path
-$DefaultOllamaModelsPath = Join-Path $DefaultLocalModelsRoot "models"
-$DefaultAtriModelsPath = Join-Path $DefaultOllamaModelsPath "AI_ATRI"
-$AsciiAtriModelsPath = "C:\Path\To\AtriModels"  # TODO: set your AtriModels path
+$DefaultOllamaModelsPath = Join-Path $env:USERPROFILE ".ollama\models"
+$AsciiAtriModelsPath = "D:\AtriModels"
 $LogDir = Join-Path $ProjectDir "logs"
 $LogFile = Join-Path $LogDir "hidden-launcher.log"
 
@@ -50,6 +52,62 @@ function Get-ProjectEnvValue {
     }
     return ""
 }
+
+function Test-NapCatRuntimePath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $false
+    }
+    foreach ($name in @("NapCatWinBootMain.exe", "NapCatWinBootHook.dll", "napcat.mjs", "qqnt.json")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Path $name) -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Resolve-NapCatDir {
+    $configured = Get-ProjectEnvValue -Name "NAPCAT_DIR"
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        $configured = $env:NAPCAT_DIR
+    }
+    if (Test-NapCatRuntimePath -Path $configured) {
+        return (Resolve-Path -LiteralPath $configured).Path
+    }
+
+    $candidates = @()
+    foreach ($root in $NapCatSearchRoots) {
+        if (Test-NapCatRuntimePath -Path $root) {
+            $candidates += Get-Item -LiteralPath $root
+        }
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            continue
+        }
+        $patterns = @(
+            (Join-Path $root "NapCat*.Shell\versions\*\resources\app\napcat"),
+            (Join-Path $root "versions\*\resources\app\napcat")
+        )
+        foreach ($pattern in $patterns) {
+            $candidates += Get-ChildItem -Path $pattern -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-NapCatRuntimePath -Path $_.FullName }
+        }
+    }
+    $match = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    return if ($match) { $match.FullName } else { "" }
+}
+
+$configuredQQ = Get-ProjectEnvValue -Name "QQ_EXE"
+if ([string]::IsNullOrWhiteSpace($configuredQQ)) {
+    $configuredQQ = $env:QQ_EXE
+}
+if (-not [string]::IsNullOrWhiteSpace($configuredQQ)) {
+    $QQExe = $configuredQQ
+}
+$QQUin = Get-ProjectEnvValue -Name "BOT_QQ"
+if ([string]::IsNullOrWhiteSpace($QQUin)) {
+    $QQUin = $env:BOT_QQ
+}
+$NapCatDir = Resolve-NapCatDir
 
 function Get-OllamaModelsPath {
     $configured = Get-ProjectEnvValue -Name "OLLAMA_MODELS"
@@ -217,10 +275,11 @@ function Start-VoiceIfNeeded {
         Write-LauncherLog "Voice service already listening on $VoicePort."
         return
     }
+    $ollamaModelsPath = Get-OllamaModelsPath
     $runtimeCandidates = @(
         (Join-Path $ProjectDir "data\runtime\voice-runtime"),
-        (Join-Path $DefaultOllamaModelsPath "manifests\atri-runtime"),
-        (Join-Path $DefaultLocalModelsRoot "Speech\atri-runtime")
+        (Join-Path $ollamaModelsPath "manifests\atri-runtime"),
+        (Join-Path (Split-Path $ollamaModelsPath -Parent) "Speech\atri-runtime")
     )
     $runtimeRoot = $runtimeCandidates |
         Where-Object { Test-Path -LiteralPath (Join-Path $_ ".venv\Scripts\python.exe") } |
@@ -235,13 +294,24 @@ function Start-VoiceIfNeeded {
         Write-LauncherLog "Voice feature is enabled but its isolated runtime is not installed."
         return
     }
-    $modelRoot = if (Test-Path -LiteralPath $AsciiAtriModelsPath) { $AsciiAtriModelsPath } else { $DefaultAtriModelsPath }
+    $modelRoot = if (Test-Path -LiteralPath $AsciiAtriModelsPath) {
+        $AsciiAtriModelsPath
+    } else {
+        Join-Path $ollamaModelsPath "AI_ATRI"
+    }
     $env:MODELSCOPE_CACHE = Join-Path $modelRoot "voice\modelscope"
     $env:HF_HOME = Join-Path $modelRoot "voice\huggingface"
     $env:ATRI_ASR_PROVIDER = "sensevoice"
     $localSenseVoice = Join-Path $env:MODELSCOPE_CACHE "models\iic--SenseVoiceSmall\snapshots\master"
     $env:ATRI_ASR_MODEL = if (Test-Path -LiteralPath (Join-Path $localSenseVoice "model.pt")) { $localSenseVoice } else { "iic/SenseVoiceSmall" }
     $env:ATRI_ASR_DEVICE = "cpu"
+    $compatPath = Join-Path $ProjectDir "tools\voice\compat"
+    $existingPythonPath = $env:PYTHONPATH
+    $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($existingPythonPath)) {
+        $compatPath
+    } else {
+        $compatPath + [IO.Path]::PathSeparator + $existingPythonPath
+    }
     Write-LauncherLog "Starting isolated voice service in background."
     Start-Process -FilePath $pythonExe -ArgumentList "-m", "atri_voice_service" -WorkingDirectory $ProjectDir -WindowStyle Hidden | Out-Null
 }
@@ -256,6 +326,15 @@ function Start-NapCatIfNeeded {
     if (Test-NapCatBootRunning) {
         Write-LauncherLog "NapCat boot process is already running."
         Show-QQWindow -TimeoutSeconds 15
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($NapCatDir)) {
+        Write-LauncherLog "NapCat runtime was not found. Set NAPCAT_DIR in .env or install NapCat under a supported location."
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($QQUin) -or $QQUin -notmatch '^\d+$') {
+        Write-LauncherLog "BOT_QQ is missing or invalid in .env."
         return
     }
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import locale
 import subprocess
+import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,11 +28,17 @@ class DesktopPetStatus:
     webui_url: str
     onebot: str
     model: str
+    vision_model: str
     reply_mode: str
     bot_qq: int
+    napcat_state: str
+    napcat_detail: str
+    napcat_webui_url: str = ""
+    napcat_webui_reachable: bool = False
 
     @classmethod
     def from_runtime(cls, payload: dict[str, Any]) -> "DesktopPetStatus":
+        napcat_webui = payload.get("napcat_webui") or {}
         return cls(
             atri=bool(payload.get("atri")),
             napcat=bool(payload.get("napcat")),
@@ -38,8 +46,15 @@ class DesktopPetStatus:
             webui_url=str(payload.get("webui_url") or ""),
             onebot=str(payload.get("onebot") or ""),
             model=str(payload.get("model") or ""),
+            vision_model=str(payload.get("vision_model") or ""),
             reply_mode=str(payload.get("reply_mode") or ""),
             bot_qq=int(payload.get("bot_qq") or 0),
+            napcat_state=str(payload.get("napcat_state") or "disconnected"),
+            napcat_detail=str(payload.get("napcat_detail") or ""),
+            # 与项目 WebUI 使用同一份只读 NapCat 配置，链接含 Token，
+            # 仅在本机“状态详情”中展示，不能用于气泡或日志。
+            napcat_webui_url=str(napcat_webui.get("url") or ""),
+            napcat_webui_reachable=bool(napcat_webui.get("reachable")),
         )
 
 
@@ -85,6 +100,11 @@ class DesktopPetController:
 
 def _completed_output(completed: subprocess.CompletedProcess[bytes]) -> str:
     output = (completed.stdout or b"") + (completed.stderr or b"")
+    for encoding in ("utf-8", locale.getpreferredencoding(False)):
+        try:
+            return output.decode(encoding).strip()
+        except (LookupError, UnicodeDecodeError):
+            continue
     return output.decode("utf-8", errors="replace").strip()
 
 
@@ -108,16 +128,27 @@ def _stop_python_listener(port: int) -> subprocess.CompletedProcess[bytes]:
         }
     )
     if not pids:
-        return _completed_text(0, "Atri service is not running.")
+        return _completed_text(0, "Atri 当前未运行。")
 
     outputs: list[str] = []
     failed = 0
     for pid in pids:
-        completed = run_hidden(["taskkill.exe", "/PID", str(pid), "/F"])
+        completed = run_hidden(["taskkill.exe", "/PID", str(pid), "/T", "/F"])
         output = _completed_output(completed)
-        if completed.returncode == 0:
-            outputs.append(output or f"Stopped Atri python process: {pid}")
-        else:
+        if completed.returncode != 0:
             failed += 1
             outputs.append(output or f"Could not stop PID {pid}.")
+
+    if failed == 0:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if not any(
+                row["state"] == "LISTENING" and row["local_port"] == port
+                for row in tcp_rows()
+            ):
+                return _completed_text(0, "Atri 服务已停止。")
+            time.sleep(0.1)
+        outputs.append(f"停止命令已执行，但端口 {port} 仍在监听。")
+        failed = 1
+
     return _completed_text(0 if failed == 0 else 2, "\n".join(outputs))

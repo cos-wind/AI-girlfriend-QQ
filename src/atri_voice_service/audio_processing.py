@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 from uuid import uuid4
 
+from .process_utils import hidden_subprocess_options
+
 
 class AudioPreprocessError(RuntimeError):
     pass
@@ -86,6 +88,7 @@ def prepare_speech_audio(
             stderr=subprocess.PIPE,
             check=False,
             timeout=90,
+            **hidden_subprocess_options(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         output.unlink(missing_ok=True)

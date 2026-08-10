@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from atri_qq_bot.config import BotConfig
+from atri_qq_bot.retrieval import SemanticMemoryRepository
 from atri_qq_bot.runtime import MODEL_PROFILE_PATH, WEBUI_DIR
 from .config_admin import mask_secret, read_env, update_env
 
@@ -500,6 +501,33 @@ def current_vision_profile(config: BotConfig) -> dict[str, Any]:
     }
 
 
+def current_embedding_profile(config: BotConfig) -> dict[str, Any]:
+    """将记忆检索配置映射成和聊天/视觉一致的当前模型卡片。"""
+
+    model = str(getattr(config, "memory_embedding_model", "") or "")
+    native_base_url = str(
+        getattr(config, "memory_embedding_base_url", "http://127.0.0.1:11434") or ""
+    ).rstrip("/")
+    display_base_url = (
+        native_base_url if native_base_url.endswith("/v1") else native_base_url + "/v1"
+    )
+    try:
+        indexed_entries = SemanticMemoryRepository(config.memory_retrieval_path).embedding_count(model)
+    except Exception:
+        indexed_entries = 0
+    return {
+        "model_type": "embedding",
+        "name": infer_provider(display_base_url, model) if model else "未配置",
+        "base_url": display_base_url,
+        "model": model,
+        "enabled": bool(getattr(config, "memory_vector_enabled", False)),
+        "has_api_key": True,
+        "api_key_masked": "ollama",
+        "retrieval_enabled": bool(getattr(config, "memory_retrieval_enabled", True)),
+        "indexed_entries": indexed_entries,
+    }
+
+
 def profile_matches_current(profile: dict[str, Any], current: dict[str, Any], api_key: str | None) -> bool:
     return (
         str(profile.get("base_url") or "").rstrip("/") == str(current.get("base_url") or "").rstrip("/")
@@ -513,6 +541,7 @@ def model_profiles_payload(config: BotConfig) -> dict[str, Any]:
     current_by_type = {
         "chat": current_chat_profile(config),
         "vision": current_vision_profile(config),
+        "embedding": current_embedding_profile(config),
     }
     active_ids: dict[str, str] = {}
     for profile in profiles:
@@ -525,6 +554,12 @@ def model_profiles_payload(config: BotConfig) -> dict[str, Any]:
             profile, current_by_type["vision"], config.toolbox_vision_api_key
         ):
             active_ids["vision"] = str(profile.get("id") or "")
+        if (
+            model_type == "embedding"
+            and current_by_type["embedding"].get("enabled")
+            and profile_matches_current(profile, current_by_type["embedding"], "ollama")
+        ):
+            active_ids["embedding"] = str(profile.get("id") or "")
     return {
         "path": str(MODEL_PROFILE_PATH),
         "active_id": active_ids.get("chat", ""),
@@ -764,8 +799,22 @@ def activate_model_profile(profile_id: str) -> dict[str, Any]:
                 "TOOLBOX_VISION_MODEL": profile["model"],
             }
         )
+    elif model_type == "embedding":
+        base_url = str(profile["base_url"]).rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3].rstrip("/")
+        if "11434" not in base_url and str(profile.get("provider") or "").casefold() != "ollama":
+            raise ValueError("当前向量适配器使用 Ollama 原生接口，请选择本地 Ollama 向量模型")
+        update_env(
+            {
+                "MEMORY_RETRIEVAL_ENABLED": True,
+                "MEMORY_VECTOR_ENABLED": True,
+                "MEMORY_EMBEDDING_MODEL": profile["model"],
+                "MEMORY_EMBEDDING_BASE_URL": base_url,
+            }
+        )
     else:
-        raise ValueError("向量模型档案已保存，但当前项目还没有独立向量模型启用配置")
+        raise ValueError("不支持的模型类型")
     return profile
 
 

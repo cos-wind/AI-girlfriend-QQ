@@ -11,12 +11,22 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from atri_qq_bot.runtime.paths import MEMORY_BACKUP_DIR, MEMORY_PATH
+from atri_qq_bot.retrieval import SemanticMemoryRepository
 
 
 class MemoryAdmin:
-    def __init__(self, memory_path: Path = MEMORY_PATH, backup_dir: Path = MEMORY_BACKUP_DIR) -> None:
+    def __init__(
+        self,
+        memory_path: Path = MEMORY_PATH,
+        backup_dir: Path = MEMORY_BACKUP_DIR,
+        semantic_memory_path: Path | None = None,
+    ) -> None:
         self.memory_path = memory_path
         self.backup_dir = backup_dir
+        # WebUI 只读取索引状态；JSON 仍是这里所有编辑操作的唯一事实源。
+        self.semantic_memory_path = semantic_memory_path or memory_path.with_name(
+            "semantic_memory.sqlite3"
+        )
         self._lock = threading.RLock()
 
     def summary(self) -> dict[str, Any]:
@@ -44,6 +54,7 @@ class MemoryAdmin:
             "conversations": len(items),
             "raw_conversations": len(conversations),
             "items": items,
+            "retrieval": SemanticMemoryRepository(self.semantic_memory_path).status(),
         }
 
     def detail(self, query: str) -> dict[str, Any]:
@@ -89,6 +100,9 @@ class MemoryAdmin:
                 else conversations.get(storage_id)
             )
             content = normalize_manual_memory_content(storage_id, content)
+            # 标记编辑时刻，让消息链路中已经排队的旧画像提取结果不能覆盖
+            # 用户刚刚在 WebUI 删除/修正的内容；后续新消息仍可正常提取。
+            content["memory_manual_edit_at"] = time.time()
             removed_values = removed_person_values(previous, content)
             backup = self.backup("edit")
             conversations[storage_id] = content
@@ -107,6 +121,7 @@ class MemoryAdmin:
         affection_score: Any,
         proactive_override: Any,
         group_activity_score: Any = None,
+        trust_tier: Any = None,
     ) -> tuple[Path, dict[str, Any]]:
         with self._lock:
             data = self.load()
@@ -137,13 +152,18 @@ class MemoryAdmin:
                 item["affection_initialized"] = True
                 item["last_affection_idle_decay_at"] = time.time()
             item["proactive_override"] = normalize_proactive_override(proactive_override)
+            if not is_group:
+                item["trust_tier"] = normalize_trust_tier(trust_tier)
             backup = self.backup("relationship")
             self.write(data)
-            return backup, {
+            relationship = {
                 "affection_score": item.get("affection_score"),
                 "group_activity_score": item.get("group_activity_score"),
                 "proactive_override": item["proactive_override"],
             }
+            if not is_group:
+                relationship["trust_tier"] = item.get("trust_tier", "probation")
+            return backup, relationship
 
     def delete_conversation(self, conversation_id: str) -> Path:
         with self._lock:
@@ -159,10 +179,20 @@ class MemoryAdmin:
     def load(self) -> dict[str, Any]:
         if not self.memory_path.exists():
             return {"version": 2, "conversations": {}}
-        try:
-            data = json.loads(self.memory_path.read_text(encoding="utf-8-sig", errors="replace"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"记忆文件不是有效 JSON: {exc}") from exc
+        last_error: Exception | None = None
+        for attempt in range(4):
+            try:
+                data = json.loads(self.memory_path.read_text(encoding="utf-8-sig", errors="replace"))
+                break
+            except (PermissionError, OSError, json.JSONDecodeError) as exc:
+                last_error = exc
+                if attempt >= 3:
+                    if isinstance(exc, json.JSONDecodeError):
+                        raise ValueError(f"记忆文件不是有效 JSON: {exc}") from exc
+                    raise
+                time.sleep(0.03 * (attempt + 1))
+        else:  # pragma: no cover - defensive, loop either breaks or raises
+            raise ValueError(f"无法读取记忆文件: {last_error}")
         return data if isinstance(data, dict) else {"version": 2, "conversations": {}}
 
     def conversations(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -197,7 +227,14 @@ class MemoryAdmin:
                     break
                 target = self.backup_dir / f"users.webui-{reason}-{timestamp}-{millis:03d}-{index}.json"
             if self.memory_path.exists():
-                shutil.copy2(self.memory_path, target)
+                for attempt in range(4):
+                    try:
+                        shutil.copy2(self.memory_path, target)
+                        break
+                    except PermissionError:
+                        if attempt >= 3:
+                            raise
+                        time.sleep(0.03 * (attempt + 1))
             else:
                 target.write_text(json.dumps({"version": 2, "conversations": {}}, indent=2), encoding="utf-8")
             return target
@@ -223,12 +260,14 @@ def update_memory_relationship(
     affection_score: Any,
     proactive_override: Any,
     group_activity_score: Any = None,
+    trust_tier: Any = None,
 ) -> tuple[Path, dict[str, Any]]:
     return DEFAULT_MEMORY_ADMIN.update_relationship(
         conversation_id,
         affection_score,
         proactive_override,
         group_activity_score,
+        trust_tier,
     )
 
 
@@ -266,6 +305,8 @@ def memory_summary_item(
         "activity": item.get("group_activity_score"),
         "activity_label": group_activity_label(item.get("group_activity_score")),
         "proactive_override": normalize_proactive_override(item.get("proactive_override")),
+        "trust_tier": normalize_trust_tier(item.get("trust_tier")),
+        "trust_label": trust_tier_label(item.get("trust_tier")),
         "proactive_state": proactive_state,
         "proactive_blocked": proactive_blocked,
         "target": target,
@@ -315,7 +356,10 @@ def memory_detail_payload(
         "affection_label": affection_label(item.get("affection_score")),
         "activity_label": group_activity_label(item.get("group_activity_score")),
         "proactive_override": normalize_proactive_override(item.get("proactive_override")),
+        "trust_tier": normalize_trust_tier(item.get("trust_tier")),
+        "trust_label": trust_tier_label(item.get("trust_tier")),
         "memory_counts": memory_counts(item),
+        "layers": memory_layers(item),
         "history_count": len(item.get("history") or []),
         "content": item,
     }
@@ -441,7 +485,7 @@ def merged_structured_memory(
     conversations: dict[str, Any],
     related: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
-    result: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "candidates": []}
+    result: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "l3": [], "candidates": []}
     for bucket in ("l1", "l2", "candidates"):
         seen: set[str] = set()
         for key in related:
@@ -464,6 +508,17 @@ def merged_structured_memory(
                 copied.setdefault("source_conversation", key)
                 result[bucket].append(copied)
                 seen.add(identity)
+    # L3 是会话级上下文，人物档案只保留私聊主档案的窗口，不能把多个群聊上下文拼成一份。
+    private_key = next((key for key in related if key.startswith("private:")), "")
+    private_item = conversations.get(private_key)
+    if isinstance(private_item, dict):
+        structured = private_item.get("structured_memory")
+        if isinstance(structured, dict):
+            result["l3"] = [
+                dict(entry)
+                for entry in structured.get("l3", [])
+                if isinstance(entry, dict)
+            ][-8:]
     return result
 
 
@@ -576,13 +631,11 @@ def natural_memory_summary(item: dict[str, Any]) -> str:
 
 def natural_memory_detail(item: dict[str, Any]) -> str:
     lines: list[str] = []
-    structured = item.get("structured_memory") if isinstance(item.get("structured_memory"), dict) else {}
-    l1 = [m for m in structured.get("l1", []) if isinstance(m, dict)]
-    l2 = [m for m in structured.get("l2", []) if isinstance(m, dict)]
-    candidates = [m for m in structured.get("candidates", []) if isinstance(m, dict)]
+    layers = memory_layers(item)
+    l1 = layers["l1"]
+    l2 = layers["l2"]
+    candidates = layers["candidates"]
     rules = item.get("accepted_iteration_rules") if isinstance(item.get("accepted_iteration_rules"), list) else []
-    topics = item.get("topic_words") if isinstance(item.get("topic_words"), list) else []
-    history = item.get("history") if isinstance(item.get("history"), list) else []
 
     profile_lines = natural_memory_values(
         [
@@ -610,10 +663,6 @@ def natural_memory_detail(item: dict[str, Any]) -> str:
     if candidate_lines:
         lines.append("待确认偏好：" + "；".join(candidate_lines))
 
-    clean_topics = [shorten_plain(str(x), 18) for x in topics if useful_plain_text(str(x))][:8]
-    if clean_topics:
-        lines.append("常聊话题：" + "、".join(clean_topics))
-
     clean_rules = [
         shorten_plain(str(rule.get("rule") or ""), 42)
         for rule in rules
@@ -622,20 +671,78 @@ def natural_memory_detail(item: dict[str, Any]) -> str:
     if clean_rules:
         lines.append("用户明确要求：" + "；".join(clean_rules))
 
-    recent = []
-    for entry in history[-10:]:
-        if not isinstance(entry, dict):
-            continue
-        role = "用户" if entry.get("role") == "user" else "亚托莉"
-        text = clean_plain(str(entry.get("text") or ""))
-        if text:
-            recent.append(f"{role}：{shorten_plain(text, 40)}")
-    if recent:
-        lines.append("最近聊天：" + " / ".join(recent[-4:]))
-
     if not lines:
-        lines.append("暂无可读摘要。可以打开详情查看或编辑原始 JSON。")
+        lines.append("暂无已确认的 L1 用户特点或活跃的 L2 事件；L3 当前会话请打开对应分页查看。")
     return "\n".join(lines)
+
+
+def memory_layers(item: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """给 WebUI 返回严格按三级记忆定义分组的数据。
+
+    L1 只包含已经确认的用户特点；L2 只包含事件和日程；
+    L3 只包含滚动会话上下文。候选记忆单独返回，避免一次聊天被误显示成用户事实。
+    """
+    structured = item.get("structured_memory") if isinstance(item.get("structured_memory"), dict) else {}
+    l1 = [
+        entry
+        for entry in structured.get("l1", [])
+        if isinstance(entry, dict)
+        and _displayable_trait_entry(entry)
+    ]
+    l2 = [
+        entry
+        for entry in structured.get("l2", [])
+        if isinstance(entry, dict)
+        and entry.get("category") in {"event", "schedule", "important_interaction"}
+    ]
+    l3 = [entry for entry in structured.get("l3", []) if isinstance(entry, dict)]
+    if not l3:
+        # 兼容旧记忆文件：旧版本没有持久化 L3，暂时把最近 8 条历史映射为
+        # 会话上下文展示；它只进入 L3，不会进入用户特点或事件层。
+        history = item.get("history") if isinstance(item.get("history"), list) else []
+        for entry in history[-8:]:
+            if not isinstance(entry, dict):
+                continue
+            text = clean_plain(str(entry.get("text") or ""))
+            if not text:
+                continue
+            l3.append(
+                {
+                    "layer": "L3",
+                    "category": "session_context",
+                    "key": "历史兼容窗口",
+                    "text": text,
+                    "value": text,
+                    "role": entry.get("role") or "user",
+                    "at": entry.get("at"),
+                }
+            )
+    candidates = [
+        entry
+        for entry in structured.get("candidates", [])
+        if isinstance(entry, dict) and _displayable_trait_entry(entry)
+    ]
+    return {"l1": l1, "l2": l2, "l3": l3[-8:], "candidates": candidates}
+
+
+def _displayable_trait_entry(entry: dict[str, Any]) -> bool:
+    """过滤明显的模型回声、URL 和过长临时句，避免污染用户特点面板。"""
+    category = str(entry.get("category") or "")
+    value = clean_plain(str(entry.get("value") or ""))
+    if str(entry.get("state") or "active") in {"expired", "deleted", "rejected"}:
+        return False
+    if category not in {"profile_fact", "interest", "preference", "habit", "communication_style"}:
+        return False
+    if not useful_plain_text(value) or len(value) > 64:
+        return False
+    if any(marker in value for marker in ("你", "亚托莉", "http://", "https://", "...", "…")):
+        return False
+    if category == "communication_style" and not any(
+        marker in value
+        for marker in ("默认", "不要", "别", "回复偏好", "短句", "少铺垫", "有逻辑")
+    ):
+        return False
+    return True
 
 
 def natural_memory_values(memories: list[dict[str, Any]], limit: int = 5) -> list[str]:
@@ -682,13 +789,15 @@ def normalize_manual_memory_content(conversation_id: str, content: dict[str, Any
     normalized["proactive_override"] = normalize_proactive_override(
         normalized.get("proactive_override")
     )
+    if not is_group:
+        normalized["trust_tier"] = normalize_trust_tier(normalized.get("trust_tier"))
     structured = normalized.get("structured_memory")
     if not isinstance(structured, dict):
         structured = {}
     normalized["structured_memory"] = structured
     default_visibility = default_memory_visibility(conversation_id)
     now = time.time()
-    for layer in ("l1", "l2", "candidates"):
+    for layer in ("l1", "l2", "l3", "candidates"):
         entries = structured.get(layer)
         if not isinstance(entries, list):
             structured[layer] = []
@@ -699,6 +808,8 @@ def normalize_manual_memory_content(conversation_id: str, content: dict[str, Any
                 continue
             entry = dict(raw)
             category = clean_plain(str(entry.get("category") or "profile_fact")) or "profile_fact"
+            if layer == "l3":
+                category = "session_context"
             key = clean_plain(str(entry.get("key") or entry.get("memory_key") or category))
             value = clean_plain(str(entry.get("value") or ""))
             entry["category"] = category
@@ -721,6 +832,14 @@ def normalize_manual_memory_content(conversation_id: str, content: dict[str, Any
                 entry["confidence"] = clamp_float(entry.get("confidence"), 0.0, 1.0, 0.75)
                 entry["activity"] = clamp_float(entry.get("activity"), 0.0, 1.0, 1.0)
                 entry.setdefault("state", "active")
+            elif layer == "l3":
+                entry["layer"] = "L3"
+                entry["category"] = "session_context"
+                entry["text"] = clean_plain(str(entry.get("text") or value))
+                entry["value"] = entry["text"]
+                entry["key"] = key or "当前会话"
+                entry["memory_key"] = f"session_context:{entry['key']}"
+                entry["source"] = entry.get("source") or "webui"
             else:
                 entry["confidence"] = clamp_float(entry.get("confidence"), 0.0, 1.0, 0.75)
                 entry["evidence_count"] = max(1, int(as_float(entry.get("evidence_count")) or 1))
@@ -732,6 +851,20 @@ def normalize_manual_memory_content(conversation_id: str, content: dict[str, Any
 def normalize_proactive_override(value: Any) -> str:
     normalized = str(value or "auto").strip().lower()
     return normalized if normalized in {"auto", "allow", "deny"} else "auto"
+
+
+def normalize_trust_tier(value: Any) -> str:
+    normalized = str(value or "probation").strip().lower()
+    return normalized if normalized in {"probation", "approved", "trusted", "blocked"} else "probation"
+
+
+def trust_tier_label(value: Any) -> str:
+    return {
+        "probation": "观察中",
+        "approved": "白名单",
+        "trusted": "可信用户",
+        "blocked": "已屏蔽",
+    }[normalize_trust_tier(value)]
 
 
 def default_memory_visibility(conversation_id: str) -> str:
@@ -815,15 +948,19 @@ def remove_values_from_same_person_members(
 
 
 def memory_counts(item: dict[str, Any]) -> dict[str, int]:
+    layers = memory_layers(item)
+    l1 = layers["l1"]
+    l2 = layers["l2"]
+    # 旧 history 映射出的兼容 L3 只用于查看，不计入结构化记忆统计。
     structured = item.get("structured_memory") if isinstance(item.get("structured_memory"), dict) else {}
-    l1 = [m for m in structured.get("l1", []) if isinstance(m, dict)]
-    l2 = [m for m in structured.get("l2", []) if isinstance(m, dict)]
-    candidates = [m for m in structured.get("candidates", []) if isinstance(m, dict)]
+    l3 = [m for m in structured.get("l3", []) if isinstance(m, dict)]
+    candidates = layers["candidates"]
     return {
         "l1": len(l1),
         "l2": len(l2),
+        "l3": len(l3),
         "candidates": len(candidates),
-        "total": len(l1) + len(l2) + len(candidates),
+        "total": len(l1) + len(l2) + len(l3) + len(candidates),
     }
 
 

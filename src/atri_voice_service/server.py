@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import ctypes
 import json
+import os
 import threading
 from collections.abc import Coroutine
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +16,35 @@ from .config import VoiceServiceConfig
 
 
 MAX_REQUEST_BYTES = 1_000_000
+_VOICE_MUTEX_HANDLE: int | None = None
+
+
+def _acquire_single_instance() -> bool:
+    """防止不同 Python 环境同时加载一套语音模型，避免内存被重复占用。"""
+    if os.name != "nt":
+        return True
+    global _VOICE_MUTEX_HANDLE
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, "Global\\AtriVoiceService")
+    if not handle:
+        return True
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+    _VOICE_MUTEX_HANDLE = handle
+
+    def release() -> None:
+        global _VOICE_MUTEX_HANDLE
+        if _VOICE_MUTEX_HANDLE is None:
+            return
+        try:
+            kernel32.ReleaseMutex(_VOICE_MUTEX_HANDLE)
+            kernel32.CloseHandle(_VOICE_MUTEX_HANDLE)
+        finally:
+            _VOICE_MUTEX_HANDLE = None
+
+    atexit.register(release)
+    return True
 
 
 def _singing_job_id(path: str) -> str:
@@ -132,6 +164,9 @@ def create_server(config: VoiceServiceConfig | None = None) -> VoiceHttpServer:
 
 
 def main() -> None:
+    if not _acquire_single_instance():
+        print("[voice] Another ATRI voice service is already running.")
+        return
     config = VoiceServiceConfig.from_env()
     server = create_server(config)
     print(f"[voice] Listening on http://{config.host}:{config.port}")

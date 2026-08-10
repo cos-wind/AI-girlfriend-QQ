@@ -211,8 +211,11 @@ def candidate_tier(
     last_user_at = float(state.get("last_user_at") or 0)
     message_count = int(state.get("message_count", 0))
     override = str(state.get("proactive_override") or "auto").strip().lower()
+    trust_tier = str(state.get("trust_tier") or "probation").strip().lower()
     if override == "deny":
         return None, "已手动禁止主动互动"
+    if not is_group and not is_owner and trust_tier == "blocked":
+        return None, "用户已被屏蔽"
     if is_group:
         if override == "allow":
             return {
@@ -242,6 +245,8 @@ def candidate_tier(
             "daily_limit": int(policy.get("group_daily_limit", 2)),
         }, "已入选"
 
+    if not is_owner and trust_tier not in {"approved", "trusted"} and override != "allow":
+        return None, "尚未加入主动互动白名单"
     affection = float(state.get("affection_score", 0))
     tier = tier_for_affection(policy, affection)
     if override == "allow" and tier:

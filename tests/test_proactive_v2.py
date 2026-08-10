@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import random
 from datetime import datetime, timedelta, timezone
@@ -31,7 +31,7 @@ def test_proactive_generation_skips_instead_of_using_template_without_model(
     tmp_path: Path,
 ) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="smart",
@@ -55,7 +55,7 @@ def test_proactive_generation_skips_instead_of_using_template_without_model(
 
     assert result["text"] == ""
     assert result["source"] == "skipped-no-model"
-    assert "鏈厤缃亰澶╂ā鍨? in result["error"]
+    assert "未配置聊天模型" in result["error"]
 
 
 def test_policy_save_is_normalized_and_atomic(tmp_path: Path) -> None:
@@ -77,21 +77,21 @@ def test_policy_rejects_disabling_every_content_type() -> None:
     policy = default_proactive_policy()
     policy["content_weights"] = {key: 0 for key in policy["content_weights"]}
 
-    with pytest.raises(ValueError, match="鑷冲皯闇€瑕佸惎鐢?):
+    with pytest.raises(ValueError, match="至少需要启用"):
         normalize_proactive_policy(policy)
 
 
 def test_proactive_grounding_guard_detects_unperformed_experience_claims() -> None:
-    assert _needs_proactive_grounding_repair("杩欏皬绋嬪簭鎴戝垰鐐硅繘鍘荤湅浜嗕笅锛岃繕鎸烘湁鎰忔€?)
-    assert _needs_proactive_grounding_repair("璁╂垜鎯宠捣鑷繁鐢ㄧ孩鐭冲仛杩囪嚜鍔ㄧ偣姝屾満")
-    assert not _needs_proactive_grounding_repair("濡傛灉鐢ㄧ孩鐭冲仛鑷姩鐐规瓕鏈猴紝浣犱滑浼氬厛瑙ｅ喅鑺傚杩樻槸闊冲噯锛?)
+    assert _needs_proactive_grounding_repair("这小程序我刚点进去看了下，还挺有意思")
+    assert _needs_proactive_grounding_repair("让我想起自己用红石做过自动点歌机")
+    assert not _needs_proactive_grounding_repair("如果用红石做自动点歌机，你们会先解决节奏还是音准？")
 
 
 def test_topic_guidance_guard_requires_specific_response_entry() -> None:
-    assert _needs_topic_guidance_repair("杩欎釜琛ㄦ儏鍖呭緢閫傚悎鎷挎潵鎺ユ銆?, "guided_topic", True)
-    assert _needs_topic_guidance_repair("澶у鏈€杩戞€庝箞鏍凤紵", "guided_topic", True)
+    assert _needs_topic_guidance_repair("这个表情包很适合拿来接梗。", "guided_topic", True)
+    assert _needs_topic_guidance_repair("大家最近怎么样？", "guided_topic", True)
     assert not _needs_topic_guidance_repair(
-        "濡傛灉鍙兘鐣欎竴涓紭鐐癸紝浣犱滑浼氶€夊疄鐢ㄨ繕鏄湁瓒ｏ紵",
+        "如果只能留一个优点，你们会选实用还是有趣？",
         "guided_topic",
         True,
     )
@@ -132,7 +132,7 @@ def test_user_reply_clears_pending_plan_and_ignored_backoff(tmp_path: Path) -> N
     store.mark_proactive_sent(
         "private:10001",
         "check_in",
-        "鏉ョ湅鐪嬩綘銆?,
+        "来看看你。",
         "ai",
         "2026-07-13",
         now=1500,
@@ -140,7 +140,7 @@ def test_user_reply_clears_pending_plan_and_ignored_backoff(tmp_path: Path) -> N
     store.note_proactive_unanswered("private:10001")
     assert store.proactive_state("private:10001")["ignored_streak"] == 1
 
-    store.observe_user("private:10001", "鍒氬垰鍦ㄥ繖锛岀幇鍦ㄥ洖鏉ュ暒", now=1600)
+    store.observe_user("private:10001", "刚刚在忙，现在回来啦", now=1600)
     state = store.proactive_state("private:10001")
 
     assert state["next_at"] is None
@@ -182,8 +182,8 @@ def test_webui_merges_proactive_controls_and_plans_into_existing_pages() -> None
     assert 'id="proactivePrivateMinAffection"' in page
     assert 'id="proactiveScheduleRows"' not in page
     assert "proactive_plan" in page
-    assert "濂芥劅 ${formatScore(x.affection)}" in page
-    assert 'type="password" readonly aria-label="涓嬫涓诲姩娑堟伅鍙戦€佹椂闂?' in page
+    assert "好感 ${formatScore(x.affection)}" in page
+    assert 'type="password" readonly aria-label="下次主动消息发送时间"' in page
     assert "toggleProactiveTime(this)" in page
     assert "input.type = reveal ? 'text' : 'password'" in page
     assert 'id="memoryAffectionScore"' in page
@@ -229,11 +229,11 @@ def test_manual_proactive_override_has_priority_over_automatic_thresholds() -> N
     )
 
     assert private_tier is not None
-    assert private_reason == "宸叉墜鍔ㄥ厑璁?
+    assert private_reason == "已手动允许"
     assert group_tier is not None
-    assert group_reason == "宸叉墜鍔ㄥ厑璁?
+    assert group_reason == "已手动允许"
     assert denied_tier is None
-    assert denied_reason == "宸叉墜鍔ㄧ姝富鍔ㄤ簰鍔?
+    assert denied_reason == "已手动禁止主动互动"
 
 
 def test_manual_allow_bypasses_owner_only_candidate_filter(tmp_path: Path) -> None:
@@ -254,7 +254,7 @@ def test_manual_allow_bypasses_owner_only_candidate_filter(tmp_path: Path) -> No
     forced = next(item for item in items if item["target_id"] == 20001)
 
     assert forced["eligible"] is True
-    assert forced["eligibility_reason"] == "宸叉墜鍔ㄥ厑璁?
+    assert forced["eligibility_reason"] == "已手动允许"
 
 
 def test_only_active_high_affection_non_owner_is_eligible(tmp_path: Path) -> None:
@@ -264,17 +264,18 @@ def test_only_active_high_affection_non_owner_is_eligible(tmp_path: Path) -> Non
         conversation_id = f"private:{user_id}"
         store.remember_target(conversation_id, {"message_type": "private", "user_id": user_id})
         for index in range(5):
-            store.observe_user(conversation_id, f"绗?{index} 鏉℃椿璺冩秷鎭?, now=now.timestamp() + index)
+            store.observe_user(conversation_id, f"第 {index} 条活跃消息", now=now.timestamp() + index)
         store.set_affection(conversation_id, affection)
+        store.set_trust_tier(conversation_id, "approved")
 
     planner = ProactivePlanner(store, (), rng=random.Random(5))
     items = planner.status(default_proactive_policy(), now)["items"]
     by_id = {item["target_id"]: item for item in items}
 
     assert by_id[20001]["eligible"] is False
-    assert by_id[20001]["eligibility_reason"] == "濂芥劅搴︽湭杈鹃棬妲?
+    assert by_id[20001]["eligibility_reason"] == "好感度未达门槛"
     assert by_id[20002]["eligible"] is True
-    assert by_id[20002]["eligibility_reason"] == "楂樺ソ鎰熸椿璺冪敤鎴?
+    assert by_id[20002]["eligibility_reason"] == "高好感活跃用户"
 
 
 def test_active_group_is_scheduled_and_new_group_message_resets_plan(tmp_path: Path) -> None:
@@ -287,7 +288,7 @@ def test_active_group_is_scheduled_and_new_group_message_resets_plan(tmp_path: P
         store.observe_group_message(
             group_id,
             40000 + index,
-            f"缇ら噷鐨勭 {index} 鏉″叕寮€璁ㄨ",
+            f"群里的第 {index} 条公开讨论",
             now=now.timestamp() + index,
             addressed_to_bot=index % 3 == 0,
         )
@@ -301,7 +302,7 @@ def test_active_group_is_scheduled_and_new_group_message_resets_plan(tmp_path: P
     store.observe_group_message(
         group_id,
         49999,
-        "鏂版秷鎭潵浜嗭紝搴旇閲嶆柊璁＄畻涓诲姩鏃堕棿",
+        "新消息来了，应该重新计算主动时间",
         now=(now + timedelta(minutes=2)).timestamp(),
     )
     assert store.proactive_state(
@@ -315,7 +316,7 @@ def test_group_generation_uses_public_group_context_and_guides_topic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = BotConfig(
-        bot_qq=111111111,
+        bot_qq=100000001,
         host="127.0.0.1",
         port=8765,
         reply_mode="smart",
@@ -327,7 +328,7 @@ def test_group_generation_uses_public_group_context_and_guides_topic(
         memory_path=tmp_path / "users.json",
     )
     engine = AtriReplyEngine(config)
-    engine.memory.observe_user("private:50001", "杩欐槸涓嶈兘鍑虹幇鍦ㄧ兢閲岀殑绉佸瘑鍐呭", now=1000)
+    engine.memory.observe_user("private:50001", "这是不能出现在群里的私密内容", now=1000)
     engine.memory.remember_target(
         "group:60001",
         {"message_type": "group", "group_id": 60001},
@@ -335,8 +336,8 @@ def test_group_generation_uses_public_group_context_and_guides_topic(
     engine.memory.observe_group_message(
         60001,
         50001,
-        "缇ら噷鍒氭墠鍦ㄨ璁哄涔犳柟娉?,
-        nickname="缇ゅ弸鐢?,
+        "群里刚才在讨论学习方法",
+        nickname="群友甲",
         now=1100,
     )
     captured: dict[str, object] = {"calls": 0}
@@ -345,8 +346,8 @@ def test_group_generation_uses_public_group_context_and_guides_topic(
         captured["calls"] = int(captured["calls"]) + 1
         captured["messages"] = payload["messages"]
         if captured["calls"] == 1:
-            return {"choices": [{"message": {"content": "鎴戝垰鐐硅繘鍘荤湅浜嗕笅銆傚鏋滃彧鑳芥敼涓€涓涔犱範鎯紝浣犱滑浼氬厛鏀瑰摢涓€涓紵"}}]}
-        return {"choices": [{"message": {"content": "濡傛灉鍙兘鏀逛竴涓涔犱範鎯紝浣犱滑浼氬厛鏀规椂闂村畨鎺掕繕鏄鐩樻柟寮忥紵"}}]}
+            return {"choices": [{"message": {"content": "我刚点进去看了下。如果只能改一个学习习惯，你们会先改哪一个？"}}]}
+        return {"choices": [{"message": {"content": "如果只能改一个学习习惯，你们会先改时间安排还是复盘方式？"}}]}
 
     monkeypatch.setattr(engine, "_post_chat_completion", fake_post)
     result = asyncio.run(
@@ -361,11 +362,11 @@ def test_group_generation_uses_public_group_context_and_guides_topic(
 
     assert result["source"] == "ai-reviewed"
     assert captured["calls"] == 2
-    assert "鐐硅繘鍘? not in result["text"]
-    assert "缇ら噷鍒氭墠鍦ㄨ璁哄涔犳柟娉? in prompt
-    assert "杩欐槸涓嶈兘鍑虹幇鍦ㄧ兢閲岀殑绉佸瘑鍐呭" not in prompt
-    assert "鍙兘浣跨敤涓婇潰鍒楀嚭鐨勭兢鑱婂叕寮€鍐呭" in prompt
-    assert "浣庨棬妲涘洖搴旀柟鍚? in prompt
-    assert "鏈€杩戞€庝箞鏍? in prompt
-    assert "杩戞湡鍏抽敭璇? not in prompt
-    assert "鍙湁鏍囪涓衡€滅敤鎴封€濈殑鍘熻瘽" in prompt
+    assert "点进去" not in result["text"]
+    assert "群里刚才在讨论学习方法" in prompt
+    assert "这是不能出现在群里的私密内容" not in prompt
+    assert "只能使用上面列出的群聊公开内容" in prompt
+    assert "低门槛回应方向" in prompt
+    assert "最近怎么样" in prompt
+    assert "近期关键词" not in prompt
+    assert "只有标记为“用户”的原话" in prompt

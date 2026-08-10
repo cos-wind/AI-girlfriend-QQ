@@ -13,6 +13,20 @@ from atri_qq_bot.stickers import IMAGE_EXTENSIONS
 def sticker_summary() -> dict[str, Any]:
     STICKER_ROOT.mkdir(parents=True, exist_ok=True)
     folders = []
+    root_files = [
+        sticker_file_payload(path)
+        for path in sorted(STICKER_ROOT.iterdir(), key=lambda p: p.name.lower())
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    ]
+    if root_files:
+        folders.append(
+            {
+                "name": "根目录",
+                "count": len(root_files),
+                "path": str(STICKER_ROOT),
+                "files": root_files[:80],
+            }
+        )
     for child in sorted(STICKER_ROOT.iterdir(), key=lambda p: p.name.lower()):
         if not child.is_dir():
             continue

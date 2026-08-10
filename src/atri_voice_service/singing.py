@@ -14,6 +14,8 @@ class SingingStatus:
     enabled: bool
     clips: int
     engine: str
+    root: str
+    references: tuple[dict[str, str], ...]
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -21,6 +23,8 @@ class SingingStatus:
             "ready": self.clips > 0,
             "clips": self.clips,
             "engine": self.engine,
+            "root": self.root,
+            "references": list(self.references),
         }
 
 
@@ -32,10 +36,13 @@ class OriginalSingingProvider:
         self.enabled = bool(enabled)
 
     def status(self) -> dict[str, object]:
+        references = self.library.singing_references()
         return SingingStatus(
             enabled=self.enabled,
-            clips=self.library.singing_count(),
+            clips=len(references),
             engine="original_clip",
+            root=str(self.library.root),
+            references=tuple(references),
         ).public_dict()
 
     async def synthesize(self, request: VoiceRequest) -> SynthesisResult:
