@@ -125,6 +125,100 @@ ws://127.0.0.1:8765/onebot
 
 然后用另一个 QQ 给机器人 QQ 发私聊消息，应该能收到亚托莉风格回复。
 
+## Windows 双端部署（Docker 聊天 + 宿主机语音）
+
+Windows 上推荐的结构：**聊天运行在 Docker**（NapCat + 亚托莉），**语音合成运行在宿主机**（GPT-SoVITS + `atri_voice_service`），两端通过 `host.docker.internal` 互通。
+
+```text
+QQ ⇄ NapCat(:6099) ⇄ atri-qq-bot(:8765)
+                        ↓
+      host.docker.internal:8790 (atri_voice_service)
+                        ↓
+              :9880 (GPT-SoVITS api_v2)
+```
+
+### 前置环境
+
+- Windows + Docker Desktop（需支持 `host.docker.internal` 与目录挂载）。
+- Python 3.11（完整安装，含 pip / venv）。
+- NVIDIA 显卡驱动；PyTorch 需与显卡型号匹配（RTX 50 系用 cu128，不要用旧的 cu124）。
+- 配好项目根 `.env`（`BOT_QQ` / `OWNER_QQ` / 模型 API）。
+
+### 宿主机一次性准备（模型与语音运行时）
+
+1. 下载 GPT-SoVITS 预训练模型与 ATRI 候选音色，放到 `data\models\AI_ATRI\voice\`（`base` + `candidates`）。
+2. 建立 ASCII 联接以规避中文路径问题：
+
+   ```powershell
+   New-Item -ItemType Junction -Path D:\AtriModels -Target "D:\本地大模型\models\AI_ATRI"
+   ```
+
+   > 脚本默认读取 `D:\本地大模型\models\AI_ATRI`，可用环境变量 `LOCAL_MODELS_ROOT` 覆盖。
+
+3. 安装 GPT-SoVITS 源码与虚拟环境到 `data\runtime\gpt-sovits\`（`tools/voice/download_gpt_sovits_source.py` + `tools/voice/install_gpt_sovits_runtime.py`）。
+4. 安装语音运行时（FunASR / SenseVoice + `atri_voice_service`）：
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\voice\setup-voice-runtime.ps1
+   ```
+
+### 日常启动顺序
+
+先启动宿主机语音，再启动 Docker 聊天：
+
+```powershell
+# 语音引擎
+powershell -ExecutionPolicy Bypass -File tools\voice\start-gpt-sovits.ps1    # → :9880
+powershell -ExecutionPolicy Bypass -File tools\voice\start-voice-service.ps1 # → :8790
+
+# QQ 机器人（聊天）
+cd deploy\docker
+docker compose up -d --build
+```
+
+`.env` 关键语音项：
+
+```env
+VOICE_ASR_ENABLED=true
+VOICE_TTS_ENABLED=true
+VOICE_SERVICE_URL=http://host.docker.internal:8790
+VOICE_PROFILE=atri-official-v2pro-curated        # 按你的候选音色档案填写
+VOICE_ZH_RESCUE_PROFILE=atri-official-v2pro-curated-gpt-e6
+```
+
+### NapCat 登录与接线
+
+1. 打开 NapCat WebUI（token 见 `docker logs napcat`）。
+2. 机器人 QQ 扫码登录。
+3. 反向 WebSocket 指向容器内地址：`ws://atri:8765/onebot`（同一 compose 网络内使用服务名）。
+4. 确认亚托莉已连接；管理面板：`http://127.0.0.1:8787`。
+
+### 验收
+
+- GPT-SoVITS：`http://127.0.0.1:9880` 可访问。
+- 语音服务：`http://127.0.0.1:8790/health` 返回 `{"ok": true, "ready": true}`。
+- WebUI「测试」页：ASR / TTS 试听通过。
+- QQ 私聊发「用语音回复我」应收到语音；合成失败会自动降级为文字，不影响主聊天。
+
+### 停止
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\voice\stop-gpt-sovits.ps1
+powershell -ExecutionPolicy Bypass -File tools\voice\stop-voice-service.ps1
+cd deploy\docker; docker compose down
+```
+
+### 常见踩坑（已实测处理）
+
+| 问题 | 处理 |
+|------|------|
+| Docker 读不到宿主机合成文件 | 挂载 `E:\...\data\... → /app/data/...`，NapCat 侧用 `base64://` 发送 |
+| 全量 `docker build` 太慢 | 项目根加 `.dockerignore`，排除 `models` / `runtime` / `cache` |
+| 改代码不想等重建 | `docker cp` 进容器后 `docker restart atri-qq-bot` |
+| torchcodec / 音频加载失败 | 语音兼容层回退 `soundfile` |
+
+日常重启只需：GPT-SoVITS → voice service → `docker compose up -d`。
+
 ## 配置项
 
 `.env` 中常用配置：
@@ -253,3 +347,4 @@ python -m pytest
 完整的服务关系、端口、NapCat WebUI、日志、依赖与故障排查见 [DEVELOPER.md](DEVELOPER.md)。
 
 主运行环境由 [requirements.txt](requirements.txt) 锁定：`httpx` 用于模型/API 请求，`websockets` 用于 OneBot 反向连接，`python-dotenv` 读取配置，`Pillow`/`rapidocr`/`onnxruntime` 处理图像与 OCR，`pypdf` 解析 PDF，`imageio-ffmpeg` 抽取视频帧；`pytest` 仅用于开发回归测试。语音与歌唱使用隔离运行时，不应混装进主 `.venv`。
+
