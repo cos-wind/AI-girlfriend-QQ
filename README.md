@@ -17,50 +17,57 @@
 | `v0.2` | **v0.2** | 包结构重构与 LLM Function Calling 工具系统 |
 | `v0.1-original` | **v0.1** | 原始扁平文件版本，仅作历史存档 |
 
-## v0.4 版本说明
+## v0.4 技术框架与版本变化
 
-v0.4 的重点不是简单增加模型接口，而是把 ATRI 从“能聊天的 QQ Bot”推进为具备持续状态、质量反馈和可扩展外围能力的陪伴系统。所有本地状态默认留在 `data/`，通过 `.env` 配置，公开仓库只保存代码、文档和示例配置。
+v0.4 在 v0.3 的聊天、RAG、工具调用和语音能力上，增加了“状态连续性—回复质量—外围能力”三条旁路，并把原先集中在少数大文件中的逻辑拆成可测试模块。核心原则是：实时回复链路优先可用，认知、评测、总结和自动化失败时可以独立降级。
 
-### 1. 持续认知内核
+### 技术栈总览
 
-- `src/atri_qq_bot/cognition/` 提供目标、情绪、自我经历和上下文承接的结构化状态。
-- 默认使用影子模式：认知过程可以观察和更新状态，但不替代正常回复，不直接发送 QQ 消息，也不执行副作用工具。
-- 状态写入独立 SQLite；路径由 `COGNITION_STATE_PATH` 配置，运行数据不会进入 Git。
+| 层级 | v0.4 实现 | 主要职责 |
+|------|-----------|----------|
+| 运行时 | Python 3.11、`asyncio`、`python-dotenv` | 异步任务、配置加载、后台服务生命周期 |
+| QQ 接入 | NapCat / OneBot v11、`websockets` 14、反向 WebSocket | 接收事件、会话排队、消息发送和健康检查 |
+| 应用编排 | `ConversationTurn`、`Protocol` collaborators、`TurnTrace` | 固定“上下文 → Agent → 交付计划”的单轮事务边界 |
+| 回复引擎 | `AtriReplyEngine`、OpenAI-compatible API、Tool Registry | 人格提示词、回复重写、Function Calling、失败降级 |
+| 记忆检索 | JSON 事实源、SQLite FTS5、可选 Ollama `bge-m3` | 分层记忆、语义召回、原作设定和用户上下文压缩 |
+| 认知内核 | LangGraph `StateGraph`、`CognitionKernel`、SQLite/WAL | 理解 → 能力提案 → 状态演化；当前以 shadow mode 安全运行 |
+| 质量旁路 | `InsightsRuntime`、SQLite、LLM evaluator、`jieba`、可选 `sentence-transformers` | 回复评测、群消息归档、主题聚类、日报/周报/月报 |
+| Web 管理 | Python `ThreadingHTTPServer` + `asyncio`、模块化 `page/` | 配置、记忆、模型、评测、群总结、音乐、语音和 QQ 空间页面 |
+| 语音与媒体 | 本机 HTTP voice service、GPT-SoVITS、Edge-TTS、SenseVoice、Pillow、RapidOCR、pypdf、ffmpeg | ASR/TTS、歌声工程、图片/OCR/PDF/视频处理 |
+| 资源治理 | 跨进程文件锁、优先级队列、Ollama 按需启动/卸载 | 协调聊天、用户媒体、视觉和后台任务对 GPU/内存的竞争 |
 
-### 2. 回复评测与群聊总结
+### v0.4 请求链路
 
-- `src/atri_qq_bot/insights/` 负责回复质量评测、群消息归档、主题聚类和总结生成。
-- 评测维度覆盖相关性、准确性、完整性、连贯性、忠实性与幻觉风险，并支持语义相似度辅助评分。
-- 群聊总结支持按日、周、月生成，独立后台 worker 不阻塞 QQ 回复；WebUI 提供评测趋势、总结和报告查看入口。
-- 相关安装、配置、隐私边界见 [`docs/insights.md`](docs/insights.md)。
+```text
+NapCat / OneBot
+      │ 反向 WebSocket
+      ▼
+OneBotServer ── 会话队列 / 防抖 / 健康检查
+      ▼
+ConversationTurn
+      ├─ ContextAssembler：记忆检索、视觉/文档/语音材料、人格上下文
+      ├─ AgentRunner：AtriReplyEngine、LLM Tool Registry、工具回执
+      └─ DeliveryPlanner：文本拆分、语音/图片/音乐动作、OneBot 投递
+             │
+             ├── CognitionKernel（LangGraph shadow state）
+             └── InsightsRuntime（异步归档、评测、群聊总结）
+```
 
-### 3. QQ 空间扩展
+### 相比 v0.3 的新增功能与技术优化
 
-- `plugins/qqzone/` 提供可选的 QQ 空间插件；`src/atri_webui/qzone_automation/` 提供人工确认和自动化规则管理。
-- 通过本机 OneBot Bridge 读取动态、执行点赞/评论等操作；默认关闭，必须显式启用。
-- QQ 空间 Cookie 只应保存在 Bridge 中，不能写入本项目 `.env`、数据库或 Git 历史。
+| 领域 | v0.3 状态 | v0.4 新增/优化 | 结果 |
+|------|-----------|----------------|------|
+| 持续状态 | 主要依赖人格提示词、短期上下文和三层用户记忆 | 新增 `cognition/`；LangGraph 显式状态图连接理解节点与能力提案节点，`CognitionStateStore` 用 SQLite/WAL 保存目标、情绪、自我经历和未解决问题 | 有连续状态，但 shadow mode 不会越权发消息或执行副作用 |
+| 单轮编排 | OneBot 服务承载较多上下文、模型和投递逻辑 | 新增 `application/contracts.py` 与 `application/turn.py`，用 `ContextAssembler`、`AgentRunner`、`DeliveryPlanner` 三个 Protocol 解耦 | 模型、视觉、OneBot 适配器可替换，失败边界可单测 |
+| 记忆代码 | `memory.py` / `memory_parts/` 集中管理 | 拆为 `memory/`：`state`、`observation`、`extraction`、`profile_rules`、`affection_rules`、`proactive` 等职责模块 | 降低耦合，支持污染过滤、回填、关系状态和规则独立演进 |
+| OneBot 服务 | 连接、事件、投递、主动规划集中在单体服务 | 拆为 `onebot/server_parts/` mixins；加入每会话队列、防抖合并、顺序投递、健康探测、视觉上下文 TTL 和资源失败降级 | 慢模型或媒体任务不再轻易打乱同一会话消息顺序 |
+| 回复质量 | 没有独立的系统化质量旁路 | 新增 `insights/`：异步 evaluation worker、SQLite store、六维 LLM 评测、语义评分和群聊主题聚类 | 评测/总结不阻塞主回复，可在 WebUI 追踪趋势 |
+| WebUI | 页面集中在单个 `page.py`，开发入口较重 | 拆成 `page/body_*`、`page/script_*` 和 `server_parts/handler_*`；新增评测、群总结、音乐、QQ 空间和用户目录页面 | 页面功能可以独立扩展和回归测试 |
+| QQ 空间 | v0.3 没有项目内扩展边界 | 新增 `plugins/qqzone/`、`qzone_admin.py` 和 `qzone_automation/`，通过本机 Bridge 执行，默认关闭 | Cookie 留在 Bridge，点赞/评论保留人工确认边界 |
+| 音乐与语音 | 语音/歌声能力已有，但运行入口和资源竞争更集中 | 新增 `music/library.py`、`music/session.py`、运行时服务和跨进程推理锁；Ollama 按需启动，模型请求后释放 | 语音、视觉、embedding 和聊天共享 GPU 时更可控 |
+| 发布与依赖 | 本地配置、运行数据和源码边界不够清晰 | 更新 `.env.example`、`.gitignore`、`uv.lock`；加入 LangGraph、SQLite checkpoint、Insights 可选依赖 | 开源仓库只保留可复现的源码、文档和示例配置 |
 
-### 4. 模块化架构升级
-
-- 记忆、人格、OneBot 服务端、工具箱和 WebUI 拆分为可独立测试的子模块。
-- 新增 `music/` 音乐会话、`runtime/` 运行时服务、`server_parts/` 事件与投递处理器，以及模块化 WebUI 页面。
-- 旧入口和重复启动链被清理，统一由桌宠/启动脚本负责启动，降低依赖重复安装和多进程冲突。
-
-### 5. 多模态、语音与歌声能力延续并增强
-
-- 保留 v0.3 的 RAG 记忆、联网搜索、Function Calling、文档/PDF/OCR/图片/视频工具箱。
-- 语音服务继续独立运行，支持 ASR、TTS、GPT-SoVITS、Edge-TTS 与质量降级；歌声工程支持人声分离、乐理分段、混音和质量检查。
-- `tools/voice/` 收纳训练、分析、推理和运行时脚本，避免把重型语音依赖混入主聊天环境。
-
-### 6. 开源发布安全
-
-- `.env.example` 只包含占位符和本地回环地址；真实 API Key、QQ 号、Cookie 不应提交。
-- `.gitignore` 排除 `.env`、SQLite、聊天历史、缓存、模型、音乐素材和本机 IDE 配置。
-- 文档中的用户目录、模型目录和媒体目录使用通用占位符，部署时按本机环境填写。
-
-### v0.3 基线
-
-v0.3 是 v0.4 的能力基础，首次形成了 RAG 记忆检索、LLM Agent 工具链、OneBot/NapCat 接入、语音/歌声服务、材料工具箱、主动关怀和 WebUI 管理面板。v0.4 在此基础上增加持续认知、质量评测、群聊总结、QQ 空间扩展和更细的模块边界。
+详细的评测、群聊总结和隐私配置见 [`docs/insights.md`](docs/insights.md)；语音运行时见 [`docs/voice.md`](docs/voice.md)。
 
 ---
 
@@ -87,26 +94,38 @@ NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/
 
 ## 当前完成内容
 
-- 监听 NapCat 反向 WebSocket 事件。
-- 默认绑定机器人 QQ：`.env` 中 `BOT_QQ` 配置。
-- 私聊自动回复；群聊默认仅在 @机器人、提到"亚托莉"或"atri"时回复。
-- 支持 OpenAI 兼容接口；没有 API Key 时使用本地人设兜底回复。
-- 私聊、群整体、群内用户分别保留聊天记录和对话特征，便于连续聊天和独立适配。
-- 群聊会读取群上下文；被 @ 或提到"亚托莉/atri"时按上下文回复。
-- 支持群聊低频冷场主动发言，默认冷场 90 分钟后才轻量插一句，单日单群最多 3 次。
-- 回复会自动拆成多条短句发送，模拟流式输出，避免长段刷屏。
-- 会记录用户聊天习惯，自动调整回复长短、节奏和表情频率。
-- 记忆分层沉淀：重要信息强化确认后进入长期记忆，长期无互动的记忆自动降权沉睡；支持语义检索召回历史相关记忆。
-- 支持自迭代纠错：用户指出错误时会自主判断，合理就认错改正，笼统就认一半并重答，越界或破坏人设的要求会傲娇拒绝。
-- 支持本地表情包：按情绪匹配图片，也支持自定义触发词。
-- 支持自动归档聊天记录里的图片/表情包，并从本地表情库主动发送。
-- 支持手机端直接发送的文档、表格、PDF、图片和视频材料：文档会抽取正文，表格会汇总字段/样例/数值概览，图片会调用本机视觉模型做基础识图和审美评价，视频会在能取得文件时抽取关键帧分析。
-- 支持空闲轻量主动关心，默认 3 小时空闲后最多半天提醒一次。
-- 支持每天早上 7:30 主动发送元气早安，带防重复和补发窗口。
-- 内置亚托莉原作设定摘要和梗库，回复前会做人设校验。
-- 已接入桌面原 QQ 图标联动启动：点击原有 `QQ.lnk` 后，后台监听器会接管并恢复 QQ 界面，亚托莉和模型服务在后台启动，不新增桌面图标，不弹终端窗口。
-- 🔧 **LLM Agent 工具系统**：模型可自主调用时间查询、联网搜索（自动读原文）、网页正文抓取，不需要时不产生任何 token 开销。
-- 🧠 **语音与歌声**：可选语音回复（TTS/ASR）、歌声合成（人声分离 + 工程混音），由独立语音服务承载。
+当前 `main` 对应 v0.4，以下按“核心链路、v0.4 新能力、既有能力、工程化优化”列出已实现内容：
+
+### 核心聊天链路
+
+- NapCat 通过 OneBot v11 反向 WebSocket 接入；支持私聊、群聊、@触发、回复策略、消息拆分和 OneBot action 投递。
+- `ConversationTurn` 固定单轮顺序：上下文组装 → Agent/工具调用 → 交付计划；工具调用写入 receipt，失败时禁止模型伪造成功结果。
+- 每个会话独立排队和防抖合并，配合健康探测、重连提示、超时和文字降级，避免慢模型或媒体任务造成消息乱序。
+- `AtriReplyEngine` 负责人格提示词、原作 lore、记忆上下文、语言护栏、纠错重写、群聊策略和最终回复质量门。
+
+### v0.4 新能力
+
+- **持续认知**：`cognition/` 使用 LangGraph `StateGraph` 建立“理解 → 能力提案”的显式拓扑；`CognitionKernel` 更新目标、情绪、自我经历、当前思考和未解决问题，SQLite/WAL 负责持久化。当前为 shadow mode，不直接产生副作用。
+- **回复评测**：`insights/evaluation.py` 通过后台 worker 评估相关性、准确性、完整性、连贯性、忠实性和幻觉风险；支持复用当前聊天模型，也支持独立评测模型。
+- **群聊总结**：归档群消息后使用 `jieba`/规则预处理、主题聚类和 LLM 总结，支持最近 24 小时、7 天或自然月的日报/周报/月报，并在 WebUI 展示报告。
+- **QQ 空间**：`plugins/qqzone/` 和 `qzone_automation/` 对接本机 Bridge，支持动态读取、人工确认的点赞/评论及可选自动化规则；Cookie 不进入项目配置。
+- **音乐工作流**：`music/library.py` 管理完整歌曲目录和 QQ 点歌匹配，`music/session.py` 管理上传、工程阶段、版本和产物；WebUI 支持人声分离、分段、推理、混音和恢复。
+- **模块化 WebUI**：原集中页面拆为 `page/body_*`、`page/script_*`，服务端拆为 `server_parts/handler_*`，新增评测、群总结、QQ 空间、用户目录和音乐管理页面。
+
+### v0.3 能力在 v0.4 中继续可用
+
+- RAG 记忆：L1/L2/L3 用户记忆、SQLite FTS5 检索、可选 Ollama `bge-m3` 二次召回和原作 lore 检索。
+- LLM 工具箱：时间、联网搜索、网页正文、文档/PDF、表格、图片/OCR、视频关键帧等工具，通过 Function Calling 和统一 Tool Registry 调度。
+- 主动陪伴：早安、空闲关怀、群聊冷场插话、用户习惯记录、自迭代纠错和表情包触发。
+- 语音与歌声：独立 HTTP 语音服务支持 ASR/TTS、GPT-SoVITS、Edge-TTS、SenseVoice；歌声管线支持人声分离、乐理分段、工程混音和质量门控。
+
+### 工程化与性能优化
+
+- **GPU 资源治理**：跨进程文件锁 + 优先级队列，优先级为聊天 > 用户媒体 > 视觉 > 后台；Ollama 在真实需要时启动，推理结束按配置卸载模型。
+- **故障隔离**：评测、群总结、认知影子、QQ 空间和语音均为可选边界；旁路初始化失败不会阻塞基础 QQ 回复。
+- **数据隔离**：长期用户记忆、认知状态、评测数据库、QQ 空间自动化数据库和媒体缓存分开存放，均由 `.env`/`data/` 路径控制。
+- **可测试性**：新增 cognition、insights、qzone、music、启动链、推理锁和多模态测试；应用层通过 Protocol 降低对具体模型、OneBot 和媒体实现的耦合。
+- **开源安全**：`.env.example` 使用占位符，`.gitignore` 排除密钥、聊天历史、SQLite、模型、缓存、音乐素材和 IDE 配置。
 
 ## 安装
 
