@@ -24,7 +24,7 @@ class OllamaEmbeddingClient:
 
     def embed(self, text: str) -> list[float]:
         payload = json.dumps(
-            {"model": self.model, "input": str(text or ""), "keep_alive": "0"},
+            {"model": self.model, "input": str(text or ""), "keep_alive": 0},
             ensure_ascii=False,
         ).encode("utf-8")
         request = Request(

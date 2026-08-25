@@ -6,6 +6,7 @@ from .control import (
     is_port_listening,
     publish_onebot_probe_result,
     restart_background_services,
+    start_background_services,
     run_hidden,
     runtime_status,
 )
@@ -17,6 +18,7 @@ from .paths import (
     MEMORY_BACKUP_DIR,
     MEMORY_PATH,
     MODEL_PROFILE_PATH,
+    MODALITY_ACCESS_PATH,
     PROJECT_ROOT,
     STICKER_DELETED_DIR,
     STICKER_ROOT,
@@ -31,6 +33,7 @@ __all__ = [
     "MEMORY_BACKUP_DIR",
     "MEMORY_PATH",
     "MODEL_PROFILE_PATH",
+    "MODALITY_ACCESS_PATH",
     "PROJECT_ROOT",
     "STICKER_DELETED_DIR",
     "STICKER_ROOT",
@@ -44,6 +47,7 @@ __all__ = [
     "publish_onebot_probe_result",
     "read_project_logs",
     "restart_background_services",
+    "start_background_services",
     "run_hidden",
     "runtime_status",
 ]

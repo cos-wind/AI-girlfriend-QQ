@@ -40,6 +40,8 @@ async def append_tool_results(
     receipts: list[ToolExecutionReceipt] | None = None,
     registry: ToolRegistry | None = None,
 ) -> int:
+    # 把结构化 tool_calls 转成统一的 tool message。工具失败也要写回执，
+    # 让下一轮模型知道“没有成功”，从根源上禁止伪造完成结果。
     call_limit = (
         max(1, int(getattr(config, "llm_tool_max_calls", 2) or 2))
         if max_calls is None

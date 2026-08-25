@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import http.server
+import io
 import json
 import threading
 import zipfile
@@ -40,7 +41,7 @@ def _config(tmp_path: Path) -> BotConfig:
     )
 
 
-def test_toolbox_reads_text_document_and_disabled_model_reports_error(tmp_path) -> None:
+def test_toolbox_reads_text_document_and_disabled_model_stays_silent(tmp_path) -> None:
     doc = tmp_path / "note.txt"
     doc.write_text("今天研究主题：睡眠不足会影响注意力。建议先补觉，再做高强度任务。", encoding="utf-8")
     analyzer = ToolAnalyzer(_config(tmp_path))
@@ -54,8 +55,7 @@ def test_toolbox_reads_text_document_and_disabled_model_reports_error(tmp_path) 
     assert context is not None
     assert context.category == "生活学术研究"
     assert "睡眠不足" in context.prompt_context()
-    assert "回复失败" in reply
-    assert "未使用本地内容模板" in reply
+    assert reply == ""
 
 
 def test_toolbox_reads_csv_as_research_data(tmp_path) -> None:
@@ -527,9 +527,13 @@ def test_ollama_vision_retries_transient_memory_allocation_failure(
     analyzer.vision_resource_wait_seconds = 1.0
     calls: list[str] = []
 
+    async def fake_ensure(*, timeout_seconds: float) -> bool:
+        calls.append(f"ensure:{timeout_seconds}")
+        return True
+
     @asynccontextmanager
-    async def fake_lease(engine: str, *, timeout_seconds: float):
-        calls.append(f"lease:{engine}:{timeout_seconds}")
+    async def fake_lease(engine: str, *, timeout_seconds: float, priority=None):
+        calls.append(f"lease:{engine}:{timeout_seconds}:{int(priority)}")
         yield
 
     async def fake_native(encoded_images, system_prompt, user_prompt, model=None):
@@ -554,6 +558,12 @@ def test_ollama_vision_retries_transient_memory_allocation_failure(
         toolbox_module,
         "inference_resource_lease",
         fake_lease,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        toolbox_module,
+        "ensure_ollama_service",
+        fake_ensure,
         raising=False,
     )
     monkeypatch.setattr(analyzer, "_analyze_image_with_ollama_native", fake_native)
@@ -600,7 +610,7 @@ def test_ollama_vision_switches_to_fallback_model_after_resource_failure(
     called_models: list[str] = []
 
     @asynccontextmanager
-    async def fake_lease(engine: str, *, timeout_seconds: float):
+    async def fake_lease(engine: str, *, timeout_seconds: float, priority=None):
         yield
 
     async def fake_native(
@@ -653,6 +663,161 @@ def test_ollama_vision_switches_to_fallback_model_after_resource_failure(
     ]
 
 
+def test_cloud_vision_fallback_starts_local_ollama_on_demand(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """云端视觉失败后，本地兜底必须先拉起 Ollama，不能直接请求关闭的端口。"""
+    from PIL import Image
+    import io
+
+    source = io.BytesIO()
+    Image.new("RGB", (64, 64), "white").save(source, format="PNG")
+    config = replace(
+        _config(tmp_path),
+        toolbox_vision_enabled=True,
+        toolbox_vision_model="cloud-vision",
+        toolbox_vision_fallback_model="qwen3-vl:4b-instruct",
+        toolbox_vision_base_url="https://vision.example.invalid/v1",
+    )
+    analyzer = ToolAnalyzer(config)
+    analyzer.vision_retry_count = 1
+    calls: list[str] = []
+
+    async def fake_ensure(*, timeout_seconds: float) -> bool:
+        calls.append(f"ensure:{timeout_seconds}")
+        return True
+
+    async def fake_cloud(*args, **kwargs):
+        calls.append("cloud")
+        raise RuntimeError("HTTP 502")
+
+    async def fake_native(*args, model=None, **kwargs):
+        calls.append(f"local:{model}")
+        return _VisionModelResponse(
+            "直接回答：本地视觉兜底成功；图中文字：无明显文字；"
+            "人物/主体：测试卡片；身份/出处：未确认；"
+            "表情/情绪：中性；表达含义/社交意图：展示测试；"
+            "依据：画面；置信度：高；需要联网核验：否；检索关键词：",
+            {"provider": "ollama"},
+        )
+
+    async def no_op(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        toolbox_module,
+        "ensure_ollama_service",
+        fake_ensure,
+        raising=False,
+    )
+    monkeypatch.setattr(analyzer, "_analyze_image_with_openai_compatible", fake_cloud)
+    monkeypatch.setattr(analyzer, "_analyze_image_with_ollama_native", fake_native)
+    monkeypatch.setattr(analyzer, "_release_vision_model_after_failure", no_op)
+
+    text, limitation = asyncio.run(
+        analyzer._analyze_image_with_vision(source.getvalue(), "on-demand.png")
+    )
+
+    assert "本地视觉兜底成功" in text
+    assert limitation == ""
+    assert calls[0] == "cloud"
+    assert calls[1].startswith("ensure:")
+    assert calls[2] == "local:qwen3-vl:4b-instruct"
+
+
+def test_ollama_start_accepts_only_api_ready_service(monkeypatch) -> None:
+    from atri_qq_bot.runtime import services
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        services,
+        "_ollama_api_ready",
+        lambda: calls.append("api") or True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        services,
+        "_launch_runtime_mode",
+        lambda mode: (_ for _ in ()).throw(AssertionError("ready service must not relaunch")),
+    )
+    assert asyncio.run(services.ensure_ollama_service()) is True
+    assert calls == ["api"]
+
+
+def test_ollama_start_waits_past_open_port_until_api_is_ready(monkeypatch) -> None:
+    from atri_qq_bot.runtime import services
+
+    checks: list[bool] = []
+    launches: list[str] = []
+
+    def fake_ready() -> bool:
+        checks.append(True)
+        return len(checks) >= 3
+
+    async def no_sleep(seconds: float) -> None:
+        del seconds
+
+    monkeypatch.setattr(services, "_ollama_api_ready", fake_ready, raising=False)
+    monkeypatch.setattr(
+        services,
+        "_launch_runtime_mode",
+        lambda mode: launches.append(mode) or True,
+    )
+    monkeypatch.setattr(services.asyncio, "sleep", no_sleep)
+
+    assert asyncio.run(services.ensure_ollama_service()) is True
+    assert launches == ["ollama"]
+    assert len(checks) == 3
+
+
+def test_glm_46v_visual_request_disables_reasoning(monkeypatch, tmp_path) -> None:
+    import httpx
+
+    analyzer = ToolAnalyzer(_config(tmp_path))
+    analyzer.vision_model = "GLM-4.6V-Flash"
+    analyzer.vision_base_url = "https://open.bigmodel.cn/api/paas/v4"
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [{"message": {"content": "视觉结果"}}],
+                "usage": {},
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            captured.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        analyzer._analyze_image_with_openai_compatible(
+            ["base64-image"],
+            ["image/png"],
+            "system",
+            "user",
+        )
+    )
+
+    assert result.content == "视觉结果"
+    assert captured["thinking"] == {"type": "disabled"}
+
+
 def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
     monkeypatch,
     tmp_path,
@@ -674,7 +839,7 @@ def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
     called_models: list[str] = []
 
     @asynccontextmanager
-    async def fake_lease(engine: str, *, timeout_seconds: float):
+    async def fake_lease(engine: str, *, timeout_seconds: float, priority=None):
         yield
 
     async def fake_native(
@@ -745,9 +910,7 @@ def test_unavailable_visual_evidence_requires_deterministic_fail_safe() -> None:
 
     assert context.requires_visual_fail_safe()
     reply = context.visual_failure_reply()
-    assert "没有稳定识别" in reply
-    assert "不乱猜" in reply
-    assert "看到" not in reply
+    assert reply == ""
 
 
 def test_reply_engine_bypasses_chat_model_when_visual_evidence_is_unavailable(
@@ -779,8 +942,7 @@ def test_reply_engine_bypasses_chat_model_when_visual_evidence_is_unavailable(
         )
     )
 
-    assert "没有稳定识别" in reply
-    assert "不乱猜" in reply
+    assert reply == ""
 
 
 def test_vision_releases_stale_ollama_models_before_loading(monkeypatch, tmp_path) -> None:
@@ -1434,6 +1596,100 @@ def test_toolbox_reads_mobile_video_through_onebot_action(monkeypatch, tmp_path)
     assert len(vision_calls) == 1
     assert len(vision_calls[0]["prepared_images"]) == 2
     assert "按时间顺序" in str(vision_calls[0]["prompt"])
+
+
+def test_video_vision_failure_falls_back_to_frame_ocr(monkeypatch, tmp_path) -> None:
+    from PIL import Image
+
+    image = io.BytesIO()
+    Image.new("RGB", (320, 180), "white").save(image, format="JPEG")
+    frame = image.getvalue()
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"fake-video")
+    event = {
+        "message": [
+            {"type": "video", "data": {"title": "课程重点讲解", "file_id": "video-ocr"}}
+        ]
+    }
+    analyzer = ToolAnalyzer(_config(tmp_path))
+    analyzer.ocr_enabled = True
+    analyzer.vision_enabled = True
+
+    async def fake_action(action: str, params: dict) -> dict:
+        return {"status": "ok", "data": {"path": str(video_file)}}
+
+    async def fake_ocr(data: bytes):
+        return ocr_module.OcrExtraction(
+            text="第三章：注意力与睡眠",
+            average_confidence=0.96,
+            line_count=1,
+        )
+
+    async def failed_vision(*args, **kwargs):
+        return "", "视觉模型超时"
+
+    monkeypatch.setattr(toolbox_module, "_extract_video_frames", lambda *args: ([frame], ""))
+    monkeypatch.setattr(analyzer, "_extract_image_ocr", fake_ocr)
+    monkeypatch.setattr(analyzer, "_analyze_image_with_vision", failed_vision)
+
+    context = asyncio.run(analyzer.analyze(event, "帮我看看这个视频", fake_action))
+
+    assert context is not None
+    assert context.visual_fallback_available
+    assert not context.requires_visual_fail_safe()
+    prompt = context.prompt_context()
+    assert "第三章：注意力与睡眠" in prompt
+    assert "不要声称看清未读取的画面" in prompt
+
+
+def test_video_vision_and_ocr_failure_falls_back_to_title(monkeypatch, tmp_path) -> None:
+    video_file = tmp_path / "fake-video.mp4"
+    video_file.write_bytes(b"fake-video")
+    event = {
+        "message": [
+            {"type": "video", "data": {"title": "鸣潮新角色技能演示", "file_id": "video-title"}}
+        ]
+    }
+    analyzer = ToolAnalyzer(_config(tmp_path))
+    analyzer.vision_enabled = True
+
+    async def fake_action(action: str, params: dict) -> dict:
+        return {"status": "ok", "data": {"path": str(video_file)}}
+
+    async def failed_vision(*args, **kwargs):
+        return "", "视觉模型不可用"
+
+    monkeypatch.setattr(toolbox_module, "_extract_video_frames", lambda *args: ([], "抽帧失败"))
+    monkeypatch.setattr(analyzer, "_analyze_image_with_vision", failed_vision)
+
+    context = asyncio.run(analyzer.analyze(event, "这个视频讲了什么", fake_action))
+
+    assert context is not None
+    assert "鸣潮新角色技能演示" in context.prompt_context()
+    assert context.visual_fallback_available
+    assert not context.requires_visual_fail_safe()
+
+
+def test_video_analysis_deadline_returns_title_fallback(monkeypatch, tmp_path) -> None:
+    event = {
+        "message": [
+            {"type": "video", "data": {"title": "限时活动预告", "file_id": "video-slow"}}
+        ]
+    }
+    analyzer = ToolAnalyzer(_config(tmp_path))
+    analyzer.video_deadline_seconds = 0.05
+
+    async def slow_video(*args, **kwargs):
+        await asyncio.sleep(0.2)
+        raise AssertionError("不应等到视频处理完成")
+
+    monkeypatch.setattr(analyzer, "_analyze_video_ref", slow_video)
+    context = asyncio.run(analyzer.analyze(event, "分析这个视频"))
+
+    assert context is not None
+    assert "限时活动预告" in context.prompt_context()
+    assert "60 秒时限" in context.prompt_context()
+    assert not context.requires_visual_fail_safe()
 
 
 def test_toolbox_treats_mface_summary_as_context(tmp_path) -> None:

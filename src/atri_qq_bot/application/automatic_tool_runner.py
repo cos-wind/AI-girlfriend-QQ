@@ -47,6 +47,8 @@ class AutomaticToolRunner:
         *,
         context_id: str = "",
     ) -> AgentRunResult:
+        # 这是一个有上限的 Agent 状态机：模型先判断是否需要工具，工具执行
+        # 后把真实回执追加回上下文，再让模型基于证据完成回复。
         message = self._message_from_response(await self._request_model(payload))
         remaining_tool_calls = max(
             1,
@@ -55,6 +57,7 @@ class AutomaticToolRunner:
         receipts: list[ToolReceipt] = []
 
         while remaining_tool_calls > 0:
+            # 每轮执行后都重新请求模型，让它看到成功/失败回执，而不是猜测结果。
             tool_calls = tool_calls_from_message(message)
             if not tool_calls:
                 break

@@ -1,3 +1,9 @@
+"""受约束的联网搜索工具。
+
+搜索工具返回带来源的文本证据，而不是直接替模型生成答案。不同模式选择
+新闻、网页、arXiv/GitHub 等强相关来源，并对结果数量、超时和域名做边界控制。
+"""
+
 from __future__ import annotations
 
 import html
@@ -13,6 +19,8 @@ DEFAULT_SEARCH_MAX_RESULTS = 5
 
 
 async def search_web(arguments: dict[str, Any] | None = None, config: Any | None = None) -> str:
+    # 先规范化 query/mode/domains，再选择来源；这样“最新消息”和“研究现状”
+    # 走不同的来源集合，减少把普通网页结果误当成前沿研究结论。
     args = arguments or {}
     query = str(args.get("query") or "").strip()
     if not query:

@@ -9,8 +9,8 @@
    桌宠会在后台启动 Atri、NapCat/QQ 和 Ollama。
    不需要再点“完整启动”“仅启动”之类的入口。
 
-3. 会出现 QQ 窗口。
-   如果 QQ 要扫码登录，请扫码一次。
+3. 如果 NapCat 掉线或 QQ 登录失效，请打开 NapCat WebUI 手动扫码登录。
+   项目不会自动弹出二维码或强制打开 QQ 登录窗口。
 
 4. 用另一个 QQ 给你的机器人 QQ 发私聊消息测试。
 
@@ -32,14 +32,14 @@
 云端说明在：
 deploy\cloud\README.md
 
-表情包放这里：
-data\stickers
+模型发送表情包来源：
+由 .env 的 STICKER_DIR 指定，当前为：
+<Pictures>\ATRI\聊天表情
 
 聊天记录里自动保存的表情包在：
-data\stickers\_chat_history
+<Documents>\Tencent Files\<BOT_QQ>\ATRI\chat_history
 
-我准备好的默认联网表情缓存放在：
-data\stickers\_online_default
+聊天记录归档不会污染模型发送来源目录。
 
 常用文件夹：
 happy 开心

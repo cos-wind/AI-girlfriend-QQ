@@ -155,8 +155,7 @@ def main() -> None:
         nargs="+",
         default=[
             "atri-official-v2pro-curated",
-            "atri-2dipw",
-            "atri-voidshine",
+            "atri-official-v2pro-curated-fidelity",
         ],
     )
     parser.add_argument(

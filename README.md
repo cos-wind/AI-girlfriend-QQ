@@ -11,9 +11,16 @@
 
 | 分支 | 版本 | 说明 |
 |------|------|------|
-| `main` / `v0.3` | **v0.3** (当前) | ✅ 默认分支，内容与 `v0.3` 同步，始终为最新版本 |
+| `main` / `v0.4` | **v0.4** (当前) | ✅ 默认分支，内容与 `v0.4` 同步，始终为最新版本 |
 | `v0.2` | **v0.2** | 重构为包结构 + LLM Function Calling 工具系统 |
 | `v0.1-original` | **v0.1** | 原始扁平文件版本，仅作存档 |
+
+### v0.4 相比 v0.3 新增功能
+
+- **持续认知内核** — 影子模式维护目标、思维承接、情绪与自我经历，不替代正常回复或执行副作用操作。
+- **回复评测与群聊总结** — 独立 SQLite 与后台 worker，提供质量评测、群聊归档、主题聚类和定时总结。
+- **QQ 空间扩展** — 通过本机 Bridge 接入动态读取、点赞/评论确认和可选自动化，Cookie 不写入本项目。
+- **模块化重构** — 记忆、人格、OneBot、工具箱、WebUI 和语音服务进一步拆分，新增音乐、媒体和运行时服务支持。
 
 ### v0.3 相比 v0.2 新增功能
 
@@ -44,17 +51,20 @@
 
 最简单：
 
-1. 像平时一样启动 QQ：`C:\Program Files\Tencent\QQNT\QQ.exe`
-2. 后台监听器会在 1 秒内接管启动，拉起可见的 NapCat QQ，同时后台启动 Ollama 和亚托莉服务
-3. 如果 QQ 要扫码登录，请扫码一次
-4. 用另一个 QQ 给你的机器人 QQ 发私聊消息测试
+1. 从桌宠菜单选择“启动亚托莉”，或运行 `tools\launch\qq_legacy\start-with-qq.vbs`。
+2. 启动器先让 ATRI 监听 OneBot，再用独立隐藏进程恢复项目专用 NapCat/QQ。
+3. QQ 空间 Bridge 和 MaiBot 属于可选模块，会在聊天核心之后错峰启动；Ollama 与语音服务按真实请求启动。
+4. 如果 NapCat 掉线或 QQ 登录失效，请打开 NapCat WebUI 手动扫码登录；项目不会自动弹出二维码。
+5. 用另一个 QQ 给机器人账号发送私聊消息测试。
+
+第一次安装或需要重建 `.venv` 时运行 `tools\launch\atri\start-atri.bat`。正常启动不再执行依赖安装，也不会绕过统一启动器。若 `.env` 中 `QZONE_BRIDGE_ENABLED=true`，可选启动模式会检查并复用本机 QQ 空间 Bridge（5700 端口）。
 
 停止机器人：
 
 - 平时不用手动停止，关闭 QQ 即可。
 - 如果需要彻底停止，可以运行项目根目录里的 `停止亚托莉.bat`。
 
-NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/onebot`。不要双击 `run.ps1`，Windows 很容易把它当文本文件打开。
+NapCat 的 OneBot 反向 WebSocket 已经自动配置为：`ws://127.0.0.1:8765/onebot`。项目只有一个运行入口；已移除会重复安装依赖并直接启动主进程的旧 `run.ps1`。
 
 这是一个最小可运行的 NapCat / OneBot v11 反向 WebSocket 机器人，用配置的机器人 QQ 接收消息并按"亚托莉"人设回复。
 
@@ -124,6 +134,18 @@ ws://127.0.0.1:8765/onebot
 - OneBot 版本：v11
 
 然后用另一个 QQ 给机器人 QQ 发私聊消息，应该能收到亚托莉风格回复。
+
+### WebUI QQ 动态
+
+“QQ动态”页使用独立的 `onebot-qzone` 本机 Bridge 读取 QQ 空间。先按该项目说明完成登录并启动 Bridge，再在本项目 `.env` 设置：
+
+```env
+QZONE_BRIDGE_ENABLED=true
+QZONE_BRIDGE_URL=http://127.0.0.1:5700
+QZONE_BRIDGE_TOKEN=与Bridge一致的AccessToken
+```
+
+重启亚托莉后打开 WebUI → QQ动态。也可以进入 WebUI → 测试 → 开发者状态与访问入口，点击“QQ动态 WebUI”直达该页面；下拉列表只显示记忆面板中的人物 QQ，点赞和评论均需在页面人工确认。QQ 空间 Cookie 只应保存在 Bridge 中，不要写入本项目。
 
 ## 配置项
 
@@ -201,10 +223,10 @@ OWNER_QQ=你的QQ号
 
 ## 表情包
 
-把图片放进：
+模型发送表情包只从 `.env` 的 `STICKER_DIR` 读取。当前配置的来源目录是：
 
 ```text
-<项目根目录>\data\stickers
+<Pictures>\ATRI\聊天表情
 ```
 
 推荐按情绪放到这些文件夹：
@@ -213,11 +235,13 @@ OWNER_QQ=你的QQ号
 happy / comfort / tired / proud / confused / shy / food / goodnight / default
 ```
 
-自动保存聊天记录表情包：
+聊天记录里的图片/表情不会写回来源目录，而是自动保存到当前 BOT_QQ 的 QQ 账号记录目录：
 
 ```text
-<项目根目录>\data\stickers\_chat_history
+<Documents>\Tencent Files\<BOT_QQ>\ATRI\chat_history
 ```
+
+可用 `STICKER_CAPTURE_DIR` 覆盖归档目录；模型发送来源仍保持为 `STICKER_DIR`。
 
 默认联网表情缓存：
 
@@ -225,10 +249,10 @@ happy / comfort / tired / proud / confused / shy / food / goodnight / default
 <项目根目录>\data\stickers\_online_default
 ```
 
-发送优先级：
+发送来源：
 
 ```text
-手动添加的本地表情 > 聊天记录归档表情 > 默认联网缓存表情 > 网页 URL > QQ 自带表情 + emoji
+STICKER_DIR 中的本地表情 > 网页 URL > QQ 自带表情 + emoji
 ```
 
 自定义触发词编辑：
@@ -238,6 +262,14 @@ happy / comfort / tired / proud / confused / shy / food / goodnight / default
 ```
 
 例如 `"高性能": "proud"` 表示用户说到"高性能"时，优先从 `proud` 文件夹发一张表情包。
+
+## 回复评测与群聊总结
+
+WebUI 的原“开发”入口已替换为“评测”，内含回复质量看板和群聊总结；开发者状态与
+NapCat 访问入口移入“测试”，实时日志保留在评测看板。该功能使用独立 SQLite 和后台
+worker，不阻塞 QQ 回复。评测模型直接复用“模型”页面当前启用的聊天模型，切换模型后自动
+跟随，无需在评测页面重复填写接口或 Key。安装、评分口径、定时任务与隐私说明见
+[docs/insights.md](docs/insights.md)。
 
 ## 测试
 

@@ -20,6 +20,8 @@ class VoiceProfile:
     prompt_text: str = ""
     prompt_language: str = "ja"
     text_language: str = "auto"
+    inference_preset: str = "stable"
+    emotion_inference_presets: dict[str, str] = field(default_factory=dict)
     emotion_references: dict[str, str] = field(default_factory=dict)
     emotion_prompt_texts: dict[str, str] = field(default_factory=dict)
     emotion_prompt_languages: dict[str, str] = field(default_factory=dict)
@@ -108,6 +110,10 @@ def profile_from_dict(raw: dict[str, Any], expected_id: str | None = None) -> Vo
         prompt_text=str(raw.get("prompt_text") or "").strip(),
         prompt_language=str(raw.get("prompt_language") or "ja").strip().lower(),
         text_language=str(raw.get("text_language") or "auto").strip().lower(),
+        inference_preset=_normalized_inference_preset(raw.get("inference_preset")),
+        emotion_inference_presets=_normalized_inference_preset_map(
+            raw.get("emotion_inference_presets")
+        ),
         emotion_references={
             str(key).strip().lower(): str(value).strip()
             for key, value in (references.items() if isinstance(references, dict) else [])
@@ -143,4 +149,20 @@ def _normalized_string_map(value: Any) -> dict[str, str]:
         str(key).strip().lower(): str(item).strip()
         for key, item in (value.items() if isinstance(value, dict) else [])
         if str(key).strip() and str(item).strip()
+    }
+
+
+def _normalized_inference_preset(value: Any) -> str:
+    preset = str(value or "stable").strip().lower()
+    return preset if preset in {"stable", "fidelity"} else "stable"
+
+
+def _normalized_inference_preset_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key).strip().lower(): str(item).strip().lower()
+        for key, item in value.items()
+        if str(key).strip()
+        and str(item).strip().lower() in {"stable", "fidelity"}
     }

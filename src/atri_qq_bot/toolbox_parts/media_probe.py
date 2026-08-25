@@ -5,6 +5,7 @@ import re
 import struct
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from .formatting import _shorten
@@ -35,9 +36,25 @@ def _extract_video_frames(data: bytes, ext: str, max_frames: int) -> tuple[list[
         tmp_dir = Path(tmp)
         input_path = tmp_dir / f"input{suffix}"
         input_path.write_bytes(data)
-        duration = _probe_video_duration_seconds(ffmpeg, input_path)
-        frames = _extract_even_video_frames(ffmpeg, input_path, tmp_dir, max_frames, duration)
+        # 抽帧属于预处理阶段，最多占用约 24 秒，给后续 OCR/视觉保留预算。
+        deadline = time.monotonic() + 24.0
+        duration = _probe_video_duration_seconds(
+            ffmpeg,
+            input_path,
+            timeout_seconds=min(8.0, max(1.0, deadline - time.monotonic())),
+        )
+        frames = _extract_even_video_frames(
+            ffmpeg,
+            input_path,
+            tmp_dir,
+            max_frames,
+            duration,
+            deadline=deadline,
+        )
         if not frames:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.5:
+                return [], "视频抽帧阶段超时。"
             pattern = str(tmp_dir / "frame_%02d.jpg")
             command = [
                 ffmpeg,
@@ -57,7 +74,7 @@ def _extract_video_frames(data: bytes, ext: str, max_frames: int) -> tuple[list[
                     command,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
-                    timeout=20,
+                    timeout=max(1.0, min(10.0, remaining)),
                     check=False,
                 )
             except Exception as exc:
@@ -69,14 +86,18 @@ def _extract_video_frames(data: bytes, ext: str, max_frames: int) -> tuple[list[
         frames = _dedupe_similar_video_frames(frames)
         return frames, "" if frames else "视频文件已读取，但没有抽取到关键帧。"
 
-def _probe_video_duration_seconds(ffmpeg: str, input_path: Path) -> float | None:
+def _probe_video_duration_seconds(
+    ffmpeg: str,
+    input_path: Path,
+    timeout_seconds: float = 12.0,
+) -> float | None:
     command = [ffmpeg, "-i", str(input_path)]
     try:
         completed = subprocess.run(
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            timeout=12,
+            timeout=max(1.0, float(timeout_seconds)),
             check=False,
         )
     except Exception:
@@ -95,6 +116,8 @@ def _extract_even_video_frames(
     tmp_dir: Path,
     max_frames: int,
     duration: float | None,
+    *,
+    deadline: float | None = None,
 ) -> list[bytes]:
     if not duration:
         return []
@@ -107,6 +130,9 @@ def _extract_even_video_frames(
         ]
     frames: list[bytes] = []
     for index, timestamp in enumerate(timestamps, start=1):
+        remaining = (deadline - time.monotonic()) if deadline is not None else 6.0
+        if remaining <= 0.5:
+            break
         output_path = tmp_dir / f"even_frame_{index:02d}.jpg"
         command = [
             ffmpeg,
@@ -128,7 +154,7 @@ def _extract_even_video_frames(
                 command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=12,
+            timeout=max(1.0, min(6.0, remaining)),
                 check=False,
             )
         except Exception:

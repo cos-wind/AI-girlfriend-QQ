@@ -1,9 +1,23 @@
 param(
     [string]$ModelRoot = "",
-    [int]$Port = 9880
+    [int]$Port = 9880,
+    [ValidateSet("v2Pro", "v1")]
+    [string]$InitialVersion = "v2Pro",
+    [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-LocalListenerProcessId {
+    param([int]$PortNumber)
+    foreach ($Line in (netstat.exe -ano -p TCP 2>$null)) {
+        if ($Line -match ("^\s*TCP\s+\S+:" + $PortNumber + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) {
+            return [int]$Matches[1]
+        }
+    }
+    return $null
+}
+
 $StartupMutex = New-Object System.Threading.Mutex($false, "Global\AtriGptSovitsService")
 if (-not $StartupMutex.WaitOne(0)) {
     Write-Host "GPT-SoVITS startup is already in progress."
@@ -32,12 +46,23 @@ if (-not (Test-Path -LiteralPath $AsciiModelRoot)) {
 $ModelAccessRoot = if (Test-Path -LiteralPath $AsciiModelRoot) { $AsciiModelRoot } else { $ModelRoot }
 $VoiceModels = Join-Path $ModelAccessRoot "voice"
 $BaseModels = Join-Path $VoiceModels "base\gpt-sovits\pretrained_models"
-$Candidate = Join-Path $VoiceModels "candidates\2dipw-atri-gpt-sovits"
+$LegacyCandidate = Join-Path $VoiceModels "candidates\2dipw-atri-gpt-sovits"
+$V2ProCandidate = Join-Path $VoiceModels "candidates\atri-official-v2pro-curated"
+$InitialGptWeights = if ($InitialVersion -eq "v2Pro") {
+    Join-Path $BaseModels "s1v3.ckpt"
+} else {
+    Join-Path $LegacyCandidate "atri-e10.ckpt"
+}
+$InitialSovitsWeights = if ($InitialVersion -eq "v2Pro") {
+    Join-Path $V2ProCandidate "atri-official-v2pro-curated_e1_s884.pth"
+} else {
+    Join-Path $LegacyCandidate "atri_e25_s5250.pth"
+}
 $ConfigPath = Join-Path $RuntimeRoot "atri-tts-infer.yaml"
 $PidFile = Join-Path $ProjectDir "data\runtime\gpt-sovits.pid"
 $LogDir = Join-Path $ProjectDir "logs"
 
-if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+if (-not $ValidateOnly -and (Get-LocalListenerProcessId -PortNumber $Port)) {
     Write-Host "GPT-SoVITS is already listening on port $Port."
     return
 }
@@ -47,12 +72,19 @@ foreach ($Required in @(
     (Join-Path $RuntimeRoot ".dependencies-ready"),
     (Join-Path $BaseModels "chinese-roberta-wwm-ext-large\pytorch_model.bin"),
     (Join-Path $BaseModels "chinese-hubert-base\pytorch_model.bin"),
-    (Join-Path $Candidate "atri-e10.ckpt"),
-    (Join-Path $Candidate "atri_e25_s5250.pth")
+    $InitialGptWeights,
+    $InitialSovitsWeights
 )) {
     if (-not (Test-Path -LiteralPath $Required)) {
         throw "GPT-SoVITS runtime is incomplete: $Required"
     }
+}
+if ($ValidateOnly) {
+    Write-Host "GPT-SoVITS startup configuration is valid."
+    Write-Host "Version: $InitialVersion"
+    Write-Host "GPT weights: $InitialGptWeights"
+    Write-Host "SoVITS weights: $InitialSovitsWeights"
+    return
 }
 
 $SourcePretrained = Join-Path $SourceRoot "GPT_SoVITS\pretrained_models"
@@ -69,21 +101,24 @@ if (-not (Test-Path -LiteralPath $G2PWLink)) {
     New-Item -ItemType Junction -Path $G2PWLink -Target (Join-Path $VoiceModels "base\gpt-sovits\G2PWModel") | Out-Null
 }
 
+$InitialGptConfigPath = $InitialGptWeights.Replace('\', '/')
+$InitialSovitsConfigPath = $InitialSovitsWeights.Replace('\', '/')
 $Config = @"
 custom:
   bert_base_path: D:/AtriModels/voice/base/gpt-sovits/pretrained_models/chinese-roberta-wwm-ext-large
   cnhuhbert_base_path: D:/AtriModels/voice/base/gpt-sovits/pretrained_models/chinese-hubert-base
   device: cuda
   is_half: true
-  t2s_weights_path: D:/AtriModels/voice/candidates/2dipw-atri-gpt-sovits/atri-e10.ckpt
-  version: v1
-  vits_weights_path: D:/AtriModels/voice/candidates/2dipw-atri-gpt-sovits/atri_e25_s5250.pth
+  t2s_weights_path: $InitialGptConfigPath
+  version: $InitialVersion
+  vits_weights_path: $InitialSovitsConfigPath
 "@
 Set-Content -LiteralPath $ConfigPath -Value $Config -Encoding UTF8
 
 $env:PYTHONUTF8 = "1"
 $env:NLTK_DATA = Join-Path $RuntimeRoot ".venv\nltk_data"
 $env:HF_HOME = Join-Path $VoiceModels "huggingface"
+$env:ATRI_G2PW_FORCE_CPU = "true"
 $env:PYTHONPATH = (Join-Path $ProjectDir "tools\voice\compat")
 $env:PATH = $SourceRoot + ";" + $env:PATH
 $Executable = if (Test-Path -LiteralPath $Pythonw) { $Pythonw } else { $Python }
@@ -98,9 +133,9 @@ $Process = Start-Process `
 
 for ($i = 0; $i -lt 240; $i++) {
     Start-Sleep -Milliseconds 500
-    $Listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($Listener) {
-        $Listener.OwningProcess | Set-Content -LiteralPath $PidFile -Encoding ASCII
+    $ListenerProcessId = Get-LocalListenerProcessId -PortNumber $Port
+    if ($ListenerProcessId) {
+        $ListenerProcessId | Set-Content -LiteralPath $PidFile -Encoding ASCII
         Write-Host "GPT-SoVITS is ready at http://127.0.0.1:$Port"
         return
     }

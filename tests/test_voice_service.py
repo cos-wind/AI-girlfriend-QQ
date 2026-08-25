@@ -9,6 +9,7 @@ import subprocess
 import sys
 import types
 import wave
+from contextlib import asynccontextmanager
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 
@@ -16,7 +17,10 @@ import httpx
 import pytest
 
 from atri_voice_service.config import ATRI_MODELS_ROOT, LOCAL_MODELS_ROOT, VoiceServiceConfig
-from atri_voice_service.app import SpeechApplication
+from atri_voice_service.app import (
+    SpeechApplication,
+    conversation_synthesis_timeout_seconds,
+)
 from atri_voice_service.asr_lexicon import AsrLexicon, save_lexicon
 from atri_voice_service.audio_processing import (
     AudioPreprocessError,
@@ -30,13 +34,16 @@ from atri_voice_service.original_library import OriginalVoiceLibrary
 from atri_voice_service.profiles import VoiceProfile, VoiceProfileStore, profile_from_dict
 from atri_voice_service.providers import (
     GptSovitsProvider,
+    IsolatedSenseVoiceProvider,
     ProviderError,
     SenseVoiceProvider,
     _auxiliary_reference_paths,
     _engine_weight_path,
     _reference_context,
+    _tts_inference_preset,
     _tts_language,
     _tts_seed,
+    _tts_split_method,
     _tts_style,
     parse_sensevoice_output,
 )
@@ -47,7 +54,6 @@ from atri_voice_service.tts_text import (
 )
 from atri_voice_service.quality import evaluate_transcript_quality
 from atri_voice_service.singing import OriginalSingingProvider
-from atri_voice_service.resources import InferenceResourceManager
 from atri_voice_service.singing_jobs import SingingJobManager
 from atri_voice_service.singing_pipeline import (
     ExternalPipelineManifest,
@@ -58,9 +64,76 @@ from atri_voice_service.singing_pipeline import (
 from atri_voice_service.speech_pipeline import (
     ConversationSpeechPipeline,
     SpeechSynthesisOptions,
+    synthesize_with_quality,
 )
+from atri_voice_service import runtime_services
+from atri_qq_bot.runtime.inference_lock import InferencePriority
 from atri_qq_bot.voice import SynthesisResult, TranscriptionResult, VoiceRequest
 from tools.voice.separate_singing_stems import _resolve_output_paths
+
+
+class LocalInferenceResourceManager:
+    """Keep unit tests off the production cross-process GPU lock."""
+
+    @asynccontextmanager
+    async def lease(self, engine: str, **kwargs):
+        del engine, kwargs
+        yield
+
+    def status(self) -> dict[str, object]:
+        return {"busy": False, "active_engine": "", "queued": 0}
+
+
+def test_voice_config_separates_cold_start_from_inference_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATRI_TTS_TOTAL_TIMEOUT_SECONDS", "75")
+    monkeypatch.setenv("ATRI_TTS_STARTUP_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("ATRI_TTS_IDLE_SHUTDOWN_SECONDS", "300")
+    monkeypatch.setenv("ATRI_TTS_PREWARM_ENABLED", "true")
+
+    config = VoiceServiceConfig.from_env()
+
+    assert config.tts_total_timeout_seconds == 75.0
+    assert config.tts_startup_timeout_seconds == 45.0
+    assert config.tts_idle_shutdown_seconds == 300
+    assert config.tts_prewarm_enabled is True
+
+
+def test_zero_tts_idle_timeout_keeps_prewarmed_runtime_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATRI_TTS_IDLE_SHUTDOWN_SECONDS", "0")
+    config = VoiceServiceConfig.from_env()
+    assert config.tts_idle_shutdown_seconds == 0
+
+    async def schedule() -> object | None:
+        app = SpeechApplication.__new__(SpeechApplication)
+        app.config = config
+        app._tts_idle_shutdown_task = None
+        app._schedule_tts_idle_shutdown()
+        return app._tts_idle_shutdown_task
+
+    assert asyncio.run(schedule()) is None
+
+
+def test_conversation_synthesis_timeout_scales_with_text_and_cold_start() -> None:
+    short_warm = conversation_synthesis_timeout_seconds(
+        "早安。", runtime_ready=True, maximum_seconds=150
+    )
+    long_warm = conversation_synthesis_timeout_seconds(
+        "今天发生了很多有趣的事情，我想慢慢讲给你听，也想知道你今天过得怎么样。",
+        runtime_ready=True,
+        maximum_seconds=150,
+    )
+    short_cold = conversation_synthesis_timeout_seconds(
+        "早安。", runtime_ready=False, maximum_seconds=150
+    )
+
+    assert 10 <= short_warm < long_warm
+    assert short_cold > short_warm
+    assert long_warm <= 75
+    assert short_cold <= 75
 
 
 def test_parse_sensevoice_output_extracts_text_language_and_emotion() -> None:
@@ -234,7 +307,7 @@ def test_conversation_speech_pipeline_rejects_singing_requests(tmp_path: Path) -
         asr=object(),
         originals=OriginalVoiceLibrary(tmp_path, tmp_path / "cache"),
         profiles=VoiceProfileStore(tmp_path / "profiles"),
-        resources=InferenceResourceManager(),
+        resources=LocalInferenceResourceManager(),
     )
 
     with pytest.raises(ProviderError, match="日常语音"):
@@ -280,7 +353,7 @@ def test_conversation_speech_pipeline_exposes_rejected_quality_report(
         asr=FakeAsr(),
         originals=OriginalVoiceLibrary(tmp_path, tmp_path / "cache"),
         profiles=profiles,
-        resources=InferenceResourceManager(),
+        resources=LocalInferenceResourceManager(),
     )
 
     with pytest.raises(ProviderError, match="质量标准") as error:
@@ -328,7 +401,7 @@ def test_conversation_speech_pipeline_uses_contextual_original_after_tts_failure
         asr=object(),
         originals=OriginalVoiceLibrary(root.parent, tmp_path / "cache"),
         profiles=profiles,
-        resources=InferenceResourceManager(),
+        resources=LocalInferenceResourceManager(),
     )
 
     result = asyncio.run(
@@ -378,7 +451,7 @@ def test_conversation_speech_pipeline_accepts_safe_best_effort_rescue(
         asr=NearAsr(),
         originals=OriginalVoiceLibrary(tmp_path / "library", tmp_path / "cache"),
         profiles=profiles,
-        resources=InferenceResourceManager(),
+        resources=LocalInferenceResourceManager(),
     )
 
     result = asyncio.run(
@@ -463,7 +536,7 @@ def test_external_singing_pipeline_creates_preview_and_reuses_cache(
     provider = ExternalSingingProvider(
         manifest_path,
         tmp_path / "cache",
-        InferenceResourceManager(),
+        LocalInferenceResourceManager(),
     )
     request = SingingJobRequest(
         "测试歌曲",
@@ -678,6 +751,44 @@ def test_speech_pipeline_retries_rejected_audio_candidate_before_asr(
     assert variations == [0, 1]
     assert app._last_quality["generation_retries"] == 1
     assert "异常长静音" in app._last_quality["candidate_errors"][0]
+
+
+def test_fast_speech_pipeline_retries_invalid_audio_once_without_asr(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "second.wav"
+    output.write_bytes(b"RIFFvoice")
+    variations: list[int] = []
+
+    class FakeTts:
+        async def synthesize(self, request, profile, *, variation=0):
+            variations.append(variation)
+            if variation == 0:
+                raise ProviderError("合成音频异常拖长", retryable=True)
+            return SynthesisResult(output)
+
+        def prepare_spoken_text(self, request, profile):
+            return request.text
+
+    class ForbiddenAsr:
+        async def transcribe(self, path, language):
+            raise AssertionError("QQ fast path must not run ASR")
+
+    outcome = asyncio.run(
+        synthesize_with_quality(
+            VoiceServiceConfig(),
+            FakeTts(),
+            ForbiddenAsr(),
+            VoiceRequest("おはようございます", language="ja", emotion="happy"),
+            VoiceProfile(id="atri", display_name="ATRI"),
+            quality_gate=False,
+            retries=1,
+        )
+    )
+
+    assert outcome.result.audio_path == output
+    assert outcome.report is None
+    assert variations == [0, 1]
 
 
 def test_speech_application_rejects_all_attempts_above_configured_quality_limit(
@@ -1045,6 +1156,59 @@ def test_sensevoice_warmup_exposes_loaded_state(
     assert status["load_error"] == ""
 
 
+def test_sensevoice_unload_releases_loaded_model(tmp_path: Path) -> None:
+    provider = SenseVoiceProvider(str(tmp_path), "cpu", tmp_path / "cache")
+    provider._model = object()
+
+    asyncio.run(provider.unload())
+
+    assert provider.status()["loaded"] is False
+
+
+def test_isolated_sensevoice_uses_one_shot_worker_and_cleans_job_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = VoiceServiceConfig(
+        cache_dir=tmp_path / "cache",
+        asr_lexicon_path=tmp_path / "asr-hotwords.json",
+    )
+    provider = IsolatedSenseVoiceProvider(config)
+    audio = tmp_path / "voice.wav"
+    audio.write_bytes(b"RIFFvoice")
+
+    def fake_worker(request_path: Path, result_path: Path, timeout_seconds: int) -> int:
+        assert timeout_seconds >= 90
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        assert request["audio_path"] == str(audio.resolve())
+        result_path.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "text": "你好，亚托莉",
+                    "language": "zh",
+                    "emotion": "happy",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(
+        "atri_voice_service.providers._run_asr_worker",
+        fake_worker,
+    )
+
+    result = asyncio.run(provider.transcribe(audio, "auto"))
+
+    assert result.text == "你好，亚托莉"
+    assert result.language == "zh"
+    assert result.emotion == "happy"
+    assert provider.status()["isolated_worker"] is True
+    assert list((config.cache_dir / "asr-jobs").iterdir()) == []
+
+
 def test_voice_models_use_project_specific_local_model_directory() -> None:
     assert LOCAL_MODELS_ROOT == Path(r"D:\本地大模型\models")
     assert ATRI_MODELS_ROOT == LOCAL_MODELS_ROOT / "AI_ATRI"
@@ -1069,6 +1233,8 @@ def test_profile_store_round_trips_and_reports_readiness(tmp_path: Path) -> None
         display_name="亚托莉",
         reference_audio=str(reference),
         prompt_text="今日はいい天気ですね。",
+        inference_preset="fidelity",
+        emotion_inference_presets={"happy": "fidelity", "neutral": "stable"},
     )
 
     store.save(profile)
@@ -1178,8 +1344,240 @@ def test_gpt_sovits_switches_profile_weights_before_synthesis(
     assert payloads[0]["text_split_method"] == "cut0"
     assert payloads[0]["parallel_infer"] is False
     assert payloads[0]["split_bucket"] is False
-    assert payloads[0]["seed"] == 19
+    assert "batch_size" not in payloads[0]
+    assert "batch_threshold" not in payloads[0]
+    assert payloads[0]["seed"] == 9992
     assert payloads[0]["aux_ref_audio_paths"] == []
+
+
+def test_conversation_pipeline_ensures_tts_runtime_inside_resource_lease(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class FakeResources:
+        @asynccontextmanager
+        async def lease(self, engine: str, **kwargs):
+            events.append(f"lease:{engine}:enter")
+            yield
+            events.append(f"lease:{engine}:exit")
+
+    class FakeTts:
+        async def synthesize(self, request, profile, *, variation=0):
+            events.append("synthesize")
+            output = tmp_path / "voice.wav"
+            output.write_bytes(b"RIFFvoice")
+            return SynthesisResult(output)
+
+        def prepare_spoken_text(self, request, profile):
+            return request.text
+
+    async def ensure_runtime() -> bool:
+        events.append("ensure-runtime")
+        return True
+
+    profile = VoiceProfile(
+        id="atri-test",
+        display_name="ATRI",
+        reference_audio=str(tmp_path / "reference.wav"),
+    )
+
+    class FakeProfiles:
+        def load(self, profile_id: str):
+            return profile
+
+        def list(self):
+            return [profile]
+
+    pipeline = ConversationSpeechPipeline(
+        VoiceServiceConfig(cache_dir=tmp_path),
+        tts=FakeTts(),
+        asr=object(),
+        originals=type("Originals", (), {"match": lambda *args: None})(),
+        profiles=FakeProfiles(),
+        resources=FakeResources(),
+        ensure_tts_runtime=ensure_runtime,
+    )
+
+    result = asyncio.run(
+        pipeline.synthesize(
+            VoiceRequest("你好", language="zh"),
+            "atri-test",
+            SpeechSynthesisOptions(
+                prefer_original=False,
+                quality_gate=False,
+                quality_retries=0,
+                quality_max_error_rate=0.22,
+                allow_context_original_fallback=False,
+                allow_best_effort=False,
+            ),
+        )
+    )
+
+    assert result.audio_path.is_file()
+    assert events == [
+        "lease:session:atri-test:enter",
+        "ensure-runtime",
+        "synthesize",
+        "lease:session:atri-test:exit",
+    ]
+
+
+def test_explicit_voice_request_gets_highest_inference_priority(
+    tmp_path: Path,
+) -> None:
+    priorities: list[object] = []
+
+    class FakeResources:
+        @asynccontextmanager
+        async def lease(self, engine: str, **kwargs):
+            del engine
+            priorities.append(kwargs.get("priority"))
+            yield
+
+    class FakeTts:
+        async def synthesize(self, request, profile, *, variation=0):
+            output = tmp_path / "voice.wav"
+            output.write_bytes(b"RIFFvoice")
+            return SynthesisResult(output)
+
+        def prepare_spoken_text(self, request, profile):
+            return request.text
+
+    profile = VoiceProfile(
+        id="atri-test",
+        display_name="ATRI",
+        reference_audio=str(tmp_path / "reference.wav"),
+    )
+
+    class FakeProfiles:
+        def load(self, profile_id: str):
+            return profile
+
+    pipeline = ConversationSpeechPipeline(
+        VoiceServiceConfig(cache_dir=tmp_path),
+        tts=FakeTts(),
+        asr=object(),
+        originals=type("Originals", (), {"match": lambda *args: None})(),
+        profiles=FakeProfiles(),
+        resources=FakeResources(),
+    )
+
+    asyncio.run(
+        pipeline.synthesize(
+            VoiceRequest("请用语音回复", reason="explicit_request"),
+            "atri-test",
+            SpeechSynthesisOptions(
+                prefer_original=False,
+                quality_gate=False,
+                quality_retries=0,
+                quality_max_error_rate=0.22,
+            ),
+        )
+    )
+
+    assert priorities == [InferencePriority.CHAT]
+
+
+def test_voice_runtime_unloads_ollama_models_without_stopping_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[object] = []
+    ps_responses = iter(
+        [
+            {"models": [{"name": "qwen3-vl:4b-instruct"}]},
+            {"models": []},
+        ]
+    )
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        requests.append(request)
+        if isinstance(request, str):
+            return FakeResponse(next(ps_responses))
+        assert request.full_url.endswith("/api/generate")
+        body = json.loads(request.data.decode("utf-8"))
+        assert body == {
+            "model": "qwen3-vl:4b-instruct",
+            "prompt": "",
+            "stream": False,
+            "keep_alive": 0,
+        }
+        return FakeResponse({})
+
+    monkeypatch.setattr(runtime_services, "_tcp_open", lambda port: port == 11434)
+    monkeypatch.setattr(runtime_services, "urlopen", fake_urlopen)
+
+    assert runtime_services._release_ollama_models_for_voice() is True
+    assert len(requests) == 3
+
+
+def test_voice_runtime_keeps_lightweight_ollama_service_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(runtime_services, "_tcp_open", lambda port: True)
+    monkeypatch.setattr(
+        runtime_services,
+        "_release_ollama_models_for_voice",
+        lambda: True,
+    )
+    monkeypatch.setattr(runtime_services, "_run_hidden", commands.append)
+
+    assert runtime_services._stop_ollama_runtime_for_voice() is True
+    assert commands == []
+
+
+def test_cpu_asr_does_not_stop_warm_tts_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped: list[str] = []
+    monkeypatch.setattr(
+        runtime_services,
+        "_stop_gpt_sovits",
+        lambda: stopped.append("tts"),
+    )
+    monkeypatch.setattr(
+        runtime_services,
+        "_stop_ollama_runtime_for_voice",
+        lambda: stopped.append("ollama") or True,
+    )
+
+    assert asyncio.run(runtime_services.prepare_asr_runtime(requires_gpu=False)) is True
+    assert stopped == []
+
+
+def test_ready_gpt_sovits_still_unloads_ollama_before_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(runtime_services, "_tcp_open", lambda port: port == 9880)
+    monkeypatch.setattr(
+        runtime_services,
+        "_stop_ollama_runtime_for_voice",
+        lambda: calls.append("ollama") or True,
+    )
+    monkeypatch.setattr(
+        runtime_services,
+        "_launch_gpt_sovits",
+        lambda: calls.append("launch") or True,
+    )
+
+    assert asyncio.run(runtime_services.ensure_gpt_sovits_runtime()) is True
+    assert calls == ["ollama"]
 
 
 def test_gpt_sovits_provider_marks_gateway_failure_retryable(
@@ -1285,7 +1683,7 @@ def test_tts_emotion_reference_prefers_configured_prompt_and_language(
         emotion_prompt_languages={"happy": "ja"},
     )
 
-    assert _reference_context(profile, "happy", "zh") == (
+    assert _reference_context(profile, "happy", "ja") == (
         str(happy),
         "えへへ、役に立つでしょう？",
         "ja",
@@ -1342,6 +1740,32 @@ def test_tts_language_reference_selects_matching_prompt(tmp_path: Path) -> None:
     assert _reference_context(profile, "happy", "zh") == (str(neutral), "default", "ja")
 
 
+def test_tts_emotion_reference_must_match_target_language(tmp_path: Path) -> None:
+    japanese = tmp_path / "japanese.wav"
+    chinese_happy = tmp_path / "chinese-happy.wav"
+    profile = VoiceProfile(
+        id="atri",
+        display_name="ATRI",
+        reference_audio=str(japanese),
+        prompt_text="こんにちは",
+        prompt_language="ja",
+        emotion_references={"happy": str(chinese_happy)},
+        emotion_prompt_texts={"happy": "嘿嘿，我派上用场了吧"},
+        emotion_prompt_languages={"happy": "zh"},
+    )
+
+    assert _reference_context(profile, "happy", "ja") == (
+        str(japanese),
+        "こんにちは",
+        "ja",
+    )
+    assert _reference_context(profile, "happy", "zh") == (
+        str(chinese_happy),
+        "嘿嘿，我派上用场了吧",
+        "zh",
+    )
+
+
 def test_tts_style_uses_intensity_without_extreme_speed_changes() -> None:
     neutral = _tts_style("sad", 0.0)
     strong = _tts_style("sad", 1.0)
@@ -1357,10 +1781,56 @@ def test_tts_style_uses_intensity_without_extreme_speed_changes() -> None:
     assert expressive["temperature"] == pytest.approx(0.64)
 
 
+def test_tts_fidelity_preset_reproduces_selected_v2pro_benchmark_settings() -> None:
+    style = _tts_style("happy", 1.0, preset="fidelity")
+
+    assert style == {
+        "top_k": 15,
+        "top_p": 0.9,
+        "temperature": 0.8,
+        "speed_factor": 0.967,
+        "fragment_interval": 0.311,
+        "repetition_penalty": 1.35,
+    }
+    assert _tts_split_method("短い台詞です。", "ja", preset="fidelity") == "cut5"
+    assert _tts_split_method("短い台詞です。", "ja", preset="stable") == "cut0"
+
+
+def test_profile_rejects_unknown_emotion_inference_presets() -> None:
+    profile = profile_from_dict(
+        {
+            "id": "atri",
+            "inference_preset": "unknown",
+            "emotion_inference_presets": {
+                "happy": "fidelity",
+                "sad": "unknown",
+            },
+        }
+    )
+
+    assert profile.inference_preset == "stable"
+    assert profile.emotion_inference_presets == {"happy": "fidelity"}
+
+
+def test_emotion_inference_preset_must_match_target_language() -> None:
+    profile = VoiceProfile(
+        id="atri",
+        display_name="ATRI",
+        inference_preset="stable",
+        emotion_inference_presets={"happy": "fidelity"},
+        emotion_references={"happy": "chinese-happy.wav"},
+        emotion_prompt_texts={"happy": "嘿嘿，我派上用场了吧"},
+        emotion_prompt_languages={"happy": "zh"},
+    )
+
+    assert _tts_inference_preset(profile, "happy", "zh") == "fidelity"
+    assert _tts_inference_preset(profile, "happy", "ja") == "stable"
+
+
 def test_tts_seed_is_stable_per_language() -> None:
-    assert _tts_seed("zh") == 19
-    assert _tts_seed("en") == 42
-    assert _tts_seed("ja") == 42
+    assert _tts_seed("zh") == 9992
+    assert _tts_seed("en") == 10015
+    assert _tts_seed("ja") == 10015
 
 
 def test_separator_resolves_relative_outputs_against_output_directory(

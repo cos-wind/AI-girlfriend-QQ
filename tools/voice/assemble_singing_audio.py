@@ -9,6 +9,7 @@ import soundfile as sf
 
 from singing_audio_engineering import (
     apply_expression,
+    apply_vocal_activity_mask,
     assemble_contextual_parts,
     quality_report,
 )
@@ -40,6 +41,7 @@ def main() -> None:
     source, sample_rate = sf.read(args.source_vocal.resolve(), dtype="float32", always_2d=False)
     groups = plan.get("render_groups") or []
     parts: list[np.ndarray] = []
+    source_parts: list[np.ndarray] = []
     print(f"[ATRI_PROGRESS] 10% 对齐 {len(groups)} 个上下文片段", flush=True)
     for index, _group in enumerate(groups, start=1):
         path = args.parts_dir.resolve() / f"group-{index:02d}-converted.wav"
@@ -47,8 +49,17 @@ def main() -> None:
         if audio.ndim == 2:
             audio = audio.mean(axis=1)
         parts.append(_resample(np.asarray(audio), int(part_rate), int(sample_rate)))
-    converted = assemble_contextual_parts(parts, int(sample_rate), plan)
+        first = max(0, round(float(_group["context_start"]) * int(sample_rate)))
+        last = min(len(source), round(float(_group["context_end"]) * int(sample_rate)))
+        source_parts.append(np.asarray(source[first:last]))
+    converted = assemble_contextual_parts(
+        parts,
+        int(sample_rate),
+        plan,
+        source_parts=source_parts,
+    )
     converted = apply_expression(converted, source, int(sample_rate), parameters)
+    converted = apply_vocal_activity_mask(converted, source, int(sample_rate))
     seam_times = [float(group["start_seconds"]) for group in groups[1:]]
     print("[ATRI_PROGRESS] 78% 检测接缝、静音、削波与音高偏差", flush=True)
     quality = quality_report(source, converted, int(sample_rate), seam_times=seam_times)

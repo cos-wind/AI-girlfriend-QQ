@@ -91,6 +91,10 @@ def test_webui_contains_three_stage_music_project_controls() -> None:
         'id="singingSourceFile"',
         'id="singingReferencePath"',
         'id="musicStageSeparation"',
+        'id="musicImportedVocalFile"',
+        'id="musicImportedInstrumentalFile"',
+        'id="musicImportedHarmonyFile"',
+        "importMusicStems()",
         'id="musicStageInference"',
         'id="musicStageMix"',
         'id="musicVocalWave"',
@@ -104,6 +108,19 @@ def test_webui_contains_three_stage_music_project_controls() -> None:
         "/api/music/project/stage",
     ):
         assert value in page
+
+
+def test_music_panel_separates_complete_qq_songs_from_bottom_fragment_library() -> None:
+    page = render_index()
+
+    complete_index = page.index("QQ 整首歌曲库")
+    project_index = page.index("新建歌曲工程")
+    terminal_index = page.index("合成终端 · 简洁进度")
+    fragments_index = page.index("QQ 唱歌片段库（独立管理区）")
+
+    assert complete_index < project_index < terminal_index < fragments_index
+    assert "QQ 点歌不会读取" in page
+    assert "QQ 发送整首" in page
 
 
 def test_music_panel_is_lazy_streaming_and_explains_parameters() -> None:
@@ -124,6 +141,7 @@ def test_music_panel_is_lazy_streaming_and_explains_parameters() -> None:
         'id="musicRerunSegment"',
         'id="musicRevisionSelect"',
         "/api/music/project/segment",
+        "/api/music/project/stems",
         "/api/music/project/rollback",
         "/api/music/project/export",
         "QQmusic-MP3",

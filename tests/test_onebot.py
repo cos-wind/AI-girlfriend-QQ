@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ from atri_qq_bot.onebot.server import (
     _should_reuse_cached_visual,
     _onebot_status_is_healthy,
 )
+from atri_qq_bot.voice import SynthesisResult, VoiceRequest
 
 
 def test_onebot_status_probe_requires_real_online_and_good_flags() -> None:
@@ -34,6 +36,73 @@ def test_onebot_status_probe_requires_real_online_and_good_flags() -> None:
     assert not _onebot_status_is_healthy(
         {"status": "ok", "retcode": 0, "data": {"online": True, "good": False}}
     )
+
+
+def test_conversational_tts_has_no_second_fixed_onebot_timeout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "speech.wav"
+    output.write_bytes(b"RIFFvoice")
+    server = object.__new__(OneBotServer)
+
+    class FakeVoice:
+        async def synthesize(self, *args, **kwargs):
+            await asyncio.sleep(0.02)
+            return SynthesisResult(output)
+
+    server.voice = FakeVoice()
+    monkeypatch.setattr(
+        "atri_qq_bot.onebot.server.VOICE_SEGMENT_SYNTH_TIMEOUT_SECONDS",
+        0.001,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        server._synthesize_voice_segment(
+            "private:10001",
+            VoiceRequest("早安", reason="explicit_request"),
+            enforce_cooldown=True,
+        )
+    )
+
+    assert result.audio_path == output
+
+
+def test_send_group_summary_uses_its_own_delivery_context(tmp_path) -> None:
+    server = object.__new__(OneBotServer)
+    websocket = object()
+    server._active_websockets = {websocket}
+    summary_path = tmp_path / "summary.png"
+    summary_path.write_bytes(b"summary")
+    captured: dict[str, object] = {}
+
+    async def confirmed_action(target, action, params, timeout_seconds):
+        captured.update(
+            target=target,
+            action=action,
+            params=params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"status": "ok", "retcode": 0, "data": {"message_id": 1}}
+
+    server.call_action_and_wait = confirmed_action  # type: ignore[method-assign]
+    server._require_message_delivery = lambda result: None  # type: ignore[method-assign]
+
+    asyncio.run(server.send_group_summary("20001", str(summary_path)))
+
+    assert captured["target"] is websocket
+    assert captured["action"] == "send_group_msg"
+    assert captured["timeout_seconds"] == 15.0
+    assert captured["params"] == {
+        "group_id": "20001",
+        "message": [
+            {
+                "type": "image",
+                "data": {"file": str(summary_path.resolve()), "cache": 0},
+            }
+        ],
+    }
 
 
 def test_text_delivery_waits_for_onebot_result_and_marks_qq_offline(monkeypatch) -> None:
@@ -66,21 +135,56 @@ def test_text_delivery_waits_for_onebot_result_and_marks_qq_offline(monkeypatch)
     assert server._onebot_probe_failures == 1
 
 
-def test_repeated_delivery_failures_request_one_controlled_recovery(monkeypatch) -> None:
+def test_repeated_delivery_failures_request_manual_napcat_login(monkeypatch) -> None:
     server = object.__new__(OneBotServer)
     server._onebot_probe_failures = 2
-    server._last_napcat_recovery_at = 0.0
-    recoveries: list[bool] = []
+    server._last_napcat_manual_login_notice_at = 0.0
+    notices: list[tuple[str, str]] = []
     monkeypatch.setattr("atri_qq_bot.onebot.server.time.monotonic", lambda: 1000.0)
     monkeypatch.setattr(
-        "atri_qq_bot.onebot.server.restart_background_services",
-        lambda: recoveries.append(True) or {"ok": True},
+        "atri_qq_bot.onebot.server.publish_napcat_runtime_state",
+        lambda state, *, detail="": notices.append((state, detail)),
     )
 
-    asyncio.run(server._recover_napcat_after_repeated_probe_failures())
-    asyncio.run(server._recover_napcat_after_repeated_probe_failures())
+    asyncio.run(server._mark_napcat_manual_login_required())
+    asyncio.run(server._mark_napcat_manual_login_required())
 
-    assert recoveries == [True]
+    assert notices == [
+        ("login_required", "NapCat/QQ 状态连续异常，请打开 NapCat WebUI 手动扫码登录")
+    ]
+
+
+def test_reply_failure_is_logged_and_sent_only_to_evaluation_side_channel(
+    tmp_path: Path,
+) -> None:
+    class FakeInsights:
+        def __init__(self) -> None:
+            self.failures: list[tuple[object, str]] = []
+
+        def submit_evaluation_failure(self, sample, error: str) -> None:
+            self.failures.append((sample, error))
+
+    server = object.__new__(OneBotServer)
+    server.insights = FakeInsights()
+    server._reply_event_log = tmp_path / "reply-events.jsonl"
+
+    server._record_reply_failure(
+        {"message_type": "private", "user_id": 10001},
+        turn_id="turn-1",
+        conversation_id="private:10001",
+        user_text="你好",
+        model_reply="",
+        reason="backend unavailable",
+    )
+
+    event = json.loads(server._reply_event_log.read_text(encoding="utf-8"))
+    assert event["status"] == "failed"
+    assert event["delivered_reply"] == ""
+    assert event["failure_reason"] == "backend unavailable"
+    assert len(server.insights.failures) == 1
+    sample, error = server.insights.failures[0]
+    assert sample.answer == ""
+    assert error == "backend unavailable"
 
 
 def test_extract_reply_message_id_from_onebot_segment() -> None:
@@ -133,6 +237,85 @@ def test_handle_payload_routes_poke_as_a_normal_message(monkeypatch) -> None:
     assert captured[0]["post_type"] == "message"
     assert captured[0]["message_type"] == "private"
     assert captured[0]["_atri_poke_event"] is True
+
+
+def test_handle_payload_ignores_valid_json_that_is_not_an_event_object() -> None:
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    captured: list[dict[str, object]] = []
+    server._enqueue_message_event = lambda websocket, event: captured.append(event)
+
+    asyncio.run(server.handle_payload(object(), json.dumps(["not-an-event"])))
+
+    assert captured == []
+
+
+def test_handle_payload_bounds_a_busy_conversation_queue_and_keeps_latest_messages(
+    monkeypatch,
+    caplog,
+) -> None:
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    server._conversation_queues = {}
+    server._conversation_workers = {}
+    server._message_tasks = set()
+    server._start_conversation_worker = lambda queue_id: None
+    monkeypatch.setattr(
+        "atri_qq_bot.onebot.server.CONVERSATION_QUEUE_MAXSIZE",
+        2,
+    )
+
+    async def scenario() -> list[int]:
+        for message_id in (1, 2, 3):
+            await server.handle_payload(
+                object(),
+                json.dumps(
+                    {
+                        "post_type": "message",
+                        "message_type": "private",
+                        "user_id": 10001,
+                        "self_id": 100000001,
+                        "message_id": message_id,
+                        "message": [{"type": "text", "data": {"text": str(message_id)}}],
+                    }
+                ),
+            )
+        queue = server._conversation_queues["private:10001"]
+        return [item[1]["message_id"] for item in (queue.get_nowait(), queue.get_nowait())]
+
+    assert asyncio.run(scenario()) == [2, 3]
+    assert "会话队列已满" in caplog.text
+    assert "dropped_message=1" in caplog.text
+
+
+def test_server_shutdown_cancels_message_workers_and_pending_actions() -> None:
+    server = object.__new__(OneBotServer)
+
+    async def scenario() -> tuple[bool, bool, bool]:
+        gate = asyncio.Event()
+
+        async def worker() -> None:
+            await gate.wait()
+
+        task = asyncio.create_task(worker())
+        pending = asyncio.get_running_loop().create_future()
+        server._message_tasks = {task}
+        server._conversation_workers = {"private:10001": task}
+        server._conversation_queues = {"private:10001": object()}
+        server._pending_actions = {"echo-1": pending}
+
+        await server.shutdown()
+
+        return (
+            task.cancelled(),
+            pending.cancelled(),
+            not server._message_tasks
+            and not server._conversation_workers
+            and not server._conversation_queues
+            and not server._pending_actions,
+        )
+
+    assert asyncio.run(scenario()) == (True, True, True)
 
 
 def test_quoted_text_is_delimited_from_current_message() -> None:

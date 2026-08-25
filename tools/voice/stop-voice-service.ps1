@@ -4,52 +4,53 @@ $PidFile = Join-Path $ProjectDir "data\runtime\voice-service.pid"
 
 function Get-ListeningProcessId {
     param([int]$Port)
-    $Connection = Get-NetTCPConnection `
-        -LocalPort $Port `
-        -State Listen `
-        -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($Connection) {
-        return [int]$Connection.OwningProcess
+    foreach ($Line in (netstat.exe -ano -p TCP 2>$null)) {
+        if ($Line -match ("^\s*TCP\s+\S+:" + $Port + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) {
+            return [int]$Matches[1]
+        }
     }
     return $null
 }
 
-$Processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
 $TargetIds = New-Object System.Collections.Generic.HashSet[int]
+$RecordedProcessId = $null
 if (Test-Path -LiteralPath $PidFile) {
     $RawPid = (Get-Content -LiteralPath $PidFile -Raw).Trim()
     if ($RawPid -match '^\d+$') {
-        $TargetIds.Add([int]$RawPid) | Out-Null
+        $RecordedProcessId = [int]$RawPid
     }
 }
 $ListeningProcessId = Get-ListeningProcessId -Port 8790
 if ($ListeningProcessId) {
-    $ListenerProcess = $Processes | Where-Object ProcessId -eq $ListeningProcessId | Select-Object -First 1
-    if ($ListenerProcess -and $ListenerProcess.CommandLine -like "*atri_voice_service*") {
-        $TargetIds.Add([int]$ListeningProcessId) | Out-Null
+    $IsAtriVoice = $false
+    try {
+        $Health = Invoke-RestMethod -Uri "http://127.0.0.1:8790/health" -TimeoutSec 2
+        $IsAtriVoice = [bool]$Health.ok -and $Health.service -eq "atri-voice"
+    } catch {
+        $IsAtriVoice = $false
     }
-}
-do {
-    $Added = $false
-    foreach ($ProcessInfo in $Processes) {
-        if ($TargetIds.Contains([int]$ProcessInfo.ParentProcessId) -and $ProcessInfo.CommandLine -like "*atri_voice_service*") {
-            if ($TargetIds.Add([int]$ProcessInfo.ProcessId)) { $Added = $true }
+    if ($IsAtriVoice) {
+        $TargetIds.Add([int]$ListeningProcessId) | Out-Null
+        if ($RecordedProcessId -eq $ListeningProcessId) {
+            $TargetIds.Add([int]$RecordedProcessId) | Out-Null
         }
     }
-} while ($Added)
-
-$Targets = $Processes | Where-Object {
-    $TargetIds.Contains([int]$_.ProcessId) -and $_.CommandLine -like "*atri_voice_service*"
-} | Sort-Object ProcessId -Descending
-foreach ($ProcessInfo in $Targets) {
-    Stop-Process -Id $ProcessInfo.ProcessId -Force -ErrorAction SilentlyContinue
+}
+foreach ($ProcessId in $TargetIds) {
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
 }
 Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-for ($Attempt = 0; $Attempt -lt 20; $Attempt++) {
-    if (-not (Get-ListeningProcessId -Port 8790)) {
+for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
+    $RemainingProcessId = Get-ListeningProcessId -Port 8790
+    if (-not $RemainingProcessId) {
         Write-Host "Voice service stopped."
         exit 0
+    }
+    # A Python process can take a moment to leave the listener table while an
+    # inference future is unwinding. Retry only the already verified ATRI PID;
+    # never touch a replacement process that later acquires the same port.
+    if (($Attempt % 4) -eq 3 -and $TargetIds.Contains([int]$RemainingProcessId)) {
+        Stop-Process -Id $RemainingProcessId -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 250
 }

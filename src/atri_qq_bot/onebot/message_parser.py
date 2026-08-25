@@ -1,3 +1,9 @@
+"""OneBot segment 到内部文本/上下文的归一化层。
+
+NapCat 的消息可能同时包含 text、reply、image、record、file、mface 等 segment。
+解析器只负责提取信息，不执行模型、不发送动作，让上层逻辑面对稳定的数据形状。
+"""
+
 from __future__ import annotations
 
 import json
@@ -94,6 +100,8 @@ def extract_reply_inline_message(event: dict[str, Any]) -> Any | None:
 
 
 def extract_plain_text(message: Any) -> str:
+    # 文本摘要用于意图判断和记忆；原始 segment 仍保留在事件中，供 OCR、语音和
+    # 引用消息处理使用，不能把“摘要字符串”当成完整消息替代品。
     if isinstance(message, str):
         return message.strip()
 

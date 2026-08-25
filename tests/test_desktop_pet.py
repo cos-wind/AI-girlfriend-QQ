@@ -12,6 +12,7 @@ from atri_qq_bot.runtime.control import (
     has_established_port,
     is_port_listening,
     restart_background_services,
+    start_background_services,
     runtime_status,
 )
 from atri_qq_bot.runtime.paths import TOOLS_DIR
@@ -48,7 +49,7 @@ def test_desktop_pet_status_maps_runtime_payload() -> None:
             "reply_mode": "mention",
             "bot_qq": 111111111,
             "napcat_state": "login_required",
-            "napcat_detail": "QQ 登录已失效，需要扫码登录",
+            "napcat_detail": "NapCat 未登录，请打开 NapCat WebUI 手动扫码登录",
         }
     )
 
@@ -126,6 +127,39 @@ def test_desktop_pet_stop_kills_process_tree_and_waits_for_port_release(monkeypa
     assert "Atri 服务已停止" in completed.stdout.decode("utf-8")
 
 
+def test_desktop_pet_stop_uses_handle_termination_after_taskkill_timeout(monkeypatch) -> None:
+    rows = iter(
+        [
+            [{"state": "LISTENING", "local_port": 8765, "pid": 43}],
+            [],
+        ]
+    )
+    calls: list[tuple[list[str], float | None]] = []
+
+    def fake_run_hidden(
+        command: list[str], *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append((command, timeout))
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=124,
+            stdout=b"",
+            stderr=b"hidden command timed out",
+        )
+
+    monkeypatch.setattr("atri_desktop.controller.tcp_rows", lambda: next(rows))
+    monkeypatch.setattr("atri_desktop.controller.run_hidden", fake_run_hidden)
+    monkeypatch.setattr(
+        "atri_desktop.controller._terminate_process_by_handle",
+        lambda pid: pid == 43,
+    )
+
+    completed = _stop_python_listener(8765)
+
+    assert completed.returncode == 0
+    assert calls == [(["taskkill.exe", "/PID", "43", "/T", "/F"], 3.0)]
+
+
 def test_desktop_pet_stop_shows_immediate_feedback(monkeypatch) -> None:
     messages: list[str] = []
 
@@ -159,7 +193,7 @@ def test_desktop_pet_default_start_launches_full_stack(monkeypatch, tmp_path) ->
         called.append(True)
         return {"ok": True, "message": "full stack start sent"}
 
-    monkeypatch.setattr("atri_desktop.controller.restart_background_services", fake_restart)
+    monkeypatch.setattr("atri_desktop.controller.start_background_services", fake_restart)
     controller = DesktopPetController(config_loader=lambda: _config(tmp_path))
 
     result = controller.start_services()
@@ -182,10 +216,77 @@ def test_runtime_start_uses_hidden_python_launcher(monkeypatch) -> None:
     assert result["ok"] is True
     assert calls
     command, kwargs = calls[0]
-    assert command[-1].endswith("hidden_launcher.py")
+    assert command[-2].endswith("hidden_launcher.py")
+    assert command[-1] == "recover"
     assert not any("powershell" in item.lower() or "cmd" in item.lower() or "wscript" in item.lower() for item in command)
     assert kwargs["stdout"] == subprocess.DEVNULL
     assert kwargs["stderr"] == subprocess.DEVNULL
+
+
+def test_runtime_start_keeps_non_destructive_core_mode(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            calls.append(list(command))
+
+    monkeypatch.setattr("atri_qq_bot.runtime.control.subprocess.Popen", FakePopen)
+
+    result = start_background_services()
+
+    assert result["ok"] is True
+    assert calls[0][-2].endswith("hidden_launcher.py")
+    assert calls[0][-1] == "core"
+
+
+def test_hidden_launcher_recovery_restarts_atri_and_project_napcat(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    calls: list[object] = []
+    required = (object(), object(), object(), object(), object())
+
+    monkeypatch.setattr(hidden_launcher, "required_napcat_files", lambda: required)
+    monkeypatch.setattr(hidden_launcher, "publish_napcat_state", lambda state, *, detail="": calls.append(("state", state)))
+    monkeypatch.setattr(hidden_launcher, "stop_atri_service", lambda: calls.append("stop-atri") or True)
+    monkeypatch.setattr(hidden_launcher, "stop_project_napcat", lambda: calls.append("stop-napcat") or True)
+    monkeypatch.setattr(hidden_launcher, "start_atri_if_needed", lambda *, wait_for_ready=True: calls.append("start-atri") or True)
+    monkeypatch.setattr(hidden_launcher, "launch_napcat", lambda selected=None: calls.append(("start-napcat", selected)) or True)
+
+    assert hidden_launcher.recover_background_services() is True
+    assert calls == [
+        ("state", "recovering"),
+        "stop-atri",
+        "stop-napcat",
+        "start-atri",
+        ("start-napcat", required),
+    ]
+
+
+def test_hidden_launcher_stops_project_qq_gracefully_before_force_kill(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    calls: list[object] = []
+    monkeypatch.setattr(hidden_launcher, "project_qq_pids", lambda: [101, 202])
+    monkeypatch.setattr(
+        hidden_launcher,
+        "close_project_qq_windows",
+        lambda pids: calls.append(("close", tuple(pids))) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
+        "wait_for_project_qq_exit",
+        lambda timeout_seconds=5.0: calls.append(("wait", timeout_seconds)) or True,
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
+        "taskkill_process_tree",
+        lambda pid: calls.append(("kill", pid)),
+    )
+    monkeypatch.setattr(hidden_launcher, "log", lambda message: None)
+
+    assert hidden_launcher.stop_project_napcat(timeout_seconds=8.0) is True
+    assert calls == [("close", (101, 202)), ("wait", 8.0)]
 
 
 def test_runtime_status_uses_native_tcp_table_without_subprocess(monkeypatch) -> None:
@@ -364,7 +465,35 @@ def test_desktop_pet_start_button_ignores_duplicate_clicks() -> None:
     app.start_services()
     app.start_services()
 
-    assert calls == ["after:90000", "start", "亚托莉正在启动中，稍等一下。"]
+    assert calls == ["after:30000", "start", "亚托莉正在启动中，稍等一下。"]
+
+
+def test_desktop_pet_refreshes_quickly_only_while_core_is_starting() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeRoot:
+        def after(self, delay_ms: int, callback) -> str:
+            calls.append(("after", delay_ms))
+            return f"after-{delay_ms}"
+
+        def after_cancel(self, after_id: str) -> None:
+            calls.append(("cancel", after_id))
+
+    app = DesktopPetApp.__new__(DesktopPetApp)
+    app.root = FakeRoot()
+    app.closing = False
+    app.status_after_id = None
+    app.startup_guard_after_id = "startup"
+
+    app._schedule_status_refresh()
+    app.startup_guard_after_id = None
+    app._schedule_status_refresh()
+
+    assert calls == [
+        ("after", 1000),
+        ("cancel", "after-1000"),
+        ("after", 10000),
+    ]
 
 
 def test_desktop_pet_close_hides_window_before_destroying() -> None:
@@ -526,10 +655,16 @@ def test_hidden_launcher_starts_ollama_with_configured_models_path(
     ollama.write_text("fake", encoding="utf-8")
     models_path = tmp_path / "models"
     events: list[tuple[str, object, object]] = []
-    port_checks = iter([False, True])
+    port_checks = iter([False, True, True])
+    api_checks: list[bool] = []
 
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(hidden_launcher, "port_open", lambda port: next(port_checks))
+    monkeypatch.setattr(
+        hidden_launcher,
+        "ollama_api_has_models",
+        lambda: api_checks.append(True) or len(api_checks) >= 2,
+    )
     monkeypatch.setattr(hidden_launcher, "ollama_models_path", lambda: models_path)
     monkeypatch.setattr(hidden_launcher, "time", SimpleNamespace(sleep=lambda seconds: None))
     monkeypatch.setattr(hidden_launcher, "log", lambda message: events.append(("log", message, None)))
@@ -547,9 +682,10 @@ def test_hidden_launcher_starts_ollama_with_configured_models_path(
     assert popen_events[0][1] == [str(ollama), "serve"]
     assert popen_events[0][2]["env"]["OLLAMA_MODELS"] == str(models_path)
     assert models_path.exists()
+    assert len(api_checks) == 2
 
 
-def test_hidden_launcher_starts_core_before_optional_services(monkeypatch) -> None:
+def test_hidden_launcher_starts_chat_core_before_optional_services(monkeypatch) -> None:
     from tools.launch.qq_legacy import hidden_launcher
 
     events: list[object] = []
@@ -558,9 +694,14 @@ def test_hidden_launcher_starts_core_before_optional_services(monkeypatch) -> No
     monkeypatch.setattr(
         hidden_launcher,
         "start_atri_if_needed",
-        lambda *, wait_for_ready: events.append(("atri", wait_for_ready)),
+        lambda *, wait_for_ready: events.append(("atri", wait_for_ready)) or True,
     )
-    monkeypatch.setattr(hidden_launcher, "start_napcat_if_needed", lambda: events.append("napcat"))
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_launcher_mode_in_background",
+        lambda mode: events.append(("background", mode)),
+        raising=False,
+    )
     monkeypatch.setattr(
         hidden_launcher,
         "start_gpt_sovits_if_needed",
@@ -579,12 +720,108 @@ def test_hidden_launcher_starts_core_before_optional_services(monkeypatch) -> No
 
     assert hidden_launcher.main() == 0
     assert events == [
-        ("atri", False),
-        "napcat",
-        "gpt-sovits",
-        ("ollama", False),
-        ("voice", False),
+        ("atri", True),
+        ("background", "napcat"),
+        ("background", "optional"),
     ]
+
+
+def test_hidden_launcher_does_not_start_dependents_when_atri_fails(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    events: list[object] = []
+    monkeypatch.setattr(hidden_launcher, "acquire_single_instance_mutex", lambda name: True)
+    monkeypatch.setattr(hidden_launcher, "log", lambda message: None)
+    monkeypatch.setattr(hidden_launcher, "start_atri_if_needed", lambda *, wait_for_ready: False)
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_launcher_mode_in_background",
+        lambda mode: events.append(mode),
+    )
+
+    assert hidden_launcher.main("core") == 1
+    assert events == []
+
+
+def test_hidden_launcher_staggers_optional_services_after_napcat(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    events: list[object] = []
+    monkeypatch.setattr(hidden_launcher, "acquire_single_instance_mutex", lambda name: True)
+    monkeypatch.setattr(hidden_launcher, "log", lambda message: None)
+    monkeypatch.setattr(
+        hidden_launcher,
+        "wait_for_connection",
+        lambda seconds, **kwargs: events.append(("wait", seconds)) or True,
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_qzone_bridge_if_needed",
+        lambda *, wait_for_ready: events.append(("qzone", wait_for_ready)),
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_maibot_if_needed",
+        lambda *, wait_for_ready: events.append(("maibot", wait_for_ready)),
+    )
+    monkeypatch.setattr(
+        hidden_launcher.time,
+        "sleep",
+        lambda seconds: events.append(("sleep", seconds)),
+    )
+
+    assert hidden_launcher.main("optional") == 0
+    assert events == [
+        ("wait", 30),
+        ("qzone", False),
+        ("sleep", 2.0),
+        ("maibot", False),
+    ]
+
+
+def test_hidden_launcher_isolates_optional_service_failures(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    events: list[str] = []
+    monkeypatch.setattr(hidden_launcher, "acquire_single_instance_mutex", lambda name: True)
+    monkeypatch.setattr(hidden_launcher, "wait_for_connection", lambda seconds, **kwargs: True)
+    monkeypatch.setattr(hidden_launcher, "log", lambda message: events.append(message))
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_qzone_bridge_if_needed",
+        lambda *, wait_for_ready: (_ for _ in ()).throw(OSError("qzone failed")),
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_maibot_if_needed",
+        lambda *, wait_for_ready: events.append("maibot"),
+    )
+    monkeypatch.setattr(hidden_launcher.time, "sleep", lambda seconds: None)
+
+    assert hidden_launcher.main("optional") == 0
+    assert "maibot" in events
+    assert any("qzone failed" in event for event in events)
+
+
+def test_hidden_launcher_starts_voice_only_on_demand(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    events: list[object] = []
+    monkeypatch.setattr(hidden_launcher, "acquire_single_instance_mutex", lambda name: True)
+    monkeypatch.setattr(hidden_launcher, "log", lambda message: None)
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_gpt_sovits_if_needed",
+        lambda: events.append("gpt-sovits"),
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
+        "start_voice_if_needed",
+        lambda *, wait_for_ready: events.append(("voice", wait_for_ready)),
+    )
+
+    assert hidden_launcher.main("voice-tts") == 0
+    assert events == [("voice", True)]
 
 
 def test_hidden_launcher_preflights_napcat_before_stopping_qq(monkeypatch) -> None:
@@ -634,6 +871,25 @@ def test_hidden_launcher_cold_start_skips_unnecessary_process_stops(
     assert events == [("launch", required)]
 
 
+def test_hidden_launcher_process_enumeration_does_not_spawn_tasklist(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    expected = [{"name": "QQ.exe", "pid": "123"}]
+    monkeypatch.setattr(
+        hidden_launcher,
+        "_windows_process_rows",
+        lambda: expected,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
+        "run_hidden",
+        lambda args: (_ for _ in ()).throw(AssertionError("tasklist must not be spawned")),
+    )
+
+    assert hidden_launcher.process_rows() == expected
+
+
 def test_hidden_launcher_preserves_running_login_session(monkeypatch) -> None:
     from tools.launch.qq_legacy import hidden_launcher
 
@@ -653,6 +909,11 @@ def test_hidden_launcher_preserves_running_login_session(monkeypatch) -> None:
     monkeypatch.setattr(hidden_launcher, "project_qq_pids", lambda: [10])
     monkeypatch.setattr(
         hidden_launcher,
+        "status_payload",
+        lambda: {"napcat_state": "qq_offline"},
+    )
+    monkeypatch.setattr(
+        hidden_launcher,
         "taskkill",
         lambda name: events.append(("stop", name)),
     )
@@ -660,16 +921,6 @@ def test_hidden_launcher_preserves_running_login_session(monkeypatch) -> None:
         hidden_launcher,
         "launch_napcat",
         lambda files: events.append(("launch", files)) or True,
-    )
-    monkeypatch.setattr(
-        hidden_launcher,
-        "show_qq_window",
-        lambda **kwargs: events.append(("show", kwargs)) or True,
-    )
-    monkeypatch.setattr(
-        hidden_launcher,
-        "fresh_napcat_qrcode",
-        lambda napcat_dir: Path("qrcode.png"),
     )
     monkeypatch.setattr(
         hidden_launcher,
@@ -681,29 +932,47 @@ def test_hidden_launcher_preserves_running_login_session(monkeypatch) -> None:
     hidden_launcher.start_napcat_if_needed()
 
     assert not any(event[0] in {"stop", "launch"} for event in events)
-    assert any(event[0] == "show" for event in events)
     assert any(event[:2] == ("state", "login_required") for event in events)
 
 
-def test_hidden_launcher_detects_only_fresh_login_qrcode(tmp_path: Path, monkeypatch) -> None:
+def test_hidden_launcher_reports_login_required_for_disconnected_running_napcat(
+    monkeypatch,
+) -> None:
     from tools.launch.qq_legacy import hidden_launcher
 
-    qrcode = tmp_path / "cache" / "qrcode.png"
-    qrcode.parent.mkdir()
-    qrcode.write_bytes(b"png")
-    monkeypatch.setattr(hidden_launcher.time, "time", lambda: 1_000.0)
-    os.utime(qrcode, (950.0, 950.0))
+    required = tuple(Path(f"required-{index}") for index in range(5))
+    states: list[tuple[str, str]] = []
+    monkeypatch.setattr(hidden_launcher, "bot_connected", lambda: False)
+    monkeypatch.setattr(hidden_launcher, "required_napcat_files", lambda: required)
+    monkeypatch.setattr(hidden_launcher, "bot_qq_uin", lambda: "100000001")
+    monkeypatch.setattr(
+        hidden_launcher,
+        "process_rows",
+        lambda: [
+            {"name": "QQ.exe", "pid": "10"},
+            {"name": "NapCatWinBootMain.exe", "pid": "11"},
+        ],
+    )
+    monkeypatch.setattr(hidden_launcher, "project_qq_pids", lambda: [10])
+    monkeypatch.setattr(hidden_launcher, "status_payload", lambda: {"napcat_state": "connecting"})
+    monkeypatch.setattr(
+        hidden_launcher,
+        "publish_napcat_state",
+        lambda state, **kwargs: states.append((state, str(kwargs.get("detail") or ""))),
+    )
+    monkeypatch.setattr(hidden_launcher, "log", lambda message: None)
 
-    assert hidden_launcher.fresh_napcat_qrcode(tmp_path) == qrcode
+    hidden_launcher.start_napcat_if_needed()
 
-    os.utime(qrcode, (100.0, 100.0))
-    assert hidden_launcher.fresh_napcat_qrcode(tmp_path) is None
+    assert states == [
+        ("login_required", "NapCat 已启动但 QQ 未登录，请打开 NapCat WebUI 手动扫码登录")
+    ]
 
 
 def test_runtime_status_surfaces_recent_napcat_login_state(tmp_path: Path, monkeypatch) -> None:
     state_path = tmp_path / "napcat-state.json"
     state_path.write_text(
-        '{"state":"login_required","detail":"QQ 登录已失效，需要扫码登录","updated_at":1000}',
+        '{"state":"login_required","detail":"NapCat 未登录，请打开 NapCat WebUI 手动扫码登录","updated_at":1000}',
         encoding="utf-8",
     )
     monkeypatch.setattr("atri_qq_bot.runtime.control.NAPCAT_STATE_FILE", state_path)
@@ -717,7 +986,7 @@ def test_runtime_status_surfaces_recent_napcat_login_state(tmp_path: Path, monke
 
     assert status["napcat"] is False
     assert status["napcat_state"] == "login_required"
-    assert "扫码" in status["napcat_detail"]
+    assert "WebUI" in status["napcat_detail"]
 
 
 def test_runtime_status_does_not_keep_connected_state_without_tcp(
@@ -948,6 +1217,31 @@ def test_hidden_launcher_can_start_atri_without_waiting(monkeypatch) -> None:
     assert [event[0] for event in events] == ["launch"]
 
 
+def test_hidden_launcher_reports_atri_process_launch_failure(monkeypatch) -> None:
+    from tools.launch.qq_legacy import hidden_launcher
+
+    class FakePath:
+        def exists(self) -> bool:
+            return True
+
+        def __str__(self) -> str:
+            return "pythonw.exe"
+
+    messages: list[str] = []
+    monkeypatch.setattr(hidden_launcher, "port_open", lambda port: False)
+    monkeypatch.setattr(hidden_launcher, "PROJECT_PYTHONW", FakePath())
+    monkeypatch.setattr(hidden_launcher, "PROJECT_PYTHON", FakePath())
+    monkeypatch.setattr(
+        hidden_launcher,
+        "popen_hidden",
+        lambda args, **kwargs: (_ for _ in ()).throw(OSError("launch denied")),
+    )
+    monkeypatch.setattr(hidden_launcher, "log", messages.append)
+
+    assert hidden_launcher.start_atri_if_needed() is False
+    assert any("launch denied" in message for message in messages)
+
+
 def test_hidden_launcher_loads_no_window_compat_for_voice_service(
     tmp_path: Path,
     monkeypatch,
@@ -1017,16 +1311,57 @@ def test_hidden_launcher_does_not_show_qq_when_already_connected(
     events: list[str] = []
     monkeypatch.setattr(hidden_launcher, "port_open", lambda port: True)
     monkeypatch.setattr(hidden_launcher, "bot_connected", lambda: True)
-    monkeypatch.setattr(
-        hidden_launcher,
-        "show_qq_window",
-        lambda **kwargs: events.append("show") or True,
-    )
     monkeypatch.setattr(hidden_launcher, "log", lambda message: None)
 
     hidden_launcher.start_napcat_if_needed()
 
     assert events == []
+
+
+def test_legacy_launchers_delegate_to_single_core_launcher() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    assert (project_root / "tools" / "launch" / "qq_legacy" / "hidden_launcher.py").is_file()
+    adapter = project_root / "tools" / "launch" / "qq_legacy" / "start-with-qq.ps1"
+    adapter_text = adapter.read_text(encoding="utf-8")
+
+    assert "hidden_launcher.py" in adapter_text
+    assert "Show-QQWindow" not in adapter_text
+    assert "Stop-Process" not in adapter_text
+    assert "NapCatWinBootMain.exe" not in adapter_text
+
+    for name in ("start-all.bat", "start-napcat.bat"):
+        text = (adapter.parent / name).read_text(encoding="utf-8")
+        assert "start-with-qq.ps1" in text
+        assert "cmd /k" not in text.lower()
+        assert "launcher-user.bat" not in text
+
+    vbs_text = (adapter.parent / "start-with-qq.vbs").read_text(encoding="utf-8")
+    assert "start-with-qq.ps1" in vbs_text
+    assert "hidden_launcher.py" not in vbs_text
+
+    atri_batch = (project_root / "tools" / "launch" / "atri" / "start-atri.bat").read_text(
+        encoding="utf-8"
+    )
+    assert "pythonw.exe" in atri_batch
+    assert "hidden_launcher.py\" core" in atri_batch
+    assert "start-qzone-bridge.ps1" not in atri_batch
+    assert "start-maibot.ps1" not in atri_batch
+    assert "python.exe\" -m atri_qq_bot" not in atri_batch
+    assert "netstat" not in atri_batch.lower()
+    assert "-c \"import atri_qq_bot" not in atri_batch
+
+    assert not (project_root / "tools" / "launch" / "atri" / "run.ps1").exists()
+
+
+def test_gpt_sovits_stop_does_not_use_unbounded_wmi_scan() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    stop_script = (
+        project_root / "tools" / "voice" / "stop-gpt-sovits.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "Get-CimInstance Win32_Process" not in stop_script
+    assert "netstat.exe -ano -p TCP" in stop_script
+    assert "gpt-sovits.pid" in stop_script
 
 
 def test_hidden_launcher_uses_no_console_process_flags(monkeypatch) -> None:

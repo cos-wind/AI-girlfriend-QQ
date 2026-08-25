@@ -5,6 +5,7 @@ from .runtime.control import (
     hidden_subprocess_startupinfo,
     is_port_listening,
     restart_background_services,
+    start_background_services,
     run_hidden,
     runtime_status,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "hidden_subprocess_startupinfo",
     "is_port_listening",
     "restart_background_services",
+    "start_background_services",
     "run_hidden",
     "runtime_status",
 ]

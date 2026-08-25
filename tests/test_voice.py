@@ -34,6 +34,20 @@ from atri_qq_bot.voice import (
     save_voice_behavior,
     split_spoken_text,
 )
+from atri_qq_bot.music import SingingConversationController
+
+
+@pytest.fixture(autouse=True)
+def _isolate_voice_tests_from_the_live_modality_allowlist(monkeypatch) -> None:
+    """Voice behavior tests must not depend on the operator's WebUI policy."""
+    monkeypatch.setattr(
+        "atri_qq_bot.onebot.server.is_event_modality_allowed",
+        lambda event, modality: True,
+    )
+    monkeypatch.setattr(
+        "atri_qq_bot.voice.manager.is_event_modality_allowed",
+        lambda event, modality: True,
+    )
 
 
 def test_explicit_delivery_guard_detects_speech_singing_and_negation() -> None:
@@ -414,6 +428,64 @@ def test_speech_client_retries_transient_gateway_failure(monkeypatch, tmp_path: 
     assert result.audio_path == output
 
 
+def test_speech_client_starts_only_asr_runtime_after_local_connect_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from atri_qq_bot.voice import client as voice_client
+
+    audio = tmp_path / "voice.wav"
+    audio.write_bytes(b"RIFFvoice")
+    client = SpeechServiceClient("http://127.0.0.1:8790", timeout_seconds=5)
+    attempts = 0
+    modes: list[str] = []
+
+    async def fake_post(path: str, payload: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SpeechServiceError("语音服务不可用：connection refused")
+        return {"ok": True, "text": "收到", "language": "zh", "emotion": "neutral"}
+
+    monkeypatch.setattr(client, "_post_json", fake_post)
+    monkeypatch.setattr(voice_client, "_launch_runtime_mode", modes.append)
+    monkeypatch.setattr(voice_client, "_tcp_open", lambda port: port == 8790)
+
+    result = asyncio.run(client.transcribe(audio))
+
+    assert result.text == "收到"
+    assert modes == ["voice-asr"]
+
+
+def test_speech_client_retries_tts_when_only_lightweight_service_is_ready(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from atri_qq_bot.voice import client as voice_client
+
+    output = tmp_path / "voice.wav"
+    output.write_bytes(b"RIFFvoice")
+    client = SpeechServiceClient("http://127.0.0.1:8790", timeout_seconds=5)
+    attempts = 0
+    modes: list[str] = []
+
+    async def fake_post(path: str, payload: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SpeechServiceError("语音服务不可用：connection refused")
+        return {"ok": True, "audio_path": str(output), "source": "tts"}
+
+    monkeypatch.setattr(client, "_post_json", fake_post)
+    monkeypatch.setattr(voice_client, "_launch_runtime_mode", modes.append)
+    monkeypatch.setattr(voice_client, "_tcp_open", lambda port: port == 8790)
+
+    result = asyncio.run(client.synthesize(VoiceRequest("你好"), "atri"))
+
+    assert result.audio_path == output
+    assert modes == ["voice-tts"]
+
+
 def test_voice_manager_resolves_napcat_record_and_transcribes(tmp_path: Path) -> None:
     audio = tmp_path / "voice.wav"
     audio.write_bytes(b"RIFFvoice")
@@ -486,10 +558,10 @@ def test_voice_manager_only_starts_cooldown_after_success(tmp_path: Path) -> Non
         asyncio.run(manager.synthesize("private:1", request))
 
 
-def test_voice_manager_uses_chinese_rescue_profile_after_quality_rejection(
+def test_voice_manager_uses_one_audio_rescue_without_chat_quality_gate(
     tmp_path: Path,
 ) -> None:
-    output = tmp_path / "rescue.wav"
+    output = tmp_path / "speech.wav"
     output.write_bytes(b"RIFFvoice")
     config = type(
         "Config",
@@ -498,7 +570,6 @@ def test_voice_manager_uses_chinese_rescue_profile_after_quality_rejection(
             "voice_service_url": "http://127.0.0.1:8790",
             "voice_service_timeout_seconds": 5,
             "voice_profile": "atri-main",
-            "voice_zh_rescue_profile": "atri-zh-rescue",
             "voice_cooldown_seconds": 30,
         },
     )()
@@ -517,12 +588,6 @@ def test_voice_manager_uses_chinese_rescue_profile_after_quality_rejection(
         retry_counts.append(int(kwargs["quality_retries"]))
         contextual_fallbacks.append(bool(kwargs["allow_context_original_fallback"]))
         best_effort_flags.append(bool(kwargs["allow_best_effort"]))
-        if profile == "atri-main":
-            raise SpeechServiceError(
-                "语音回读未达到质量标准",
-                quality={"rejected": True, "error_rate": 1.0},
-                status_code=400,
-            )
         return SynthesisResult(
             output,
             quality={"passed": True, "error_rate": 0.0},
@@ -536,18 +601,21 @@ def test_voice_manager_uses_chinese_rescue_profile_after_quality_rejection(
         )
     )
 
-    assert profiles == ["atri-main", "atri-zh-rescue"]
-    assert retry_counts == [3, 3]
-    assert contextual_fallbacks == [True, True]
-    assert best_effort_flags == [True, True]
+    assert profiles == ["atri-main"]
+    assert retry_counts == [1]
+    assert contextual_fallbacks == [True]
+    assert best_effort_flags == [True]
     assert result.quality == {
         "passed": True,
         "error_rate": 0.0,
-        "rescue_profile": "atri-zh-rescue",
     }
 
 
-def test_voice_manager_does_not_substitute_a_system_voice_when_profiles_fail() -> None:
+def test_voice_manager_uses_one_profile_for_all_languages(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "speech.wav"
+    output.write_bytes(b"RIFFvoice")
     config = type(
         "Config",
         (),
@@ -555,7 +623,38 @@ def test_voice_manager_does_not_substitute_a_system_voice_when_profiles_fail() -
             "voice_service_url": "http://127.0.0.1:8790",
             "voice_service_timeout_seconds": 5,
             "voice_profile": "atri-main",
-            "voice_zh_rescue_profile": "atri-zh-rescue",
+            "voice_zh_profile": "atri-zh-primary",
+            "voice_cooldown_seconds": 0,
+        },
+    )()
+    manager = VoiceManager(config)
+    profiles: list[str] = []
+
+    async def synthesize(
+        request: VoiceRequest,
+        profile: str,
+        **kwargs: object,
+    ) -> SynthesisResult:
+        profiles.append(profile)
+        return SynthesisResult(output)
+
+    manager.client.synthesize = synthesize  # type: ignore[method-assign]
+
+    asyncio.run(manager.synthesize("private:zh", VoiceRequest("早安", language="zh")))
+    asyncio.run(manager.synthesize("private:ja", VoiceRequest("おはよう", language="ja")))
+    asyncio.run(manager.synthesize("private:auto", VoiceRequest("早安", language="auto")))
+
+    assert profiles == ["atri-main", "atri-main", "atri-main"]
+
+
+def test_voice_manager_does_not_retry_another_profile_when_primary_fails() -> None:
+    config = type(
+        "Config",
+        (),
+        {
+            "voice_service_url": "http://127.0.0.1:8790",
+            "voice_service_timeout_seconds": 5,
+            "voice_profile": "atri-main",
             "voice_cooldown_seconds": 30,
         },
     )()
@@ -576,7 +675,7 @@ def test_voice_manager_does_not_substitute_a_system_voice_when_profiles_fail() -
 
     manager.client.synthesize = failed_synthesis  # type: ignore[method-assign]
 
-    with pytest.raises(SpeechServiceError, match="中文救援档案也未通过"):
+    with pytest.raises(SpeechServiceError, match="atri-main failed"):
         asyncio.run(
             manager.synthesize(
                 "private:1",
@@ -584,7 +683,7 @@ def test_voice_manager_does_not_substitute_a_system_voice_when_profiles_fail() -
             )
         )
 
-    assert profiles == ["atri-main", "atri-zh-rescue"]
+    assert profiles == ["atri-main"]
     assert not hasattr(manager, "system_fallback")
 
 
@@ -852,7 +951,7 @@ def test_onebot_streams_long_voice_as_each_segment_is_synthesized(
     ]
 
 
-def test_onebot_streams_expressive_text_and_only_falls_back_failed_segments(
+def test_onebot_voice_quality_failure_sends_text_fallback(
     tmp_path: Path,
 ) -> None:
     config = BotConfig(
@@ -915,21 +1014,12 @@ def test_onebot_streams_expressive_text_and_only_falls_back_failed_segments(
     )
 
     assert delivered == text
-    assert synthesized == ["哒哒哒哒", "好想玩原神", "呜呜呜", "看云彩缤纷"]
-    assert [message.kind for message in sent] == [
-        "text",
-        "text",
-        "record",
-        "text",
-        "record",
-    ]
-    assert sent[0].content == "有一小段语音没合成好，改用文字。"
-    assert sent[1].content == "哒哒哒哒"
-    assert sent[3].content == "呜呜呜"
-    assert all("错误率" not in message.content for message in sent)
+    assert synthesized == ["哒哒哒哒"]
+    assert [message.kind for message in sent] == ["text"]
+    assert sent[0].content == text
 
 
-def test_onebot_service_failure_sends_readable_remaining_text(
+def test_onebot_service_failure_sends_remaining_text(
     tmp_path: Path,
 ) -> None:
     config = BotConfig(
@@ -987,14 +1077,20 @@ def test_onebot_service_failure_sends_readable_remaining_text(
         )
     )
 
-    assert [message.kind for message in sent] == ["record", "text", "text"]
-    assert sent[1].content == "有一小段语音没合成好，改用文字。"
-    assert sent[2].content == "好想玩原神，呜呜呜，看云彩缤纷"
+    assert [message.kind for message in sent] == ["record", "text"]
+    assert sent[-1].content == "好想玩原神呜呜呜，看云彩缤纷"
 
 
 def test_onebot_probability_choice_converts_natural_reply_to_voice(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # This test covers delivery after the model has selected voice.  Keep it
+    # independent from the operator's real-time quiet-hours policy.
+    monkeypatch.setattr(
+        "atri_qq_bot.onebot.server.evaluate_voice_request",
+        lambda *args, **kwargs: SimpleNamespace(allowed=True),
+    )
     output = tmp_path / "atri.wav"
     output.write_bytes(b"RIFFvoice")
     config = BotConfig(
@@ -1127,7 +1223,7 @@ def test_onebot_record_send_requires_successful_napcat_receipt(tmp_path: Path) -
         )
 
 
-def test_onebot_singing_failure_does_not_send_generic_model_fallback() -> None:
+def test_onebot_singing_failure_does_not_send_generic_model_fallback(tmp_path: Path) -> None:
     config = BotConfig(
         bot_qq=100000001,
         host="127.0.0.1",
@@ -1181,16 +1277,12 @@ def test_onebot_singing_failure_does_not_send_generic_model_fallback() -> None:
 
     fake_engine = FakeEngine()
     server = OneBotServer(config, fake_engine)  # type: ignore[arg-type]
+    server.singing = SingingConversationController(root=tmp_path / "empty-song-library")
 
     async def analyze(*args: object, **kwargs: object) -> None:
         return None
 
-    async def synthesize(conversation_id: str, request: VoiceRequest) -> SynthesisResult:
-        assert request.mode == "singing"
-        raise RuntimeError("no singing clip")
-
     server.tools.analyze = analyze  # type: ignore[method-assign]
-    server.voice.synthesize = synthesize  # type: ignore[method-assign]
     websocket = FakeWebSocket()
 
     async def successful_action(
@@ -1225,13 +1317,101 @@ def test_onebot_singing_failure_does_not_send_generic_model_fallback() -> None:
     payload = json.loads(websocket.sent[-1])
     text = payload["params"]["message"]
     assert "啦啦啦" not in text
-    assert text == "这次歌声没有生成成功。"
+    assert text == "这首歌我还没学会哦。"
     assert fake_engine.recorded_replies
-    assert fake_engine.recorded_replies[-1] == "这次歌声没有生成成功。"
+    assert fake_engine.recorded_replies[-1] == "这首歌我还没学会哦。"
     assert "啦啦啦" not in fake_engine.recorded_replies[-1]
 
 
-def test_voice_send_failure_uses_separate_brief_notice_and_text_fallback() -> None:
+def test_onebot_explicit_singing_bypasses_chat_model_and_sends_prepared_record(
+    tmp_path: Path,
+) -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="private",
+        openai_api_key="test",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.8,
+        max_tokens=200,
+        voice_tts_enabled=False,
+        sticker_capture_enabled=False,
+    )
+
+    class FakeEngine:
+        memory = SimpleNamespace()
+
+        def __init__(self) -> None:
+            self.reply_calls = 0
+            self.recorded_replies: list[str] = []
+
+        def remember_target(self, *args: object) -> None:
+            return None
+
+        def observe_incoming(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def reply(self, *args: object, **kwargs: object) -> str:
+            self.reply_calls += 1
+            raise AssertionError("明确点歌不应调用聊天模型")
+
+        def record_bot_reply(self, conversation_id: str, reply_text: str, *args: object, **kwargs: object) -> None:
+            self.recorded_replies.append(reply_text)
+
+        def profile_for(self, conversation_id: str) -> dict[str, object]:
+            return {"affection_score": 0, "message_count": 0}
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, payload: str) -> None:
+            self.sent.append(payload)
+
+    complete = tmp_path / "完整音乐"
+    complete.mkdir(parents=True)
+    full_song = complete / "铁花飞.wav"
+    full_song.write_bytes(b"prepared-full-song")
+    fake_engine = FakeEngine()
+    server = OneBotServer(config, fake_engine)  # type: ignore[arg-type]
+    server.singing = SingingConversationController(root=complete)
+    websocket = FakeWebSocket()
+
+    async def successful_action(
+        target: FakeWebSocket,
+        action: str,
+        params: dict[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        await target.send(json.dumps({"action": action, "params": params}, ensure_ascii=False))
+        return {"status": "ok", "retcode": 0, "data": {"message_id": 1}}
+
+    server.call_action_and_wait = successful_action  # type: ignore[method-assign]
+    asyncio.run(
+        server._handle_event(
+            websocket,
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "self_id": config.bot_qq,
+                "user_id": 10001,
+                "message": [{"type": "text", "data": {"text": "给我唱铁花飞"}}],
+                "sender": {"nickname": "主人"},
+            },
+        )
+    )
+
+    assert fake_engine.reply_calls == 0
+    payload = json.loads(websocket.sent[-1])
+    assert payload["action"] == "send_private_msg"
+    assert payload["params"]["message"][0]["type"] == "record"
+    assert str(full_song.resolve()) in payload["params"]["message"][0]["data"]["file"]
+    assert fake_engine.recorded_replies == ["《铁花飞》完整歌曲"]
+
+
+def test_voice_send_failure_sends_text_fallback() -> None:
     config = BotConfig(
         bot_qq=100000001,
         host="127.0.0.1",
@@ -1256,7 +1436,7 @@ def test_voice_send_failure_uses_separate_brief_notice_and_text_fallback() -> No
         sent.append(message)
 
     server._send_one_reply = fake_send  # type: ignore[method-assign]
-    asyncio.run(
+    delivered = asyncio.run(
         server.send_reply(
             object(),
             {"message_type": "private", "user_id": 10001},
@@ -1265,11 +1445,11 @@ def test_voice_send_failure_uses_separate_brief_notice_and_text_fallback() -> No
         )
     )
 
-    assert len(sent) == 3
+    assert delivered == "晚安，做个好梦。"
+    assert len(sent) == 2
+    assert sent[0].kind == "record"
     assert sent[1].kind == "text"
-    assert sent[1].content == "语音没有发送成功。"
-    assert sent[2].kind == "text"
-    assert sent[2].content == "晚安，做个好梦。"
+    assert sent[1].content == "晚安，做个好梦。"
 
 
 def test_voice_config_is_disabled_by_default_and_can_be_enabled(

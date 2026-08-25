@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
 from typing import Any
 
 import httpx
@@ -37,9 +42,10 @@ class SpeechServiceClient:
         path = Path(audio_path).expanduser().resolve()
         if not path.is_file():
             raise SpeechServiceError(f"语音文件不存在：{path}")
-        payload = await self._post_json(
+        payload = await self._post_with_runtime(
             "/v1/transcribe",
             {"audio_path": str(path), "language": language or "auto"},
+            runtime_mode="voice-asr",
         )
         _require_ok(payload)
         text = str(payload.get("text") or "").strip()
@@ -87,9 +93,10 @@ class SpeechServiceClient:
             )
         if allow_best_effort is not None:
             request_payload["allow_best_effort"] = allow_best_effort
-        payload = await self._post_json(
+        payload = await self._post_with_runtime(
             "/v1/synthesize",
             request_payload,
+            runtime_mode="voice-tts",
         )
         _require_ok(payload)
         raw_path = str(payload.get("audio_path") or "").strip()
@@ -170,7 +177,9 @@ class SpeechServiceClient:
         return payload
 
     async def _post_json(self, path: str, payload: dict[str, object]) -> dict[str, Any]:
-        delays = (0.2, 0.6)
+        # One short transport retry only. Model-level retries belong to the
+        # voice service; repeating them here duplicated slow TTS work.
+        delays = (0.25,)
         for attempt in range(len(delays) + 1):
             try:
                 async with httpx.AsyncClient(timeout=self._timeout()) as client:
@@ -205,6 +214,36 @@ class SpeechServiceClient:
             return result
         raise SpeechServiceError("语音服务重试后仍不可用")
 
+    async def _post_with_runtime(
+        self,
+        path: str,
+        payload: dict[str, object],
+        *,
+        runtime_mode: str,
+    ) -> dict[str, Any]:
+        """Retry one local request after starting only its required slice."""
+        try:
+            return await self._post_json(path, payload)
+        except SpeechServiceError as exc:
+            if not _is_loopback_url(self.base_url) or not str(exc).startswith(
+                "语音服务不可用："
+            ):
+                raise
+
+        await asyncio.to_thread(_launch_runtime_mode, runtime_mode)
+        # 9880 由重试请求进入 8790 后、在全局推理锁内启动；在此提前等待
+        # 会形成“请求未进入，所以引擎永远不启动”的死锁。
+        required_ports = (8790,)
+        deadline = time.monotonic() + (120.0 if runtime_mode == "voice-tts" else 45.0)
+        while time.monotonic() < deadline:
+            readiness = []
+            for port in required_ports:
+                readiness.append(await asyncio.to_thread(_tcp_open, port))
+            if all(readiness):
+                return await self._post_json(path, payload)
+            await asyncio.sleep(0.5)
+        raise SpeechServiceError("语音服务按需启动超时；已停止本次操作以保护系统资源")
+
 
 def _require_ok(payload: dict[str, Any]) -> None:
     if payload.get("ok") is False:
@@ -236,3 +275,45 @@ def _optional_float(value: Any) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _is_loopback_url(value: str) -> bool:
+    lowered = str(value or "").lower()
+    return "127.0.0.1" in lowered or "localhost" in lowered or "[::1]" in lowered
+
+
+def _tcp_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.35):
+            return True
+    except OSError:
+        return False
+
+
+def _launch_runtime_mode(mode: str) -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    launcher = project_root / "tools" / "launch" / "qq_legacy" / "hidden_launcher.py"
+    if not launcher.is_file():
+        raise SpeechServiceError(f"找不到语音按需启动器：{launcher}")
+    candidates = (
+        project_root / ".venv" / "Scripts" / "pythonw.exe",
+        project_root / ".venv" / "Scripts" / "python.exe",
+        Path(sys.executable),
+    )
+    executable = next((path for path in candidates if path.is_file()), None)
+    if executable is None:
+        raise SpeechServiceError("找不到项目 Python，无法按需启动语音服务")
+    options: dict[str, Any] = {
+        "cwd": str(project_root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        options["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = 0
+            options["startupinfo"] = startupinfo
+    subprocess.Popen([str(executable), str(launcher), mode], **options)

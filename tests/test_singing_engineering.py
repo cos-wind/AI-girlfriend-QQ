@@ -15,6 +15,8 @@ sys.path.insert(0, str(VOICE_TOOLS))
 from singing_audio_engineering import (  # noqa: E402
     _moving_average,
     _rough_pitch,
+    align_converted_to_source,
+    apply_vocal_activity_mask,
     apply_expression,
     assemble_contextual_parts,
     build_phrase_plan,
@@ -38,8 +40,12 @@ def test_phrase_plan_uses_breath_boundaries_and_two_to_four_seconds_context() ->
 
     plan = build_phrase_plan(audio, sample_rate, analysis, context_seconds=3)
 
-    assert 3 <= len(plan["render_groups"]) <= 5
+    assert len(plan["render_groups"]) == len(plan["phrases"])
     assert len(plan["phrases"]) >= 5
+    assert all(
+        8 <= item["end_seconds"] - item["start_seconds"] <= 18
+        for item in plan["render_groups"][:-1]
+    )
     assert plan["f0_engine"] == "rmvpe"
     assert all(2 <= item["context_seconds"] <= 4 for item in plan["render_groups"])
     assert any(item["boundary_reason"] == "breath" for item in plan["phrases"][1:])
@@ -62,6 +68,19 @@ def test_overlap_add_has_no_hard_jump_between_contextual_parts() -> None:
     assert output.shape == (1000,)
     assert np.isfinite(output).all()
     assert np.max(np.abs(np.diff(output[450:550]))) < 0.02
+
+
+def test_context_alignment_corrects_small_model_delay_without_time_stretching() -> None:
+    sample_rate = 1000
+    source = np.zeros(3000, dtype=np.float32)
+    source[800:1000] = np.hanning(200).astype(np.float32)
+    source[1700:2000] = np.hanning(300).astype(np.float32) * 0.7
+    delayed = np.pad(source, (120, 0))[: len(source)]
+
+    aligned, offset = align_converted_to_source(delayed, source, sample_rate)
+
+    assert 0.09 <= offset <= 0.15
+    assert np.argmax(aligned) == np.argmax(source)
 
 
 def test_patch_changes_only_selected_range_and_keeps_rest_bit_identical() -> None:
@@ -125,6 +144,19 @@ def test_expression_processing_preserves_shape_and_finite_values() -> None:
     assert np.max(np.abs(output)) <= 1.0
 
 
+def test_activity_mask_removes_generated_voice_from_source_silence() -> None:
+    sample_rate = 1000
+    source = np.zeros(sample_rate * 4, dtype=np.float32)
+    source[sample_rate : sample_rate * 2] = 0.15
+    converted = np.full_like(source, 0.2)
+
+    output = apply_vocal_activity_mask(converted, source, sample_rate)
+
+    assert np.max(np.abs(output[: sample_rate // 2])) < 1e-4
+    assert np.mean(np.abs(output[1200:1800])) > 0.15
+    assert np.max(np.abs(output[2500:])) < 1e-4
+
+
 def test_long_envelope_uses_linear_time_moving_average() -> None:
     audio = np.linspace(-0.2, 0.2, 200_000, dtype=np.float32)
 
@@ -149,6 +181,23 @@ def test_quality_report_detects_clipping_silence_and_seam_click() -> None:
     assert checks["clipping"]["passed"] is False
     assert checks["seam_click"]["passed"] is False
     json.dumps(report)
+
+
+def test_quality_report_lists_short_dropouts_and_unexpected_voice_events() -> None:
+    sample_rate = 1000
+    source = np.zeros(sample_rate * 4, dtype=np.float32)
+    source[1000:2000] = 0.2
+    converted = source.copy()
+    converted[1350:1600] = 0
+    converted[2700:2920] = 0.15
+
+    report = quality_report(source, converted, sample_rate)
+
+    checks = {item["id"]: item for item in report["checks"]}
+    assert checks["abnormal_silence"]["passed"] is False
+    assert checks["unexpected_voice"]["passed"] is False
+    assert any(event["start_seconds"] <= 1.4 for event in report["events"]["dropouts"])
+    assert any(event["start_seconds"] <= 2.75 for event in report["events"]["unexpected_voice"])
 
 
 def test_pitch_check_uses_bounded_fft_autocorrelation() -> None:

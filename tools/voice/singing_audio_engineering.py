@@ -45,12 +45,12 @@ def build_phrase_plan(
     *,
     context_seconds: float = 3.0,
 ) -> dict[str, Any]:
-    """Create fine phrases and 3–5 resource-safe render groups.
+    """Create editable phrases and use those same phrases for inference.
 
-    Fine phrases are used for targeted corrections.  The first full render keeps
-    3–5 model invocations by grouping them on the existing music-structure
-    boundaries; those boundaries are snapped to detected breath/low-energy
-    valleys before 2–4 seconds of context is added.
+    The UI still presents the 3–5 musical sections from ``analysis``.  Model
+    inference, however, must stay at phrase scale: feeding minute-long groups to
+    Seed-VC causes hidden internal chunking and makes a dropped syllable
+    impossible to rerun in isolation.
     """
 
     audio = _mono(vocal_audio)
@@ -99,27 +99,15 @@ def build_phrase_plan(
         group_boundaries.append((round(boundary, 3), reason))
     group_boundaries.append((round(duration, 3), "song_end"))
 
-    render_groups: list[dict[str, Any]] = []
-    for index in range(len(group_boundaries) - 1):
-        start = group_boundaries[index][0]
-        end = group_boundaries[index + 1][0]
-        render_groups.append(
-            {
-                "index": index + 1,
-                "start_seconds": round(start, 3),
-                "end_seconds": round(end, 3),
-                "context_start": round(max(0.0, start - context), 3),
-                "context_end": round(min(duration, end + context), 3),
-                "context_seconds": context,
-                "boundary_reason": group_boundaries[index][1],
-            }
-        )
-
     fine_boundaries: list[tuple[float, str]] = [(0.0, "song_start")]
     cursor = 0.0
-    while duration - cursor > 24.0:
+    # A 6-second reference prompt plus an 8–18 second phrase and 2–4 seconds
+    # of context on each side fits Seed-VC's 30-second context substantially
+    # better than the old 50–90 second render groups.
+    maximum_phrase_seconds = 18.0
+    while duration - cursor > maximum_phrase_seconds:
         low = cursor + 8.0
-        high = min(duration - 4.0, cursor + 24.0)
+        high = min(duration - 4.0, cursor + maximum_phrase_seconds)
         choices = [(time, value) for time, value in candidates if low <= time <= high]
         if choices:
             boundary, _ = min(choices, key=lambda item: item[1])
@@ -129,9 +117,6 @@ def build_phrase_plan(
             reason = "phrase_length_guard"
         fine_boundaries.append((round(boundary, 3), reason))
         cursor = boundary
-    for boundary, reason in group_boundaries[1:-1]:
-        if all(abs(boundary - item[0]) > 1.0 for item in fine_boundaries):
-            fine_boundaries.append((boundary, reason))
     fine_boundaries.append((round(duration, 3), "song_end"))
     fine_boundaries = sorted(set(fine_boundaries), key=lambda item: item[0])
 
@@ -151,8 +136,25 @@ def build_phrase_plan(
             }
         )
 
+    render_groups: list[dict[str, Any]] = []
+    for phrase in phrases:
+        start = float(phrase["start_seconds"])
+        end = float(phrase["end_seconds"])
+        render_groups.append(
+            {
+                "index": len(render_groups) + 1,
+                "phrase_id": phrase["id"],
+                "start_seconds": round(start, 3),
+                "end_seconds": round(end, 3),
+                "context_start": round(max(0.0, start - context), 3),
+                "context_end": round(min(duration, end + context), 3),
+                "context_seconds": context,
+                "boundary_reason": phrase["boundary_reason"],
+            }
+        )
+
     return {
-        "version": 1,
+        "version": 2,
         "duration_seconds": round(duration, 3),
         "f0_engine": "rmvpe",
         "breath_detection": {
@@ -177,10 +179,79 @@ def _fit_length(audio: np.ndarray, target_length: int) -> np.ndarray:
     return np.interp(target_positions, source_positions, data).astype(np.float32)
 
 
+def _pad_or_trim(audio: np.ndarray, target_length: int) -> np.ndarray:
+    """Match a model result to the timeline without time-warping the voice."""
+
+    data = _mono(audio)
+    target = max(1, int(target_length))
+    if len(data) >= target:
+        return data[:target].copy()
+    return np.pad(data, (0, target - len(data))).astype(np.float32)
+
+
+def align_converted_to_source(
+    converted_audio: np.ndarray,
+    source_audio: np.ndarray,
+    sample_rate: int,
+    *,
+    maximum_offset_seconds: float = 0.35,
+) -> tuple[np.ndarray, float]:
+    """Align model latency from low-rate amplitude envelopes.
+
+    This shifts and pads only; it deliberately does not resample or time-warp
+    singing pitch.  Positive returned offsets mean the converted signal was
+    late and has been advanced.
+    """
+
+    converted = _mono(converted_audio)
+    source = _mono(source_audio)
+    target = len(source)
+    if target < 8 or len(converted) < 8 or sample_rate <= 0:
+        return _pad_or_trim(converted, target), 0.0
+
+    envelope_rate = 200
+    hop = max(1, round(sample_rate / envelope_rate))
+    window = max(3, round(sample_rate * 0.02))
+    source_envelope = _moving_average(np.abs(source), window)[::hop]
+    converted_envelope = _moving_average(np.abs(converted), window)[::hop]
+    count = min(len(source_envelope), len(converted_envelope))
+    source_envelope = source_envelope[:count]
+    converted_envelope = converted_envelope[:count]
+    source_envelope = source_envelope - float(source_envelope.mean())
+    converted_envelope = converted_envelope - float(converted_envelope.mean())
+    maximum_lag = min(count - 1, max(1, round(maximum_offset_seconds * envelope_rate)))
+    best_lag = 0
+    best_score = float("-inf")
+    for lag in range(-maximum_lag, maximum_lag + 1):
+        if lag >= 0:
+            left = source_envelope[: count - lag]
+            right = converted_envelope[lag:]
+        else:
+            left = source_envelope[-lag:]
+            right = converted_envelope[: count + lag]
+        if len(left) < max(8, envelope_rate // 4):
+            continue
+        denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+        score = float(np.dot(left, right) / denominator) if denominator > 1e-9 else -1.0
+        if score > best_score:
+            best_score = score
+            best_lag = lag
+
+    offset_samples = round(best_lag * sample_rate / envelope_rate)
+    if offset_samples > 0:
+        aligned = converted[offset_samples:]
+    elif offset_samples < 0:
+        aligned = np.pad(converted, (-offset_samples, 0))
+    else:
+        aligned = converted
+    return _pad_or_trim(aligned, target), offset_samples / sample_rate
+
+
 def assemble_contextual_parts(
     parts: list[np.ndarray],
     sample_rate: int,
     plan: dict[str, Any],
+    source_parts: list[np.ndarray] | None = None,
 ) -> np.ndarray:
     groups = plan.get("render_groups")
     if not isinstance(groups, list) or len(groups) != len(parts):
@@ -188,7 +259,9 @@ def assemble_contextual_parts(
     total = max(1, round(float(plan["duration_seconds"]) * sample_rate))
     accumulated = np.zeros(total, dtype=np.float64)
     weights = np.zeros(total, dtype=np.float64)
-    for part, group in zip(parts, groups):
+    if source_parts is not None and len(source_parts) != len(parts):
+        raise ValueError("源声上下文数量与转换片段数量不一致")
+    for part_index, (part, group) in enumerate(zip(parts, groups)):
         context_start = float(group["context_start"])
         context_end = float(group["context_end"])
         start = float(group["start_seconds"])
@@ -197,7 +270,15 @@ def assemble_contextual_parts(
         last = min(total, round(context_end * sample_rate))
         if last <= first:
             continue
-        data = _fit_length(part, last - first)
+        if source_parts is not None:
+            data, _offset = align_converted_to_source(
+                part,
+                source_parts[part_index],
+                sample_rate,
+            )
+        else:
+            data = _pad_or_trim(part, last - first)
+        data = _pad_or_trim(data, last - first)
         fade = np.ones(len(data), dtype=np.float64)
         fade_in = max(0, round((start - context_start) * sample_rate))
         fade_out = max(0, round((context_end - end) * sample_rate))
@@ -286,6 +367,50 @@ def _apply_vibrato_chunked(audio: np.ndarray, sample_rate: int, amount: float) -
     return output
 
 
+def _activity_mask(source_audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    source = _mono(source_audio)
+    if not len(source):
+        return np.zeros(0, dtype=np.float32)
+    level = _moving_average(np.abs(source), max(3, round(sample_rate * 0.03)))
+    active_reference = float(np.quantile(level, 0.90))
+    if active_reference <= 1e-6:
+        return np.zeros_like(source)
+
+    close_threshold = max(0.0008, min(0.012, active_reference * 0.025))
+    open_threshold = max(close_threshold * 2.0, active_reference * 0.06)
+    direct = np.clip(
+        (level - close_threshold) / max(1e-6, open_threshold - close_threshold),
+        0.0,
+        1.0,
+    )
+
+    # Preserve consonant attacks and natural breaths around a detected phrase,
+    # while keeping long instrumental gaps exactly silent.
+    active = direct > 0.08
+    hold = max(1, round(sample_rate * 0.12))
+    padded = np.pad(active.astype(np.int8), (hold, hold))
+    cumulative = np.concatenate(([0], np.cumsum(padded, dtype=np.int64)))
+    expanded = (cumulative[hold * 2 + 1 :] - cumulative[: -(hold * 2 + 1)]) > 0
+    expanded = expanded[: len(source)].astype(np.float32)
+    softened = _moving_average(expanded, max(3, round(sample_rate * 0.025)))
+    return np.clip(np.maximum(direct, softened), 0.0, 1.0).astype(np.float32)
+
+
+def apply_vocal_activity_mask(
+    converted_audio: np.ndarray,
+    source_audio: np.ndarray,
+    sample_rate: int,
+) -> np.ndarray:
+    """Mute model hallucinations where the separated lead contains no voice."""
+
+    converted = _mono(converted_audio)
+    source = _fit_length(source_audio, len(converted))
+    mask = _activity_mask(source, sample_rate)
+    if len(mask) != len(converted):
+        mask = _fit_length(mask, len(converted))
+    return (converted * mask).astype(np.float32)
+
+
 def _shift_spectral_envelope(audio: np.ndarray, semitones: float) -> np.ndarray:
     if abs(semitones) < 0.05 or len(audio) < 512:
         return audio
@@ -324,17 +449,19 @@ def apply_expression(
     source = _fit_length(source_audio, len(converted))
     result = converted.copy()
 
-    breathiness = max(0.0, min(1.0, float(parameters.get("breathiness", 0.08))))
+    activity = _activity_mask(source, sample_rate)
+    breathiness = max(0.0, min(1.0, float(parameters.get("breathiness", 0.02))))
     if breathiness > 0:
         smooth = _moving_average(source, max(3, round(sample_rate / 3500)))
         air = source - smooth
         envelope = _moving_average(np.abs(source), max(3, round(sample_rate * 0.02)))
-        active = np.clip((0.09 - envelope) / 0.08, 0.0, 1.0)
-        result += air * active * (0.08 * breathiness)
+        breath_zone = np.clip((0.09 - envelope) / 0.08, 0.0, 1.0) * activity
+        result += air * breath_zone * (0.08 * breathiness)
 
-    vibrato = max(0.0, min(1.0, float(parameters.get("vibrato", 0.15))))
+    vibrato = max(0.0, min(1.0, float(parameters.get("vibrato", 0.0))))
     if vibrato > 0.001:
-        result = _apply_vibrato_chunked(result, sample_rate, vibrato)
+        warped = _apply_vibrato_chunked(result, sample_rate, vibrato)
+        result = result * (1.0 - activity) + warped * activity
 
     articulation = max(0.0, min(1.0, float(parameters.get("articulation", 0.60))))
     transient = result - _moving_average(result, max(3, round(sample_rate * 0.0015)))
@@ -385,12 +512,48 @@ def quality_report(
     converted = _fit_length(converted_audio, len(source))
     clipping_count = int(np.count_nonzero(np.abs(converted) >= 0.999))
 
-    frame = max(1, round(sample_rate * 0.05))
+    frame_seconds = 0.02
+    frame = max(1, round(sample_rate * frame_seconds))
     source_rms = _frame_rms(source, frame, frame)
     converted_rms = _frame_rms(converted, frame, frame)
-    active = source_rms > 0.02
-    silent = active & (converted_rms[: len(active)] < 0.002)
+    length = min(len(source_rms), len(converted_rms))
+    source_rms = source_rms[:length]
+    converted_rms = converted_rms[:length]
+    source_reference = float(np.quantile(source_rms, 0.90)) if length else 0.0
+    converted_reference = float(np.quantile(converted_rms, 0.90)) if length else 0.0
+    active_threshold = max(0.006, source_reference * 0.05)
+    active = source_rms > active_threshold
+    silent = active & (converted_rms < np.maximum(0.002, source_rms * 0.126))
     silence_ratio = float(silent.sum() / max(1, active.sum()))
+
+    activity_samples = _activity_mask(source, sample_rate)
+    activity_frames = _frame_rms(activity_samples, frame, frame)[:length]
+    source_quiet = activity_frames < 0.05
+    unexpected = source_quiet & (
+        converted_rms > max(0.004, converted_reference * 0.05)
+    )
+
+    def event_ranges(mask: np.ndarray, minimum_seconds: float = 0.12) -> list[dict[str, float]]:
+        result: list[dict[str, float]] = []
+        start: int | None = None
+        for index, value in enumerate(np.append(mask, False)):
+            if value and start is None:
+                start = index
+            elif not value and start is not None:
+                duration = (index - start) * frame_seconds
+                if duration >= minimum_seconds:
+                    result.append(
+                        {
+                            "start_seconds": round(start * frame_seconds, 3),
+                            "end_seconds": round(index * frame_seconds, 3),
+                            "duration_seconds": round(duration, 3),
+                        }
+                    )
+                start = None
+        return result
+
+    dropout_events = event_ranges(silent, 0.12)
+    unexpected_events = event_ranges(unexpected, 0.18)
 
     seam_values: list[float] = []
     for seconds in seam_times or []:
@@ -416,9 +579,16 @@ def quality_report(
         {
             "id": "abnormal_silence",
             "label": "异常静音",
-            "passed": silence_ratio <= 0.02,
-            "value": round(silence_ratio, 5),
-            "reference": "活跃原声中异常静音占比 ≤ 2%",
+            "passed": not dropout_events and silence_ratio <= 0.02,
+            "value": len(dropout_events),
+            "reference": "连续掉声 < 0.12 秒，且异常静音占比 ≤ 2%",
+        },
+        {
+            "id": "unexpected_voice",
+            "label": "无词段异常发声",
+            "passed": not unexpected_events,
+            "value": len(unexpected_events),
+            "reference": "原主唱静音处不出现连续 ≥ 0.18 秒的转换人声",
         },
         {
             "id": "seam_click",
@@ -438,5 +608,9 @@ def quality_report(
     return {
         "passed": all(bool(item["passed"]) for item in checks),
         "checks": checks,
+        "events": {
+            "dropouts": dropout_events,
+            "unexpected_voice": unexpected_events,
+        },
         "sample_rate": sample_rate,
     }

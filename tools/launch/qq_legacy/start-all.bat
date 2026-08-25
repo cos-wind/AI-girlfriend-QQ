@@ -1,28 +1,25 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title Start Atri + NapCat
+title Atri + NapCat core launcher
 
 cd /d "%~dp0..\..\.."
 
 echo ========================================
-echo   Start Atri QQ Bot
+echo   Start Atri + NapCat core
 echo ========================================
 echo.
+echo All runtime startup is owned by hidden_launcher.py.
+echo If QQ login is required, open NapCat WebUI and scan there.
+echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue) { exit 10 } else { exit 0 }"
-if %ERRORLEVEL%==10 (
-    echo Atri service is already running on port 8765.
-) else (
-    echo Opening Atri service window...
-    start "Atri Service" cmd /k ""%~dp0..\atri\start-atri.bat""
-    timeout /t 4 /nobreak >nul
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-with-qq.ps1" -Mode core
+if errorlevel 1 (
+    echo Failed to request the ATRI core launcher.
+    echo Run tools\launch\atri\start-atri.bat once if the project .venv is missing.
+    pause
+    exit /b 1
 )
 
-echo Opening NapCat QQ window...
-start "NapCat QQ" cmd /k ""%~dp0start-napcat.bat""
-
-echo.
-echo Started.
-echo You can close this small launcher window.
-timeout /t 3 /nobreak >nul
+echo Core launcher requested. This window can be closed.
+exit /b 0

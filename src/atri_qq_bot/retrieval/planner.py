@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from atri_qq_bot.runtime.paths import PROMPT_DIR, PROJECT_ROOT
+from atri_qq_bot.runtime.inference_lock import inference_resource_lease_sync
 
 from .repository import RetrievedEntry, SemanticMemoryRepository
 from .embeddings import OllamaEmbeddingClient
@@ -64,6 +65,8 @@ class ContextRetrievalPlanner:
         self._lore_indexed = False
 
     def build(self, profile: dict[str, Any], user_text: str) -> str:
+        # 检索器只输出受字符预算约束的 Context Pack，不把 SQLite/embedding
+        # 细节泄漏给人格逻辑；检索失败时退化为普通对话。
         if not self.settings.enabled:
             return ""
         scope = str(profile.get("conversation_id") or "")
@@ -76,11 +79,17 @@ class ContextRetrievalPlanner:
         # 只有已有离线向量时才对查询加载 bge-m3；失败后仍使用 FTS5 结果。
         if self.settings.vector_enabled and self.repository.embedding_count(self.settings.embedding_model):
             try:
-                vector = OllamaEmbeddingClient(
-                    self.settings.embedding_model,
-                    self.settings.embedding_base_url,
-                    self.settings.embedding_timeout_seconds,
-                ).embed(user_text)
+                # 查询向量属于可选增强；视觉正在工作时立即退回 FTS5，
+                # 绝不能为了二次召回并发加载另一个本地模型。
+                with inference_resource_lease_sync(
+                    f"embedding:{self.settings.embedding_model}",
+                    timeout_seconds=0.0,
+                ):
+                    vector = OllamaEmbeddingClient(
+                        self.settings.embedding_model,
+                        self.settings.embedding_base_url,
+                        self.settings.embedding_timeout_seconds,
+                    ).embed(user_text)
                 memories = _fuse(memories, self.repository.vector_search(
                     scope, self.settings.embedding_model, vector, self.settings.memory_limit
                 ), self.settings.memory_limit)
@@ -131,15 +140,17 @@ class ContextRetrievalPlanner:
         if self._lore_indexed:
             return
         entries: list[dict[str, Any]] = []
-        # 这两份是已整理后的项目人格/原作设定；不把单一提示词作为真相来源。
-        for path in (PROMPT_DIR / "lore.md", PROMPT_DIR / "atri_persona.md"):
-            if not path.exists():
-                continue
+        # 人格提示词始终作为 system prompt 注入，不应进入原作剧情向量候选；
+        # 否则“成为夏生先生的腿”“日志与心”等问题会被通用人格段落抢位。
+        # lore.md 才是剧情事实与人物关系的检索源。
+        path = PROMPT_DIR / "lore.md"
+        if path.exists():
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError:
-                continue
-            entries.extend(_markdown_chunks(path.name, text))
+                text = ""
+            if text:
+                entries.extend(_markdown_chunks(path.name, text))
         self.repository.replace_scope_source("lore:atri", "project_lore", entries)
         self._lore_indexed = True
 
@@ -151,7 +162,7 @@ class ContextRetrievalPlanner:
     ) -> str:
         lines = [
             "相处细节：先接住当前话题；只在确实相关时自然带出，不要说自己在读取记忆，也不要说调用或记录记忆。",
-            "可以轻轻嘴硬一句“哼，我才不是特意记的”；记不准就坦白，不要补造细节。",
+            "记不准就坦白，不要补造细节。口癖只在情绪和话题自然匹配时偶尔使用，避免复用最近几轮的开头、句式或同一句傲娇话。",
         ]
         affection = str(profile.get("affection_state") or "").strip()
         if affection:

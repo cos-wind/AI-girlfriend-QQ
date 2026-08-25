@@ -45,6 +45,7 @@ CONFIG_FIELDS: dict[str, str] = {
     "TOOLBOX_VISION_MODEL": "toolbox_vision_model",
     "TOOLBOX_VISION_FALLBACK_MODEL": "toolbox_vision_fallback_model",
     "TOOLBOX_VISION_BASE_URL": "toolbox_vision_base_url",
+    "TOOLBOX_VISION_FALLBACK_BASE_URL": "toolbox_vision_fallback_base_url",
     "TOOLBOX_VISION_API_KEY": "toolbox_vision_api_key",
     "TOOLBOX_VISION_RETRY_COUNT": "toolbox_vision_retry_count",
     "TOOLBOX_VISION_RESOURCE_WAIT_SECONDS": "toolbox_vision_resource_wait_seconds",

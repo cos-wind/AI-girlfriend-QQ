@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
 import logging
 import math
 import mimetypes
 import os
+import re
 import shutil
+import subprocess
+import threading
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +25,7 @@ from urllib.request import Request, urlopen
 
 from atri_qq_bot.config import BotConfig, load_config
 from atri_qq_bot.persona import AtriReplyEngine
+from atri_qq_bot.llm_tools.web_search_tool import search_web
 from atri_qq_bot.proactive import load_proactive_policy, save_proactive_policy
 from atri_qq_bot.runtime import (
     LOG_DIR,
@@ -29,6 +34,16 @@ from atri_qq_bot.runtime import (
     STICKER_ROOT,
     read_project_logs,
 )
+from atri_qq_bot.music import (
+    AUDIO_EXTENSIONS as MUSIC_AUDIO_EXTENSIONS,
+    complete_song_files,
+    delivery_song_catalog,
+    export_delivery_segments,
+    save_complete_song,
+)
+from atri_qq_bot.runtime.paths import COMPLETE_MUSIC_ROOT, DELIVERY_MUSIC_ROOT
+from atri_qq_bot.insights import group_summary_html, render_group_summary_image, save_insights_env, summary_markdown
+from atri_qq_bot.insights.evaluation import EvaluationSample
 from atri_qq_bot.voice import (
     VoicePromptContext,
     VoiceRequest,
@@ -36,31 +51,64 @@ from atri_qq_bot.voice import (
     save_voice_behavior,
 )
 from atri_qq_bot.runtime.control import restart_background_services, runtime_status
+from atri_qq_bot.runtime.modality_access import load_modality_access, save_modality_access
 from .config_admin import config_payload, update_env
 from .call_page import render_voice_call
 from .model_profiles import (
     MODEL_PRESETS,
     activate_model_profile,
     delete_model_profile,
+    load_model_profiles,
     local_models_payload,
     model_profiles_payload,
     public_model_profile,
     upsert_model_profile,
 )
 from .memory_admin import (
-    backup_memory,
-    delete_memory_conversation,
-    memory_detail,
-    memory_summary,
-    save_memory_conversation,
-    update_memory_relationship,
+    memory_admin_for_config,
 )
+from .qzone_admin import QZoneAdmin, QZoneBridgeError
+from .qzone_automation import (
+    QZoneAutomation,
+    QZoneAutomationStore,
+    parse_keywords,
+    sanitize_qzone_fact_context,
+    topic_for_schedule,
+)
+from .user_directory import UserDirectory
+from .evaluation_handlers import EvaluationHandlersMixin
 from .minecraft_admin import (
     minecraft_dashboard,
     save_minecraft_bridge_config,
     send_minecraft_command,
 )
-from .page import render_index
+from .page import index as _page_module
+
+_PAGE_MODULE_PATH = Path(__file__).with_name("page") / "index.py"
+_PAGE_RELOAD_LOCK = threading.Lock()
+_PAGE_MODULE_MTIME_NS = 0
+
+
+def _render_index_dynamic() -> str:
+    """Render the WebUI with a lightweight source-mtime reload.
+
+    The desktop WebUI is local-only and frequently edited during development.
+    Reloading this presentation module on request means a browser refresh is
+    enough to pick up HTML/CSS/JS changes; API/service changes still require a
+    normal process restart.
+    """
+    global _PAGE_MODULE_MTIME_NS
+    try:
+        mtime_ns = _PAGE_MODULE_PATH.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    if mtime_ns and mtime_ns != _PAGE_MODULE_MTIME_NS:
+        with _PAGE_RELOAD_LOCK:
+            if mtime_ns != _PAGE_MODULE_MTIME_NS:
+                importlib.invalidate_caches()
+                importlib.reload(_page_module)
+                _PAGE_MODULE_MTIME_NS = mtime_ns
+    return _page_module.render_index()
 from .sticker_admin import (
     IMAGE_EXTENSIONS,
     looks_like_image_bytes,
@@ -90,6 +138,8 @@ from .voice_admin import (
 MAX_UPLOAD_BYTES = 8_000_000
 MAX_VOICE_UPLOAD_BYTES = 30_000_000
 MAX_SINGING_UPLOAD_BYTES = 100_000_000
+MAX_MUSIC_STEM_UPLOAD_BYTES = 150_000_000
+MAX_COMPLETE_MUSIC_UPLOAD_BYTES = 180_000_000
 MUSIC_SERVICE_URL = os.getenv(
     "ATRI_MUSIC_SERVICE_URL",
     "http://127.0.0.1:8793",
@@ -97,7 +147,16 @@ MUSIC_SERVICE_URL = os.getenv(
 MUSIC_SOURCE_ROOT = Path(
     os.getenv("ATRI_MUSIC_SOURCE_DIR", str(Path.home() / "Music" / "QQmusic-MP3"))
 ).expanduser().resolve()
+MUSIC_IMPORT_ROOT = Path(
+    os.getenv(
+        "ATRI_MUSIC_IMPORT_DIR",
+        str(Path(__file__).resolve().parents[2] / "data" / "music_imports"),
+    )
+).expanduser().resolve()
 LOGGER = logging.getLogger("atri.webui")
+
+# WebUI 是本地运维面板，不承载对话主循环。API 管理配置、记忆、日志和音频资源；
+# QQ 连接仍由 OneBot 进程管理，避免浏览器请求直接触碰 QQ 状态。
 
 
 def _music_bridge_request(
@@ -136,19 +195,14 @@ def _music_bridge_request(
     return result
 
 
-def _voice_preview_synthesis_options(behavior: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "prefer_original": bool(behavior.get("original_clip_enabled", True)),
-        "quality_gate": bool(behavior.get("quality_gate_enabled", True)),
-        "quality_max_error_rate": float(
-            behavior.get("quality_max_error_rate", 0.22)
-        ),
-        "quality_retries": int(behavior.get("quality_retries", 1) or 0),
-        # A preview should expose a safe, intelligible candidate even when ASR
-        # differs slightly on names or non-Chinese text. The voice service still
-        # rejects empty, badly truncated, or high-error candidates.
-        "allow_best_effort": True,
-    }
+from .server_parts.voice_integrations import (
+    _TRANSLATION_LANGUAGES,
+    _detect_translation_source,
+    _extract_translation,
+    _voice_preview_synthesis_options,
+    _voice_preview_synthesis_options_for_mode,
+    translate_voice_text,
+)
 
 
 class WebUIState:
@@ -156,11 +210,62 @@ class WebUIState:
         self.config = config
         self.server = server
         self.lock = asyncio.Lock()
+        self.group_name_lock = asyncio.Lock()
+        self._group_name_refresh_at = 0.0
+        self.memory_admin = memory_admin_for_config(config)
+        database = Path(os.getenv("QZONE_AUTOMATION_DB", "data/qzone_automation.sqlite3"))
+        self.qzone_automation = QZoneAutomation(
+            QZoneAutomationStore(database),
+            lambda: QZoneAdmin(
+                self.memory_admin.summary(),
+                bot_qq=self.config.bot_qq,
+                owner_qqs=self.config.owner_qqs,
+            ),
+            lambda prompt, profile_id: run_coro(generate_qzone_text(self.config, prompt, "post", profile_id)),
+            lambda prompt, profile_id: run_coro(generate_qzone_text(self.config, prompt, "comment", profile_id)),
+            lambda settings, scheduled_at, slot_index=None: qzone_fact_context(
+                self.config,
+                settings,
+                scheduled_at,
+                slot_index,
+            ),
+        )
+        self.qzone_login_lock = threading.Lock()
+        self.qzone_login_running = False
+        self.qzone_login_last: dict[str, Any] = {"ok": None, "message": ""}
+
+    async def refresh_group_names(self, force: bool = False) -> dict[str, str]:
+        """定期从 NapCat 同步群名，WebUI 断线时保留 SQLite 中的缓存。"""
+        runtime = getattr(self.server, "insights", None)
+        if runtime is None:
+            return {}
+        names = runtime.store.group_name_map()
+        now = time.monotonic()
+        if not force and now - self._group_name_refresh_at < 30:
+            return names
+        async with self.group_name_lock:
+            now = time.monotonic()
+            if not force and now - self._group_name_refresh_at < 30:
+                return runtime.store.group_name_map()
+            self._group_name_refresh_at = now
+            fetch = getattr(self.server, "fetch_group_list", None)
+            if not callable(fetch):
+                return names
+            try:
+                groups = await fetch()
+            except Exception as exc:
+                LOGGER.debug("WebUI 同步群名失败：%s", exc)
+                return names
+            for item in groups:
+                if isinstance(item, dict) and item.get("group_id") and item.get("group_name"):
+                    runtime.store.set_group_name(str(item["group_id"]), str(item["group_name"]))
+            return runtime.store.group_name_map()
 
     async def reload_config(self) -> BotConfig:
         async with self.lock:
             new_config = load_config()
             self.config = new_config
+            self.memory_admin = memory_admin_for_config(new_config)
             self.server.config = new_config
             self.server.reply_engine.config = new_config
             if hasattr(self.server.reply_engine, "memory"):
@@ -178,6 +283,9 @@ class WebUIState:
             )
             self.server.tools.vision_base_url = str(
                 new_config.toolbox_vision_base_url or new_config.openai_base_url or ""
+            ).rstrip("/")
+            self.server.tools.vision_fallback_base_url = str(
+                new_config.toolbox_vision_fallback_base_url or ""
             ).rstrip("/")
             self.server.tools.vision_api_key = (
                 new_config.toolbox_vision_api_key or new_config.openai_api_key
@@ -198,6 +306,10 @@ class WebUIState:
                 self.server.voice.update_config(new_config)
             if hasattr(self.server, "proactive_planner"):
                 self.server.proactive_planner.update_owner_qqs(new_config.owner_qqs)
+            # 模型页面切换聊天模型后，评测旁路立即复用同一模型；不再维护第二套
+            # Judge 接口和密钥配置。评测自身仍然在后台队列中执行。
+            if getattr(self.server, "insights", None) is not None:
+                await self.server.insights.reload_config()
             return new_config
 
 
@@ -221,6 +333,8 @@ async def start_webui(config: BotConfig, onebot_server: Any) -> Any | None:
         return None
     task = asyncio.create_task(asyncio.to_thread(httpd.serve_forever))
     httpd._atri_task = task  # type: ignore[attr-defined]
+    httpd._atri_webui_state = state  # type: ignore[attr-defined]
+    state.qzone_automation.start()
     print(f"[webui] Listening on http://{host}:{port}")
     return httpd
 
@@ -228,6 +342,9 @@ async def start_webui(config: BotConfig, onebot_server: Any) -> Any | None:
 async def stop_webui(httpd: Any | None) -> None:
     if httpd is None:
         return
+    state = getattr(httpd, "_atri_webui_state", None)
+    if state is not None:
+        await state.qzone_automation.stop()
     httpd.shutdown()
     task = getattr(httpd, "_atri_task", None)
     if task is not None:
@@ -241,1001 +358,29 @@ class LocalThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-class AtriWebUIHandler(BaseHTTPRequestHandler):
+from .server_parts.handler_config import HandlerConfigMixin
+from .server_parts.handler_core import HandlerCoreMixin
+from .server_parts.handler_insights import HandlerInsightsMixin
+from .server_parts.handler_music import HandlerMusicMixin
+from .server_parts.handler_qzone import HandlerQZoneMixin
+from .server_parts.handler_response import HandlerResponseMixin
+from .server_parts.handler_stickers_memory import HandlerStickersMemoryMixin
+from .server_parts.handler_voice import HandlerVoiceMixin
+
+
+class AtriWebUIHandler(
+    HandlerCoreMixin,
+    HandlerConfigMixin,
+    HandlerMusicMixin,
+    HandlerInsightsMixin,
+    HandlerVoiceMixin,
+    HandlerStickersMemoryMixin,
+    HandlerQZoneMixin,
+    HandlerResponseMixin,
+    EvaluationHandlersMixin,
+    BaseHTTPRequestHandler,
+):
     webui_state: WebUIState
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
-            return self._send_html(render_index())
-        if parsed.path == "/voice-call":
-            token = parse_qs(parsed.query).get("token", [""])[0]
-            session = self.webui_state.server.voice_calls.get(token)
-            if session is None:
-                return self._send_html(
-                    "<!doctype html><meta charset='utf-8'><title>邀请无效</title>"
-                    "<p style='font:16px sans-serif;padding:32px'>通话邀请已失效或已结束。</p>"
-                )
-            return self._send_html(render_voice_call(token, session.topic))
-        if parsed.path == "/api/status":
-            return self._send_json(self._status())
-        if parsed.path == "/api/developer":
-            return self._send_json(self._developer_payload())
-        if parsed.path == "/api/logs":
-            return self._send_json(self._logs_payload(parsed.query))
-        if parsed.path == "/api/config":
-            return self._send_json(config_payload(self.webui_state.config))
-        if parsed.path == "/api/proactive":
-            return self._send_json(self.webui_state.server.proactive_status())
-        if parsed.path == "/api/model-presets":
-            return self._send_json({"presets": MODEL_PRESETS})
-        if parsed.path == "/api/model-profiles":
-            return self._send_json(model_profiles_payload(self.webui_state.config))
-        if parsed.path == "/api/local-models":
-            return self._send_json(local_models_payload())
-        if parsed.path == "/api/minecraft":
-            return self._send_json(minecraft_dashboard())
-        if parsed.path == "/api/voice":
-            return self._send_json(self._voice_payload())
-        if parsed.path == "/api/voice/behavior":
-            return self._send_json({"ok": True, "behavior": load_voice_behavior()})
-        if parsed.path == "/api/voice/singing/jobs":
-            return self._handle_singing_jobs()
-        if parsed.path == "/api/voice/singing/job":
-            return self._handle_singing_job(parsed.query)
-        if parsed.path == "/api/music/projects":
-            return self._handle_music_projects()
-        if parsed.path == "/api/music/capabilities":
-            return self._handle_music_capabilities()
-        if parsed.path == "/api/music/sources":
-            return self._handle_music_sources()
-        if parsed.path == "/api/music/project":
-            return self._handle_music_project(parsed.query)
-        if parsed.path == "/api/music/project/audio":
-            return self._handle_music_project_audio(parsed.query)
-        if parsed.path == "/api/music/project/waveform":
-            return self._handle_music_project_waveform(parsed.query)
-        if parsed.path == "/api/music/project/log":
-            return self._handle_music_project_log(parsed.query)
-        if parsed.path == "/api/voice/audio":
-            return self._send_voice_audio(parsed.query)
-        if parsed.path == "/api/stickers":
-            return self._send_json(sticker_summary())
-        if parsed.path == "/api/stickers/file":
-            return self._send_sticker_file(parsed.query)
-        if parsed.path == "/api/memory":
-            return self._send_json(memory_summary())
-        if parsed.path == "/api/memory/detail":
-            return self._send_json(memory_detail(parsed.query))
-        self._send_error(HTTPStatus.NOT_FOUND, "not found")
-
-    def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/config":
-            return self._handle_config_update()
-        if parsed.path == "/api/proactive/save":
-            return self._handle_proactive_save()
-        if parsed.path == "/api/proactive/preview":
-            return self._handle_proactive_preview()
-        if parsed.path == "/api/model-profiles/save":
-            return self._handle_model_profile_save()
-        if parsed.path == "/api/model-profiles/delete":
-            return self._handle_model_profile_delete()
-        if parsed.path == "/api/model-profiles/activate":
-            return self._handle_model_profile_activate()
-        if parsed.path == "/api/test-chat":
-            return self._handle_test_chat()
-        if parsed.path == "/api/minecraft/config":
-            return self._handle_minecraft_config()
-        if parsed.path == "/api/minecraft/command":
-            return self._handle_minecraft_command()
-        if parsed.path == "/api/voice/save":
-            return self._handle_voice_save()
-        if parsed.path == "/api/voice/reference":
-            return self._handle_voice_reference()
-        if parsed.path == "/api/voice/preview":
-            return self._handle_voice_preview()
-        if parsed.path == "/api/voice/test-asr":
-            return self._handle_voice_test_asr()
-        if parsed.path == "/api/voice/singing/source":
-            return self._handle_singing_source_upload()
-        if parsed.path == "/api/voice/singing/create":
-            return self._handle_singing_create()
-        if parsed.path == "/api/voice/singing/cancel":
-            return self._handle_singing_cancel()
-        if parsed.path == "/api/music/project/create":
-            return self._handle_music_project_create()
-        if parsed.path == "/api/music/project/stage":
-            return self._handle_music_project_stage()
-        if parsed.path == "/api/music/project/pipeline":
-            return self._handle_music_project_operation("pipeline")
-        if parsed.path == "/api/music/project/confirm":
-            return self._handle_music_project_operation("confirm")
-        if parsed.path == "/api/music/project/rollback":
-            return self._handle_music_project_operation("rollback")
-        if parsed.path == "/api/music/project/reset":
-            return self._handle_music_project_operation("reset")
-        if parsed.path == "/api/music/project/recover":
-            return self._handle_music_project_operation("recover")
-        if parsed.path == "/api/music/project/segment":
-            return self._handle_music_project_operation("segment")
-        if parsed.path == "/api/music/project/export":
-            return self._handle_music_project_operation("export")
-        if parsed.path == "/api/voice-call/turn":
-            return self._handle_voice_call_turn()
-        if parsed.path == "/api/voice-call/close":
-            return self._handle_voice_call_close()
-        if parsed.path == "/api/voice-call/test-invite":
-            return self._handle_voice_call_test_invite()
-        if parsed.path == "/api/restart":
-            return self._send_json(restart_background_services())
-        if parsed.path == "/api/stickers/category":
-            return self._handle_sticker_category()
-        if parsed.path == "/api/stickers/upload":
-            return self._handle_sticker_upload()
-        if parsed.path == "/api/stickers/delete":
-            return self._handle_sticker_delete()
-        if parsed.path == "/api/memory/save":
-            return self._handle_memory_save()
-        if parsed.path == "/api/memory/relationship":
-            return self._handle_memory_relationship()
-        if parsed.path == "/api/memory/delete":
-            return self._handle_memory_delete()
-        if parsed.path == "/api/memory/backup":
-            backup = backup_memory("manual")
-            return self._send_json({"ok": True, "backup": str(backup)})
-        self._send_error(HTTPStatus.NOT_FOUND, "not found")
-
-    def _handle_minecraft_config(self) -> None:
-        try:
-            config = save_minecraft_bridge_config(self._read_json())
-        except (OSError, ValueError) as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "config": config})
-
-    def _handle_minecraft_command(self) -> None:
-        try:
-            result = send_minecraft_command(self._read_json())
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except OSError as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result)
-
-    def _handle_config_update(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            update_env(payload)
-            config = run_coro(self.webui_state.reload_config())
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "config": config_payload(config)})
-
-    def _handle_proactive_save(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            policy = save_proactive_policy(payload)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "policy": policy})
-
-    def _handle_proactive_preview(self) -> None:
-        payload = self._read_json()
-        event_type = str((payload or {}).get("event_type") or "check_in")
-        policy = load_proactive_policy()
-        allowed = set(policy.get("content_weights") or {}) | set(
-            policy.get("group_content_weights") or {}
-        )
-        if event_type not in allowed:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "未知的主动消息类型")
-        raw_user_id = (payload or {}).get("user_id")
-        raw_target_id = (payload or {}).get("target_id") or raw_user_id
-        scope = str((payload or {}).get("scope") or "private")
-        if scope not in {"private", "group"}:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "未知的预览范围")
-        try:
-            target_id = int(raw_target_id) if raw_target_id else None
-            result = run_coro(
-                self.webui_state.server.preview_proactive(event_type, target_id, scope)
-            )
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, **result})
-
-    def _handle_model_profile_save(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            profile = upsert_model_profile(payload)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "profile": public_model_profile(profile)})
-
-    def _handle_model_profile_delete(self) -> None:
-        payload = self._read_json()
-        profile_id = str((payload or {}).get("id") or "").strip()
-        try:
-            delete_model_profile(profile_id)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True})
-
-    def _handle_model_profile_activate(self) -> None:
-        payload = self._read_json()
-        profile_id = str((payload or {}).get("id") or "").strip()
-        try:
-            profile = activate_model_profile(profile_id)
-            config = run_coro(self.webui_state.reload_config())
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json(
-            {
-                "ok": True,
-                "profile": public_model_profile(profile),
-                "config": config_payload(config),
-                "status": self._status(),
-            }
-        )
-
-    def _handle_test_chat(self) -> None:
-        payload = self._read_json()
-        text = str((payload or {}).get("text") or "").strip()
-        if not text:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "text is required")
-        try:
-            result = run_coro(test_chat(self.webui_state.config, text))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
-        self._send_json({"ok": True, **result})
-
-    def _voice_payload(self) -> dict[str, Any]:
-        try:
-            health = run_coro(self.webui_state.server.voice.client.health())
-        except Exception as exc:
-            health = {"ok": False, "error": str(exc), "ready": False}
-        try:
-            music_health = _music_bridge_request("/api/health", timeout=1.5)
-            music_service = {
-                "ok": bool(music_health.get("ok")),
-                "url": MUSIC_SERVICE_URL,
-                "error": "",
-                "projects": music_health.get("music_projects") or {},
-            }
-        except Exception as exc:
-            music_service = {
-                "ok": False,
-                "url": MUSIC_SERVICE_URL,
-                "error": str(exc),
-                "projects": {},
-            }
-        singing = health.get("singing")
-        singing_references = (
-            singing.get("references", [])
-            if isinstance(singing, dict)
-            and isinstance(singing.get("references"), list)
-            else []
-        )
-        return {
-            "ok": True,
-            "config": config_payload(self.webui_state.config),
-            "service": health,
-            "profiles": voice_profiles_payload(),
-            "candidates": voice_candidates_payload(),
-            "asr_lexicon_text": asr_lexicon_text(),
-            "tts_pronunciation_text": tts_pronunciation_text(),
-            "behavior": load_voice_behavior(),
-            "singing_references": singing_references,
-            "music_service": music_service,
-        }
-
-    def _handle_singing_jobs(self) -> None:
-        try:
-            payload = _music_bridge_request("/api/jobs")
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_music_projects(self) -> None:
-        try:
-            payload = _music_bridge_request("/api/projects")
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_music_capabilities(self) -> None:
-        try:
-            payload = _music_bridge_request("/api/capabilities")
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_music_sources(self) -> None:
-        try:
-            payload = _music_bridge_request("/api/sources")
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_music_project(self, query: str) -> None:
-        try:
-            project_id = _valid_singing_job_id(
-                parse_qs(query).get("id", [""])[0]
-            )
-            payload = _music_bridge_request(f"/api/projects/{project_id}")
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_music_project_audio(self, query: str) -> None:
-        try:
-            params = parse_qs(query)
-            project_id = _valid_singing_job_id(params.get("id", [""])[0])
-            artifact = _valid_music_artifact_name(params.get("name", [""])[0])
-            headers = {"Accept": "audio/*"}
-            requested_range = self.headers.get("Range", "").strip()
-            if requested_range:
-                headers["Range"] = requested_range
-            request = Request(
-                f"{MUSIC_SERVICE_URL}/api/projects/{project_id}/artifacts/{artifact}",
-                headers=headers,
-                method="GET",
-            )
-            response = urlopen(request, timeout=30)
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except HTTPError as exc:
-            return self._send_error(HTTPStatus(exc.code), "歌曲音频不可用")
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        with response:
-            self.send_response(getattr(response, "status", HTTPStatus.OK))
-            for name in (
-                "Content-Type",
-                "Content-Length",
-                "Content-Range",
-                "Accept-Ranges",
-                "Content-Disposition",
-            ):
-                value = response.headers.get(name)
-                if value:
-                    self.send_header(name, value)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                while chunk := response.read(64 * 1024):
-                    self.wfile.write(chunk)
-
-    def _handle_music_project_waveform(self, query: str) -> None:
-        try:
-            params = parse_qs(query)
-            project_id = _valid_singing_job_id(params.get("id", [""])[0])
-            artifact = _valid_music_artifact_name(params.get("name", [""])[0])
-            payload = _music_bridge_request(
-                f"/api/projects/{project_id}/waveforms/{artifact}",
-                timeout=30,
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_music_project_log(self, query: str) -> None:
-        try:
-            params = parse_qs(query)
-            project_id = _valid_singing_job_id(params.get("id", [""])[0])
-            stage = _valid_music_stage(params.get("stage", [""])[0])
-            payload = _music_bridge_request(f"/api/projects/{project_id}/logs/{stage}")
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_music_project_create(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            result = _music_bridge_request("/api/projects", "POST", payload)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result, status=HTTPStatus.CREATED)
-
-    def _handle_music_project_stage(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            project_id = _valid_singing_job_id(str(payload.get("id") or ""))
-            stage = str(payload.get("stage") or "").strip()
-            if stage not in {"separation", "inference", "mix"}:
-                raise ValueError("歌曲处理阶段无效")
-            params = payload.get("parameters")
-            if not isinstance(params, dict):
-                params = {}
-            result = _music_bridge_request(
-                f"/api/projects/{project_id}/stages/{stage}",
-                "POST",
-                params,
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result, status=HTTPStatus.ACCEPTED)
-
-    def _handle_music_project_operation(self, operation: str) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            project_id = _valid_singing_job_id(str(payload.get("id") or ""))
-            routes = {
-                "pipeline": f"/api/projects/{project_id}/pipeline",
-                "confirm": f"/api/projects/{project_id}/actions/confirm",
-                "rollback": f"/api/projects/{project_id}/actions/rollback",
-                "reset": f"/api/projects/{project_id}/actions/reset",
-                "recover": f"/api/projects/{project_id}/actions/recover",
-                "segment": f"/api/projects/{project_id}/segments/rerun",
-                "export": f"/api/projects/{project_id}/exports",
-            }
-            route = routes[operation]
-            forwarded = {key: value for key, value in payload.items() if key != "id"}
-            result = _music_bridge_request(route, "POST", forwarded, timeout=30)
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        status = HTTPStatus.ACCEPTED if operation in {"pipeline", "segment", "export"} else HTTPStatus.OK
-        self._send_json(result, status=status)
-
-    def _handle_singing_job(self, query: str) -> None:
-        try:
-            job_id = _valid_singing_job_id(
-                parse_qs(query).get("id", [""])[0]
-            )
-            payload = _music_bridge_request(f"/api/jobs/{job_id}")
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
-
-    def _handle_singing_source_upload(self) -> None:
-        content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_SINGING_UPLOAD_BYTES + 200_000:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "导唱音频最大 100MB")
-        try:
-            form = parse_multipart_form(
-                self.headers.get("Content-Type", ""),
-                self.rfile.read(content_length),
-            )
-            file_item = multipart_file(form, "file")
-            if file_item is None or not file_item.filename:
-                raise ValueError("请选择导唱或歌曲音频")
-            if len(file_item.data) > MAX_SINGING_UPLOAD_BYTES:
-                raise ValueError("导唱音频最大 100MB")
-            path = save_singing_source_audio(
-                str(file_item.filename),
-                file_item.data,
-            )
-            MUSIC_SOURCE_ROOT.mkdir(parents=True, exist_ok=True)
-            target = unique_path(MUSIC_SOURCE_ROOT / safe_filename(path.name))
-            shutil.copy2(path, target)
-            path = target.resolve()
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "path": str(path), "name": path.name})
-
-    def _handle_singing_create(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            text = " ".join(str(payload.get("text") or "").split())
-            if not text:
-                raise ValueError("请输入歌曲名称")
-            source_path = _singing_audio_path(
-                payload.get("source_audio_path"),
-                "导唱音频",
-            )
-            reference_path = _singing_audio_path(
-                payload.get("reference_audio_path"),
-                "亚托莉歌声参考",
-            )
-            profile = str(payload.get("profile") or "atri").strip()
-            preview_seconds = max(
-                5,
-                min(60, int(payload.get("preview_seconds", 15))),
-            )
-            pitch_shift = float(payload.get("pitch_shift", 0.0))
-            if not math.isfinite(pitch_shift):
-                raise ValueError("移调参数必须是有限数字")
-            pitch_shift = max(-12.0, min(12.0, pitch_shift))
-            result = _music_bridge_request(
-                "/api/jobs",
-                "POST",
-                {
-                    "text": text[:200],
-                    "source_audio_path": str(source_path),
-                    "reference_audio_path": str(reference_path),
-                    "profile": profile,
-                    "preview_seconds": preview_seconds,
-                    "pitch_shift": pitch_shift,
-                    "prefer_original": False,
-                },
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result)
-
-    def _handle_singing_cancel(self) -> None:
-        payload = self._read_json()
-        try:
-            job_id = _valid_singing_job_id(
-                str((payload or {}).get("id") or "")
-            )
-            result = _music_bridge_request(
-                f"/api/jobs/{job_id}/cancel",
-                "POST",
-                {},
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result)
-
-    def _handle_voice_save(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            config_changes = payload.get("config")
-            if isinstance(config_changes, dict):
-                update_env(config_changes)
-                config = run_coro(self.webui_state.reload_config())
-            else:
-                config = self.webui_state.config
-            profile_payload = payload.get("profile")
-            profile = (
-                save_voice_profile(profile_payload)
-                if isinstance(profile_payload, dict)
-                else None
-            )
-            if "asr_lexicon_text" in payload:
-                save_asr_lexicon_text(str(payload.get("asr_lexicon_text") or ""))
-            if "tts_pronunciation_text" in payload:
-                save_tts_pronunciation_text(
-                    str(payload.get("tts_pronunciation_text") or "")
-                )
-            behavior_payload = payload.get("behavior")
-            if isinstance(behavior_payload, dict):
-                save_voice_behavior(behavior_payload)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json(
-            {
-                "ok": True,
-                "config": config_payload(config),
-                "profile": profile.public_dict() if profile else None,
-            }
-        )
-
-    def _handle_voice_call_turn(self) -> None:
-        content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_VOICE_UPLOAD_BYTES + 200_000:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "通话音频最大 30MB")
-        audio_path: Path | None = None
-        try:
-            form = parse_multipart_form(
-                self.headers.get("Content-Type", ""),
-                self.rfile.read(content_length),
-            )
-            token = multipart_text(form, "token", "").strip()
-            session = self.webui_state.server.voice_calls.get(token)
-            if session is None:
-                raise ValueError("通话邀请已失效或已结束")
-            file_item = multipart_file(form, "file")
-            if file_item is None or not file_item.filename:
-                raise ValueError("没有收到通话音频")
-            language = multipart_text(form, "language", "auto").strip().lower()
-            if language not in {"auto", "zh", "en", "ja"}:
-                language = "auto"
-            audio_path = save_test_audio(str(file_item.filename), file_item.data)
-            started_at = time.perf_counter()
-            transcript = run_coro(
-                self.webui_state.server.voice.client.transcribe(audio_path, language)
-            )
-            reply = run_coro(
-                self.webui_state.server.reply_engine.reply(
-                    session.conversation_id,
-                    transcript.text,
-                    profile_id=session.conversation_id,
-                    observed=False,
-                    tool_context=VoicePromptContext(
-                        transcript,
-                        prefer_voice_reply=True,
-                    ),
-                )
-            )
-            voice_request = self.webui_state.server.reply_engine.consume_voice_request(
-                session.conversation_id
-            )
-            consume_call = getattr(
-                self.webui_state.server.reply_engine,
-                "consume_call_request",
-                None,
-            )
-            if callable(consume_call):
-                consume_call(session.conversation_id)
-            spoken_text = str(voice_request.text if voice_request else reply).strip()
-            if not spoken_text:
-                spoken_text = "我在听，再和我说一点吧。"
-            max_chars = max(20, int(self.webui_state.config.voice_max_chars))
-            spoken_text = spoken_text[:max_chars].strip()
-            synthesis_request = VoiceRequest(
-                text=spoken_text,
-                emotion=voice_request.emotion if voice_request else "gentle",
-                intensity=voice_request.intensity if voice_request else 0.55,
-                language=voice_request.language if voice_request else "auto",
-                reason="voice_reply",
-            )
-            synthesis = run_coro(
-                self.webui_state.server.voice.synthesize(
-                    session.conversation_id,
-                    synthesis_request,
-                    enforce_cooldown=False,
-                )
-            )
-            self.webui_state.server.reply_engine.record_bot_reply(
-                session.conversation_id,
-                spoken_text,
-                profile_id=session.conversation_id,
-            )
-            self.webui_state.server.voice_calls.mark_turn(token)
-            elapsed_ms = round((time.perf_counter() - started_at) * 1000)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        finally:
-            if audio_path is not None:
-                with contextlib.suppress(OSError):
-                    audio_path.unlink()
-        self._send_json(
-            {
-                "ok": True,
-                "transcript": transcript.text,
-                "reply": spoken_text,
-                "audio_url": f"/api/voice/audio?path={quote(str(synthesis.audio_path))}",
-                "elapsed_ms": elapsed_ms,
-            }
-        )
-
-    def _handle_voice_call_close(self) -> None:
-        payload = self._read_json()
-        token = str((payload or {}).get("token") or "").strip()
-        if token:
-            self.webui_state.server.voice_calls.close(token)
-        self._send_json({"ok": True})
-
-    def _handle_voice_call_test_invite(self) -> None:
-        policy = load_voice_behavior()
-        if not policy["calls_enabled"]:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "请先启用并保存浏览器通话")
-        if not bool(self.webui_state.config.voice_tts_enabled):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "请先启用语音合成")
-        owner_qqs = tuple(getattr(self.webui_state.config, "owner_qqs", ()) or ())
-        if not owner_qqs:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "没有配置主人 QQ，无法建立测试会话")
-        session = self.webui_state.server.voice_calls.create(
-            f"private:{int(owner_qqs[0])}",
-            "WebUI 通话链路测试",
-            int(policy["call_expiry_minutes"]),
-            int(policy["call_max_minutes"]),
-        )
-        call_url = (
-            f"{str(policy['call_base_url']).rstrip('/')}/voice-call?token={session.token}"
-        )
-        self._send_json({"ok": True, "call_url": call_url, "session": session.public_dict()})
-
-    def _handle_voice_reference(self) -> None:
-        content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_VOICE_UPLOAD_BYTES + 200_000:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "参考音频最大 30MB")
-        try:
-            form = parse_multipart_form(
-                self.headers.get("Content-Type", ""),
-                self.rfile.read(content_length),
-            )
-            profile_id = multipart_text(form, "profile_id", "atri")
-            file_item = multipart_file(form, "file")
-            if file_item is None or not file_item.filename:
-                raise ValueError("请选择参考音频")
-            if len(file_item.data) > MAX_VOICE_UPLOAD_BYTES:
-                raise ValueError("参考音频最大 30MB")
-            profile = save_reference_audio(
-                profile_id,
-                str(file_item.filename),
-                file_item.data,
-            )
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "profile": profile.public_dict()})
-
-    def _handle_voice_preview(self) -> None:
-        payload = self._read_json()
-        try:
-            request = VoiceRequest.from_tool_arguments(
-                payload if isinstance(payload, dict) else {},
-                max_chars=int(self.webui_state.config.voice_max_chars),
-            )
-            profile_id = str((payload or {}).get("profile") or "atri")
-            behavior = load_voice_behavior()
-            started_at = time.perf_counter()
-            result = run_coro(
-                self.webui_state.server.voice.client.synthesize(
-                    request,
-                    profile_id,
-                    **_voice_preview_synthesis_options(behavior),
-                )
-            )
-            elapsed_ms = round((time.perf_counter() - started_at) * 1000)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json(
-            {
-                "ok": True,
-                "audio_url": f"/api/voice/audio?path={quote(str(result.audio_path))}",
-                "audio_path": str(result.audio_path),
-                "duration_seconds": result.duration_seconds,
-                "source": result.source,
-                "quality": result.quality,
-                "elapsed_ms": elapsed_ms,
-            }
-        )
-
-    def _handle_voice_test_asr(self) -> None:
-        content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_VOICE_UPLOAD_BYTES + 200_000:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "测试音频最大 30MB")
-        audio_path: Path | None = None
-        try:
-            form = parse_multipart_form(
-                self.headers.get("Content-Type", ""),
-                self.rfile.read(content_length),
-            )
-            file_item = multipart_file(form, "file")
-            if file_item is None or not file_item.filename:
-                raise ValueError("请选择测试音频")
-            if len(file_item.data) > MAX_VOICE_UPLOAD_BYTES:
-                raise ValueError("测试音频最大 30MB")
-            language = multipart_text(form, "language", "auto").strip().lower()
-            if language not in {"auto", "zh", "en", "ja"}:
-                raise ValueError("识别语言只支持自动、中文、英文或日文")
-            audio_path = save_test_audio(str(file_item.filename), file_item.data)
-            started_at = time.perf_counter()
-            result = run_coro(
-                self.webui_state.server.voice.client.transcribe(audio_path, language)
-            )
-            elapsed_ms = round((time.perf_counter() - started_at) * 1000)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        finally:
-            if audio_path is not None:
-                with contextlib.suppress(OSError):
-                    audio_path.unlink()
-        self._send_json(
-            {
-                "ok": True,
-                "text": result.text,
-                "language": result.language,
-                "emotion": result.emotion,
-                "confidence": result.confidence,
-                "elapsed_ms": elapsed_ms,
-            }
-        )
-
-    def _handle_sticker_category(self) -> None:
-        payload = self._read_json()
-        name = sanitize_category(str((payload or {}).get("name") or ""))
-        if not name:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "分类名只能包含中文、英文、数字、横线和下划线")
-        target = STICKER_ROOT / name
-        target.mkdir(parents=True, exist_ok=True)
-        self._send_json({"ok": True, "category": name, "path": str(target)})
-
-    def _handle_sticker_upload(self) -> None:
-        content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "empty upload")
-        if content_length > MAX_UPLOAD_BYTES + 200_000:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "文件太大，单个表情包最多 8MB")
-
-        try:
-            form = parse_multipart_form(
-                self.headers.get("Content-Type", ""),
-                self.rfile.read(content_length),
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-
-        category = sanitize_category(multipart_text(form, "category", "default"))
-        if not category:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "分类名不合法")
-        file_item = multipart_file(form, "file")
-        if file_item is None or not file_item.filename:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "请选择图片文件")
-
-        filename = safe_filename(str(file_item.filename))
-        suffix = Path(filename).suffix.lower()
-        if suffix not in IMAGE_EXTENSIONS:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "只支持 jpg/png/gif/webp")
-        data = file_item.data
-        if len(data) > MAX_UPLOAD_BYTES:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "文件太大，单个表情包最多 8MB")
-        if not looks_like_image_bytes(data, suffix):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "文件内容不像有效图片")
-
-        target_dir = STICKER_ROOT / category
-        target_dir.mkdir(parents=True, exist_ok=True)
-        stem = Path(filename).stem or "sticker"
-        target = unique_path(target_dir / f"{stem}{suffix}")
-        target.write_bytes(data)
-        self._send_json({"ok": True, "file": sticker_file_payload(target)})
-
-    def _handle_sticker_delete(self) -> None:
-        payload = self._read_json()
-        rel = str((payload or {}).get("path") or "")
-        path = resolve_under(STICKER_ROOT, rel)
-        if path is None or not path.is_file():
-            return self._send_error(HTTPStatus.BAD_REQUEST, "文件不存在")
-        STICKER_DELETED_DIR.mkdir(parents=True, exist_ok=True)
-        target = unique_path(STICKER_DELETED_DIR / path.name)
-        shutil.move(str(path), str(target))
-        meta = path.with_suffix(path.suffix + ".json")
-        if meta.exists():
-            shutil.move(str(meta), str(unique_path(STICKER_DELETED_DIR / meta.name)))
-        self._send_json({"ok": True, "moved_to": str(target)})
-
-    def _handle_memory_save(self) -> None:
-        payload = self._read_json()
-        conversation_id = str((payload or {}).get("id") or "")
-        content = (payload or {}).get("content")
-        if not conversation_id or not isinstance(content, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "参数不完整")
-        try:
-            backup = save_memory_conversation(conversation_id, content)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "backup": str(backup)})
-
-    def _handle_memory_relationship(self) -> None:
-        payload = self._read_json()
-        conversation_id = str((payload or {}).get("id") or "")
-        if not conversation_id:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "缺少会话 id")
-        try:
-            backup, relationship = update_memory_relationship(
-                conversation_id,
-                (payload or {}).get("affection_score"),
-                (payload or {}).get("proactive_override"),
-                (payload or {}).get("group_activity_score"),
-                (payload or {}).get("trust_tier"),
-            )
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json(
-            {"ok": True, "backup": str(backup), "relationship": relationship}
-        )
-
-    def _handle_memory_delete(self) -> None:
-        payload = self._read_json()
-        conversation_id = str((payload or {}).get("id") or "")
-        if not conversation_id:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "缺少会话 id")
-        try:
-            backup = delete_memory_conversation(conversation_id)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "backup": str(backup)})
-
-    def _status(self) -> dict[str, Any]:
-        return runtime_status(self.webui_state.config)
-
-    def _developer_payload(self) -> dict[str, Any]:
-        """开发面板只提供本机诊断信息，Token 不写入项目日志。"""
-        return {
-            "ok": True,
-            "status": self._status(),
-            "log_file": str(LOG_DIR / f"project-{datetime.now().astimezone():%Y-%m-%d}.log"),
-            "log_levels": ["all", "debug", "info", "warning", "error"],
-            "refresh_seconds": 3,
-        }
-
-    def _logs_payload(self, query: str) -> dict[str, Any]:
-        params = parse_qs(query)
-        level = str(params.get("level", ["all"])[0]).lower()
-        limit = int(str(params.get("limit", ["240"])[0]) or 240)
-        return {"ok": True, "level": level, "lines": read_project_logs(level, limit)}
-
-    def _read_json(self) -> Any:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0:
-            return {}
-        raw = self.rfile.read(min(length, 1024 * 1024))
-        return json.loads(raw.decode("utf-8"))
-
-    def _send_sticker_file(self, query: str) -> None:
-        rel = parse_qs(query).get("path", [""])[0]
-        path = resolve_under(STICKER_ROOT, rel)
-        if path is None or not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
-            return self._send_error(HTTPStatus.NOT_FOUND, "image not found")
-        content = path.read_bytes()
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
-
-    def _send_voice_audio(self, query: str) -> None:
-        raw_path = parse_qs(query).get("path", [""])[0]
-        path = resolve_voice_audio(raw_path)
-        if path is None:
-            return self._send_error(HTTPStatus.NOT_FOUND, "audio not found")
-        content = path.read_bytes()
-        content_type = mimetypes.guess_type(path.name)[0] or "audio/wav"
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
-
-    def _send_json(
-        self,
-        payload: dict[str, Any],
-        *,
-        status: HTTPStatus = HTTPStatus.OK,
-    ) -> None:
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_html(self, text: str) -> None:
-        body = text.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_error(self, status: HTTPStatus, message: str) -> None:
-        body = json.dumps({"ok": False, "error": message}, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
 
 def _valid_singing_job_id(value: str) -> str:
@@ -1307,7 +452,100 @@ async def test_chat(config: BotConfig, text: str) -> dict[str, Any]:
         return {"reply": reply, "used_ai": True, "error": ""}
     except Exception as exc:
         return {
-            "reply": engine._fallback_reply("webui:test", text),
+            "reply": "",
             "used_ai": False,
             "error": str(exc),
         }
+
+
+def _qzone_generation_config(config: BotConfig, profile_id: str) -> tuple[BotConfig, str]:
+    wanted = str(profile_id or "").strip()
+    if not wanted:
+        return config, "当前聊天模型"
+    profile = next((item for item in load_model_profiles() if str(item.get("id") or "") == wanted), None)
+    if not profile:
+        raise ValueError("没有找到所选模型档案")
+    if str(profile.get("model_type") or "chat") != "chat":
+        raise ValueError("QQ 动态生成只能选择聊天模型")
+    base_url = str(profile.get("base_url") or "").strip().rstrip("/")
+    model = str(profile.get("model") or "").strip()
+    if not base_url or not model:
+        raise ValueError("所选模型档案缺少接口地址或模型名")
+    try:
+        tuned = replace(
+            config,
+            openai_api_key=str(profile.get("api_key") or config.openai_api_key or ""),
+            openai_base_url=base_url,
+            openai_model=model,
+            temperature=float(profile.get("temperature") or config.temperature),
+            frequency_penalty=float(profile.get("frequency_penalty") or config.frequency_penalty),
+            max_tokens=max(120, int(profile.get("max_tokens") or config.max_tokens)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"模型档案参数无效：{exc}") from exc
+    return tuned, str(profile.get("name") or model)
+
+
+def qzone_fact_context(
+    config: BotConfig,
+    settings: dict[str, Any],
+    scheduled_at: float,
+    slot_index: int | None = None,
+) -> str:
+    """Fetch recent evidence, then discard stale or low-attribution search results."""
+    topic = topic_for_schedule(settings, scheduled_at, slot_index)
+    query = f"{topic} 最新消息 {datetime.fromtimestamp(float(scheduled_at)).strftime('%Y-%m-%d')}"
+    research_topic = any(marker in topic for marker in ("前沿", "科普", "技术", "科学", "研究"))
+    trusted_domains = ["cas.cn", "arxiv.org", "nature.com"] if research_topic else ["gov.cn", "news.cn", "people.com.cn"]
+    raw = str(
+        run_coro(
+            search_web(
+                {
+                    "query": query,
+                    "mode": "news",
+                    "domains": trusted_domains,
+                    "max_results": 5,
+                },
+                config,
+            )
+        )
+        or ""
+    ).strip()
+    return sanitize_qzone_fact_context(raw, scheduled_at)
+
+
+async def generate_qzone_text(config: BotConfig, prompt: str, kind: str, profile_id: str = "") -> dict[str, Any]:
+    instruction = str(prompt or "").strip()
+    if not instruction:
+        raise ValueError("请输入生成提示词")
+    if len(instruction) > 2000:
+        raise ValueError("提示词最多 2000 字")
+    mode = "动态" if kind == "post" else "评论"
+    if kind not in {"post", "comment"}:
+        raise ValueError("生成类型无效")
+    selected_config, profile_name = _qzone_generation_config(config, profile_id)
+    engine = AtriReplyEngine(
+        replace(
+            selected_config,
+            idle_proactive_enabled=False,
+            group_proactive_enabled=False,
+            chat_quality_retries=0,
+        )
+    )
+    system = (
+        "你现在在为 QQ 空间自动互动生成文案。你是亚托莉，必须保持当前项目已配置的人格、记忆和情绪状态。"
+        f"请根据用户提示生成一条{mode}，只输出可以直接发布的{mode}正文，不要解释、不要加引号、不要写‘提示词’或‘生成结果’。"
+        + ("动态要结合当前时间和提示中的主题方向，避免模板化，可在生活趣事、思考感悟、原作剧情、热点观点、天气季节、学习发现之间自然变化。" if kind == "post" else "")
+        + ("动态必须优先采用提示中明确提供的一条事实或最新消息，并保留必要的来源/据报道表述；只能依据原文，不得补写新闻细节。没有可靠事实时不要编造新闻、日期、人物行动或亲身经历，也不要用‘今天看到/窗边发现’等虚构亲历替代事实。" if kind == "post" else "")
+        + ("正文控制在 20-120 字，适合 QQ 空间动态。" if kind == "post" else "正文控制在 1-80 字，自然、像真人评论。")
+    )
+    reply = await engine._reply_with_guarded_api(
+        "webui:qzone:generate",
+        instruction,
+        "主人",
+        extra_system=system,
+        allow_reply_voice=False,
+    )
+    reply = engine._finalize_reply("webui:qzone:generate", instruction, reply, strict_quality=False).strip()
+    limit = 1000 if kind == "post" else 200
+    return {"ok": True, "kind": kind, "content": reply[:limit], "model_name": profile_name, "model_profile_id": str(profile_id or "")}

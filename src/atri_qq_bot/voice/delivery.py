@@ -65,6 +65,18 @@ _STAGE_DIRECTION_CUES = (
     "哭腔",
     "讲故事",
 )
+_BRACKETED_NON_SPEECH = re.compile(
+    r"[\(（\[【][^\)）\]】\r\n]{0,240}[\)）\]】]"
+)
+_STARRED_NON_SPEECH = re.compile(r"(?<!\w)\*[^*\r\n]{1,240}\*(?!\w)")
+_THOUGHT_BLOCK = re.compile(
+    r"<\s*(?:think|thought|analysis)\s*>.*?<\s*/\s*(?:think|thought|analysis)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THOUGHT_LINE = re.compile(
+    r"(?:^|[。！？!?\n])\s*(?:内心独白|内心|心想|思考|分析|动作|旁白|OS)\s*[：:]\s*[^\n。！？!?]*"
+)
+_VOICE_SHORT_LIMIT = 80
 
 
 @dataclass(frozen=True)
@@ -92,7 +104,9 @@ def build_explicit_voice_fallback(
 ) -> VoiceRequest | None:
     intent = detect_explicit_delivery_intent(user_text)
     requested = extract_explicit_spoken_text(user_text, max_chars=max_chars)
-    spoken = requested or _clean_reply_text(reply_text)[: max(1, int(max_chars))].strip()
+    spoken = requested or _limit_spoken_text(
+        _clean_reply_text(reply_text), max_chars=max_chars
+    )
     if intent is None or not spoken:
         return None
     return VoiceRequest(
@@ -102,6 +116,9 @@ def build_explicit_voice_fallback(
         language="auto",
         reason="explicit_request",
         mode=intent.mode,
+        song_title="",
+        segment_index=None,
+        segment_hint="",
     )
 
 
@@ -122,7 +139,8 @@ def build_autonomous_voice_fallback(
         return None
     spoken = _clean_reply_text(raw_reply)
     limit = max(1, int(max_chars))
-    if not spoken or len(spoken) > limit:
+    spoken = _limit_spoken_text(spoken, max_chars=limit)
+    if not spoken:
         return None
     return VoiceRequest(
         text=spoken,
@@ -144,7 +162,7 @@ def extract_explicit_spoken_text(user_text: str, *, max_chars: int) -> str:
         if spoken.endswith("吧") and len(spoken) > 1:
             spoken = spoken[:-1].rstrip()
         if spoken and spoken not in {"这个", "那个", "它", "这句", "这句话"}:
-            return spoken[: max(1, int(max_chars))].strip()
+            return _limit_spoken_text(spoken, max_chars=max_chars)
     return ""
 
 
@@ -167,12 +185,41 @@ def stabilize_explicit_voice_request(
     )
 
 
+def sanitize_voice_request(request: VoiceRequest, *, max_chars: int) -> VoiceRequest:
+    """Remove non-spoken roleplay content before anything reaches GPT-SoVITS."""
+
+    if request.mode != "speech":
+        return request
+    spoken = _limit_spoken_text(_clean_reply_text(request.text), max_chars=max_chars)
+    return replace(request, text=spoken)
+
+
 def _clean_reply_text(text: str) -> str:
     value = re.sub(r"https?://\S+", "", str(text or ""))
+    value = _THOUGHT_BLOCK.sub(" ", value)
+    value = _THOUGHT_LINE.sub(" ", value)
+    # Markdown 加粗是正文格式；先拆掉双星号，避免被误判成 *动作*。
+    value = re.sub(r"\*{2}", "", value)
+    value = _STARRED_NON_SPEECH.sub(" ", value)
+    value = _BRACKETED_NON_SPEECH.sub(" ", value)
     value = re.sub(r"[*_~`#]+", "", value)
     value = _remove_leading_stage_directions(value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
+
+
+def _limit_spoken_text(text: str, *, max_chars: int) -> str:
+    value = str(text or "").strip()
+    limit = max(1, min(int(max_chars), _VOICE_SHORT_LIMIT))
+    if len(value) <= limit:
+        return value
+    boundary = max(
+        (value.rfind(mark, 0, limit + 1) for mark in "。！？!?；;"),
+        default=-1,
+    )
+    if boundary >= max(8, limit // 3):
+        return value[: boundary + 1].strip()
+    return value[:limit].rstrip("，,、：:；; ") + "。"
 
 
 def _remove_leading_stage_directions(text: str) -> str:

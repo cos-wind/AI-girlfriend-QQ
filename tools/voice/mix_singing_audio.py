@@ -80,16 +80,20 @@ def _ducking_envelope(vocal: np.ndarray, sample_rate: int, ducking_db: float) ->
     return np.power(10.0, (-float(ducking_db) * activity) / 20.0).astype(np.float32)
 
 
-def _write_pcm16(path: Path, audio: np.ndarray, sample_rate: int) -> None:
+def _write_pcm24(path: Path, audio: np.ndarray, sample_rate: int) -> None:
     data = np.asarray(audio, dtype=np.float32)
-    data = np.clip(data, -1.0, 1.0)
-    interleaved = (data.T.reshape(-1) * 32767.0).astype("<i2")
+    integers = np.rint(np.clip(data.T.reshape(-1), -1.0, 1.0) * 8_388_607.0).astype(np.int32)
+    unsigned = integers.astype(np.uint32)
+    packed = np.empty((len(unsigned), 3), dtype=np.uint8)
+    packed[:, 0] = unsigned & 0xFF
+    packed[:, 1] = (unsigned >> 8) & 0xFF
+    packed[:, 2] = (unsigned >> 16) & 0xFF
     path.resolve().parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path.resolve()), "wb") as stream:
         stream.setnchannels(data.shape[0])
-        stream.setsampwidth(2)
+        stream.setsampwidth(3)
         stream.setframerate(sample_rate)
-        stream.writeframes(interleaved.tobytes())
+        stream.writeframes(packed.tobytes())
 
 
 def main() -> None:
@@ -97,6 +101,7 @@ def main() -> None:
     parser.add_argument("--vocal", type=Path, required=True)
     parser.add_argument("--instrumental", type=Path, required=True)
     parser.add_argument("--harmony", type=Path)
+    parser.add_argument("--harmony-gain-db", type=float, default=-120.0)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--instrumental-gain-db", type=float, default=-1.7)
     parser.add_argument("--instrumental-gain", type=float)
@@ -187,16 +192,23 @@ def main() -> None:
     accompaniment = instrumental * duck[np.newaxis, :] * (10.0 ** (accompaniment_db / 20.0))
     mixed = vocal_stereo[:, :frames] + accompaniment[:, :frames]
 
-    if args.harmony and args.harmony.is_file():
+    harmony_db = max(-120.0, min(0.0, args.harmony_gain_db))
+    if args.harmony and args.harmony.is_file() and harmony_db > -90.0:
         harmony = _fit_channels(_read_audio(args.harmony, sample_rate), 2, frames)
-        mixed += harmony * (10.0 ** (-8.0 / 20.0))
+        mixed += harmony * (10.0 ** (harmony_db / 20.0))
 
     print("[ATRI_PROGRESS] 82% 伴奏 Ducking 与最终限幅", flush=True)
     limiter = Pedalboard(
         [Limiter(threshold_db=max(-6.0, min(-0.1, args.limiter_db)), release_ms=100.0)]
     )
     mixed = np.asarray(limiter(mixed, sample_rate), dtype=np.float32)
-    _write_pcm16(args.output, mixed, sample_rate)
+    # Pedalboard's limiter is dynamic; guarantee the stored engineering mix
+    # itself never exceeds the configured ceiling before later LUFS export.
+    ceiling = 10.0 ** (max(-6.0, min(-0.1, args.limiter_db)) / 20.0)
+    peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
+    if peak > ceiling:
+        mixed *= ceiling / peak
+    _write_pcm24(args.output, mixed, sample_rate)
     print("[ATRI_PROGRESS] 100% 立体声混音完成", flush=True)
 
 

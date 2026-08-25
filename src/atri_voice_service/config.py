@@ -78,6 +78,15 @@ class VoiceServiceConfig:
     tts_quality_gate_enabled: bool = False
     tts_quality_max_error_rate: float = 0.22
     tts_quality_retries: int = 1
+    # QQ 会话按文本长度动态分配预算；这里是硬上限和冷启动内部上限。
+    tts_total_timeout_seconds: float = 75.0
+    tts_startup_timeout_seconds: float = 45.0
+    tts_inference_timeout_seconds: float = 25.0
+    tts_resource_wait_seconds: float = 8.0
+    tts_prewarm_enabled: bool = False
+    # 16GB 主机上 GPT-SoVITS 会占用约 6GB 提交内存。30 秒足够连续分段
+    # 复用权重，又能在语音发送结束后尽快把资源还给视觉和记忆模型。
+    tts_idle_shutdown_seconds: int = 300
     singing_enabled: bool = True
     singing_pipeline_manifest: Path = field(
         default_factory=lambda: PROJECT_ROOT
@@ -148,6 +157,26 @@ class VoiceServiceConfig:
             ),
             tts_quality_retries=max(
                 0, min(3, _env_int("ATRI_TTS_QUALITY_RETRIES", 1))
+            ),
+            tts_total_timeout_seconds=max(
+                15.0,
+                min(75.0, _env_float("ATRI_TTS_TOTAL_TIMEOUT_SECONDS", 75.0)),
+            ),
+            tts_startup_timeout_seconds=max(
+                30.0,
+                min(60.0, _env_float("ATRI_TTS_STARTUP_TIMEOUT_SECONDS", 45.0)),
+            ),
+            tts_inference_timeout_seconds=max(
+                10.0,
+                min(30.0, _env_float("ATRI_TTS_INFERENCE_TIMEOUT_SECONDS", 25.0)),
+            ),
+            tts_resource_wait_seconds=max(
+                1.0,
+                min(15.0, _env_float("ATRI_TTS_RESOURCE_WAIT_SECONDS", 8.0)),
+            ),
+            tts_prewarm_enabled=_env_bool("ATRI_TTS_PREWARM_ENABLED", False),
+            tts_idle_shutdown_seconds=max(
+                0, min(1_800, _env_int("ATRI_TTS_IDLE_SHUTDOWN_SECONDS", 300))
             ),
             singing_enabled=_env_bool("ATRI_SINGING_ENABLED", True),
             singing_pipeline_manifest=_env_path(

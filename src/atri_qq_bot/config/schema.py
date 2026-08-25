@@ -29,6 +29,10 @@ class BotConfig:
     temperature: float
     max_tokens: int
     frequency_penalty: float = 0.25
+    # 单次模型请求和 GPU 排队分别设上限，避免一个失败轮次拖住整个会话。
+    chat_request_timeout_seconds: float = 25.0
+    chat_resource_wait_seconds: float = 35.0
+    chat_quality_retries: int = 1
     message_split_max_chars: int = 44
     message_split_max_parts: int = 4
     message_send_delay_min: float = 0.55
@@ -36,6 +40,16 @@ class BotConfig:
     sticker_dir: Path = field(default_factory=lambda: _project_root() / "data" / "stickers")
     sticker_trigger_file: Path = field(
         default_factory=lambda: _project_root() / "data" / "stickers" / "triggers.json"
+    )
+    # Incoming chat stickers belong to the configured QQ account record tree,
+    # not to the local library used by the model when it sends stickers.
+    sticker_capture_dir: Path = field(
+        default_factory=lambda: Path.home()
+        / "Documents"
+        / "Tencent Files"
+        / "0"
+        / "ATRI"
+        / "chat_history"
     )
     sticker_chance: float = 0.24
     sticker_cooldown_seconds: int = 120
@@ -92,20 +106,33 @@ class BotConfig:
     toolbox_vision_model: str = ""
     toolbox_vision_fallback_model: str = ""
     toolbox_vision_base_url: str = ""
+    # 可选：视觉兜底模型的独立接口地址。未填写时，本地模型名自动使用本机 Ollama。
+    toolbox_vision_fallback_base_url: str = ""
     toolbox_vision_api_key: str | None = None
     toolbox_vision_max_bytes: int = 8_000_000
     toolbox_vision_retry_count: int = 1
-    toolbox_vision_resource_wait_seconds: float = 120.0
+    toolbox_vision_resource_wait_seconds: float = 10.0
+    toolbox_vision_timeout_seconds: float = 55.0
     toolbox_vision_unload_other_ollama_models: bool = False
     toolbox_ocr_enabled: bool = False
     toolbox_video_frame_analysis_enabled: bool = True
     toolbox_video_max_frames: int = 4
+    # 单条视频消息的总处理预算，默认 60 秒，超时自动降级到 OCR/标题。
+    toolbox_video_deadline_seconds: float = 60.0
     llm_tools_enabled: bool = True
     llm_tool_max_calls: int = 2
     llm_agent_protocol_enabled: bool = False
     llm_agent_max_steps: int = 6
     llm_agent_max_tool_calls: int = 3
     human_reply_pipeline_enabled: bool = True
+    # 新认知内核先以只读影子模式运行：维护持续目标、自我和情绪，
+    # 但不发送消息、不调用副作用能力，也不写入 L1/L2/L3。
+    cognition_shadow_enabled: bool = True
+    cognition_state_path: Path = field(
+        default_factory=lambda: _project_root() / "data" / "cognition" / "state.sqlite3"
+    )
+    cognition_shadow_timeout_seconds: float = 2.0
+    cognition_shadow_max_concurrency: int = 2
     web_search_enabled: bool = True
     web_search_timeout_seconds: float = 6.0
     web_search_max_results: int = 5
@@ -116,11 +143,11 @@ class BotConfig:
     voice_service_url: str = "http://127.0.0.1:8790"
     voice_service_timeout_seconds: float = 180.0
     voice_profile: str = "atri"
-    voice_zh_rescue_profile: str = "atri-official-v2pro-curated-gpt-e6"
+    voice_zh_profile: str = ""
     voice_group_enabled: bool = False
     voice_reply_to_voice: bool = False
     voice_max_chars: int = 160
-    voice_segment_max_chars: int = 34
+    voice_segment_max_chars: int = 100
     voice_cooldown_seconds: int = 30
     voice_input_max_bytes: int = 20_000_000
     # WebUI 仅允许绑定回环地址，避免把本机管理能力暴露到局域网。

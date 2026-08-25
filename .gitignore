@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .env
+.idea/
 .pytest_cache/
 *.log
 logs/
@@ -10,10 +11,16 @@ build/
 *.egg-info/
 data/memory/
 data/runtime/
+data/cognition/
+data/insights/
 data/webui/
+data/music/
+data/qzone_automation.sqlite3
+data/**/*.sqlite3
 data/stickers/_chat_history/
 data/stickers/_deleted/
 data/voice/cache/
 data/voice/profiles/
 data/voice/references/
 data/voice/singing-pipeline.json
+tools/onebot-qzone/

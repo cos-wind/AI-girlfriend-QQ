@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from atri_qq_bot.voice import SynthesisResult, VoiceRequest
+from atri_qq_bot.runtime.inference_lock import InferencePriority
 
 from .config import VoiceServiceConfig
 from .original_library import OriginalVoiceLibrary
@@ -42,6 +44,7 @@ class ConversationSpeechPipeline:
         originals: OriginalVoiceLibrary,
         profiles: VoiceProfileStore,
         resources: InferenceResourceManager,
+        ensure_tts_runtime: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self.config = config
         self.tts = tts
@@ -49,6 +52,7 @@ class ConversationSpeechPipeline:
         self.originals = originals
         self.profiles = profiles
         self.resources = resources
+        self.ensure_tts_runtime = ensure_tts_runtime
         self.last_quality: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
@@ -93,8 +97,24 @@ class ConversationSpeechPipeline:
             raise ProviderError(f"不支持的 TTS 提供器：{profile.tts_provider}")
 
         synthesis_error: ProviderError | None = None
-        async with self.resources.lease(f"speech:{profile.id}"):
+        # 整个“启动引擎 → 合成 → 可选 ASR 回读”属于同一次资源会话。
+        # 不能在启动 GPT-SoVITS 前释放全局锁，否则 Ollama 会趁隙加载模型。
+        async with self.resources.lease(
+            f"session:{profile.id}",
+            timeout_seconds=self.config.tts_resource_wait_seconds,
+            # 用户明确要求语音时，排在普通聊天/视觉排队任务之前；不打断
+            # 已经运行的推理，但避免新任务持续插队导致语音永远拿不到锁。
+            priority=(
+                InferencePriority.CHAT
+                if request.reason == "explicit_request"
+                else InferencePriority.USER_MEDIA
+            ),
+        ):
             try:
+                if self.ensure_tts_runtime is not None:
+                    ready = await self.ensure_tts_runtime()
+                    if not ready:
+                        raise ProviderError("GPT-SoVITS 按需启动失败，请查看语音服务日志")
                 outcome = await synthesize_with_quality(
                     self.config,
                     self.tts,
@@ -111,6 +131,12 @@ class ConversationSpeechPipeline:
                 if isinstance(report, dict):
                     self.last_quality = report
                 synthesis_error = exc
+            finally:
+                # 质量门会临时加载 ASR；整次语音会话结束立即释放，保留
+                # 8790 服务而不让 SenseVoice 常驻数 GB 内存。
+                unload_asr = getattr(self.asr, "unload", None)
+                if callable(unload_asr):
+                    await unload_asr()
         if synthesis_error is not None:
             contextual = (
                 self.originals.match_contextual(request.text, request.language)
@@ -175,7 +201,14 @@ async def synthesize_with_quality(
             if not exc.retryable:
                 raise
             candidate_errors.append(str(exc))
-            continue
+            # Retry only after the provider has actually rejected a generated
+            # candidate.  The QQ fast path still skips ASR and never performs
+            # an unconditional second synthesis.
+            if attempt < retries:
+                continue
+            if quality_gate:
+                continue
+            raise
         if not quality_gate:
             return QualityCheckedSynthesis(result, None, None)
         report, public_report = await _round_trip_quality(

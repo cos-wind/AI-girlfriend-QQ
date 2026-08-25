@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 import locale
+import os
 import subprocess
 import time
 import webbrowser
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from atri_qq_bot.config import BotConfig, load_config
-from atri_qq_bot.runtime.control import restart_background_services, run_hidden, runtime_status, tcp_rows
+from atri_qq_bot.runtime.control import run_hidden, runtime_status, start_background_services, tcp_rows
 from atri_qq_bot.runtime.paths import PROJECT_ROOT
 
 
@@ -35,10 +37,13 @@ class DesktopPetStatus:
     napcat_detail: str
     napcat_webui_url: str = ""
     napcat_webui_reachable: bool = False
+    maibot_webui_url: str = ""
+    maibot_webui_reachable: bool = False
 
     @classmethod
     def from_runtime(cls, payload: dict[str, Any]) -> "DesktopPetStatus":
         napcat_webui = payload.get("napcat_webui") or {}
+        maibot_webui = payload.get("maibot_webui") or {}
         return cls(
             atri=bool(payload.get("atri")),
             napcat=bool(payload.get("napcat")),
@@ -55,6 +60,8 @@ class DesktopPetStatus:
             # 仅在本机“状态详情”中展示，不能用于气泡或日志。
             napcat_webui_url=str(napcat_webui.get("url") or ""),
             napcat_webui_reachable=bool(napcat_webui.get("reachable")),
+            maibot_webui_url=str(maibot_webui.get("url") or ""),
+            maibot_webui_reachable=bool(maibot_webui.get("reachable")),
         )
 
 
@@ -70,7 +77,7 @@ class DesktopPetController:
         return self.start_atri_with_qq()
 
     def start_atri_with_qq(self) -> ActionResult:
-        result = restart_background_services()
+        result = start_background_services()
         if result.get("ok"):
             return ActionResult(True, str(result.get("message") or "亚托莉启动命令已发出"))
         return ActionResult(False, "亚托莉启动命令发送失败", str(result.get("error") or "未知错误"))
@@ -133,11 +140,19 @@ def _stop_python_listener(port: int) -> subprocess.CompletedProcess[bytes]:
     outputs: list[str] = []
     failed = 0
     for pid in pids:
-        completed = run_hidden(["taskkill.exe", "/PID", str(pid), "/T", "/F"])
+        command = ["taskkill.exe", "/PID", str(pid), "/T", "/F"]
+        try:
+            completed = run_hidden(command, timeout=3.0)
+        except TypeError:
+            # 兼容旧测试/外部注入的无 timeout 参数函数。
+            completed = run_hidden(command)
         output = _completed_output(completed)
         if completed.returncode != 0:
-            failed += 1
-            outputs.append(output or f"Could not stop PID {pid}.")
+            if _terminate_process_by_handle(pid):
+                outputs.append(f"Atri 进程 {pid} 已通过进程句柄停止。")
+            else:
+                failed += 1
+                outputs.append(output or f"无法停止 Atri 进程 PID {pid}。")
 
     if failed == 0:
         deadline = time.monotonic() + 3.0
@@ -152,3 +167,25 @@ def _stop_python_listener(port: int) -> subprocess.CompletedProcess[bytes]:
         failed = 1
 
     return _completed_text(0 if failed == 0 else 2, "\n".join(outputs))
+
+
+def _terminate_process_by_handle(pid: int) -> bool:
+    """taskkill 卡住或失败时，直接终止指定 PID；不按进程名误伤 QQ/NapCat。"""
+    if os.name != "nt":
+        return False
+    process_terminate = 0x0001
+    process_query_limited_information = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(
+        process_terminate | process_query_limited_information,
+        False,
+        int(pid),
+    )
+    if not handle:
+        return False
+    try:
+        if not ctypes.windll.kernel32.TerminateProcess(handle, 1):
+            return False
+        ctypes.windll.kernel32.WaitForSingleObject(handle, 3000)
+        return True
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)

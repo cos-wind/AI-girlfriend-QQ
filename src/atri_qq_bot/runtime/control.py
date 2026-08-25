@@ -3,10 +3,12 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import shutil
 import socket
 import subprocess
 import time
 from ctypes import wintypes
+from pathlib import Path
 from typing import Any
 
 from ..config import BotConfig
@@ -33,8 +35,10 @@ def publish_napcat_runtime_state(state: str, *, detail: str = "") -> None:
         "state": state,
         "detail": detail,
         "updated_at": time.time(),
-        "qrcode": payload.get("qrcode", ""),
     })
+    # 登录二维码由 NapCat WebUI 管理；清理旧版本留下的二维码路径，避免
+    # 桌面端或其他状态消费者误以为项目仍会打开本地二维码文件。
+    payload.pop("qrcode", None)
     _write_napcat_state_file(payload)
 
 
@@ -110,14 +114,30 @@ def hidden_subprocess_startupinfo() -> Any | None:
     return startupinfo
 
 
-def run_hidden(command: list[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        command,
-        capture_output=True,
-        stdin=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        startupinfo=hidden_subprocess_startupinfo(),
-    )
+def run_hidden(
+    command: list[str],
+    *,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """运行隐藏命令；可选超时避免控制面板被系统命令永久卡住。"""
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            startupinfo=hidden_subprocess_startupinfo(),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=124,
+            stdout=exc.stdout or b"",
+            stderr=(exc.stderr or b"hidden command timed out").encode()
+            if isinstance(exc.stderr, str)
+            else (exc.stderr or b"hidden command timed out"),
+        )
 
 
 def is_port_listening(port: int) -> bool:
@@ -246,7 +266,7 @@ def _int_or_none(value: str) -> int | None:
 def runtime_status(config: BotConfig) -> dict[str, Any]:
     """汇总桌宠与 WebUI 共用的只读运行状态。
 
-    OneBot 是否在线以 TCP 已建立连接为准；NapCat 状态文件只提供扫码或
+    OneBot 是否在线以 TCP 已建立连接为准；NapCat 状态文件只提供登录或
     重连过程的说明，避免历史状态把断线误显示为在线。
     """
     rows = tcp_rows()
@@ -311,6 +331,34 @@ def runtime_status(config: BotConfig) -> dict[str, Any]:
         napcat_state = str(napcat_runtime.get("state") or "disconnected")
         napcat_detail = str(napcat_runtime.get("detail") or "")
     napcat_webui = napcat_webui_access()
+    cognition_status = _cognition_status(config)
+    ollama_running = _is_port_listening(rows, 11434)
+    ollama_on_demand = bool(
+        not ollama_running
+        and _config_uses_local_ollama(config)
+        and _ollama_executable_available()
+    )
+    vision_configured = bool(
+        getattr(config, "toolbox_vision_enabled", False)
+        and str(getattr(config, "toolbox_vision_model", "") or "").strip()
+        and str(getattr(config, "toolbox_vision_base_url", "") or "").strip()
+    )
+    vision_primary_is_local = _is_local_ollama_url(
+        str(getattr(config, "toolbox_vision_base_url", "") or "")
+    )
+    vision_available = bool(
+        vision_configured
+        and (
+            not vision_primary_is_local
+            or ollama_running
+            or ollama_on_demand
+        )
+    )
+    webui_url = f"http://{config.webui_host}:{config.webui_port}"
+    webui_reachable = _is_port_listening(rows, int(config.webui_port))
+    # MaiBot 是独立运行时，不属于当前 ATRI 进程。保留官方 WebUI 默认入口，
+    # 让本机运维页可以明确显示“未启动”，避免把 ATRI WebUI 误认为 MaiBot。
+    maibot_webui_url = "http://127.0.0.1:8001"
     return {
         "atri": _is_port_listening(rows, int(config.port)),
         "napcat": napcat_connected,
@@ -322,18 +370,81 @@ def runtime_status(config: BotConfig) -> dict[str, Any]:
         "napcat_probe_ok": probe_ok if probe_known else None,
         "napcat_probe_at": probe_at or None,
         "napcat_probe_age_seconds": round(probe_age_seconds, 1) if probe_age_seconds is not None else None,
-        "ollama": _is_port_listening(rows, 11434),
+        "ollama": ollama_running,
+        "ollama_on_demand": ollama_on_demand,
         "voice": _is_port_listening(rows, 8790),
         "webui": True,
         "bot_qq": config.bot_qq,
         "onebot": f"ws://{config.host}:{config.port}/onebot",
-        "webui_url": f"http://{config.webui_host}:{config.webui_port}",
+        "webui_url": webui_url,
+        "maibot_webui": {
+            "url": maibot_webui_url,
+            "reachable": _is_port_listening(rows, 8001),
+        },
         "model": config.openai_model,
         "vision_model": config.toolbox_vision_model or config.openai_model,
+        "vision_available": vision_available,
         "base_url": config.openai_base_url,
         "reply_mode": config.reply_mode,
+        "cognition": cognition_status,
         "napcat_webui": napcat_webui,
     }
+
+
+def _is_local_ollama_url(value: str) -> bool:
+    lowered = str(value or "").strip().lower()
+    return bool(
+        "127.0.0.1:11434" in lowered
+        or "localhost:11434" in lowered
+        or "[::1]:11434" in lowered
+    )
+
+
+def _config_uses_local_ollama(config: BotConfig) -> bool:
+    if _is_local_ollama_url(str(getattr(config, "toolbox_vision_base_url", "") or "")):
+        return True
+    fallback_url = str(
+        getattr(config, "toolbox_vision_fallback_base_url", "") or ""
+    ).strip()
+    fallback_model = str(
+        getattr(config, "toolbox_vision_fallback_model", "") or ""
+    ).strip()
+    if fallback_url:
+        if _is_local_ollama_url(fallback_url):
+            return True
+    elif fallback_model and ":" in fallback_model:
+        # 与 ToolAnalyzer 的兼容规则一致：未填写兜底地址的 Ollama 风格
+        # 模型名默认指向本机 11434。
+        return True
+    return False
+
+
+def _ollama_executable_available() -> bool:
+    local = (
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "Programs"
+        / "Ollama"
+        / "ollama.exe"
+    )
+    return local.is_file() or bool(shutil.which("ollama.exe"))
+
+
+def _cognition_status(config: BotConfig) -> dict[str, Any]:
+    if not bool(getattr(config, "cognition_shadow_enabled", False)):
+        return {"enabled": False, "mode": "off", "available": False}
+    try:
+        from ..cognition import CognitionStateStore
+
+        payload = CognitionStateStore(Path(config.cognition_state_path)).status()
+        payload.update({"enabled": True, "mode": "shadow"})
+        return payload
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "mode": "shadow",
+            "available": False,
+            "error": str(exc)[:180],
+        }
 
 
 def _float_or_zero(value: Any) -> float:
@@ -343,16 +454,16 @@ def _float_or_zero(value: Any) -> float:
         return 0.0
 
 
-def restart_background_services() -> dict[str, Any]:
+def _launch_background_services(mode: str, success_message: str) -> dict[str, Any]:
     launcher = TOOLS_DIR / "launch" / "qq_legacy" / "hidden_launcher.py"
     if not launcher.exists():
         return {"ok": False, "error": f"startup script not found: {launcher}"}
     pythonw = PROJECT_ROOT / ".venv" / "Scripts" / "pythonw.exe"
     python = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
     if pythonw.exists():
-        command = [str(pythonw), str(launcher)]
+        command = [str(pythonw), str(launcher), mode]
     elif python.exists():
-        command = [str(python), str(launcher)]
+        command = [str(python), str(launcher), mode]
     else:
         return {"ok": False, "error": f"python runtime not found under {PROJECT_ROOT / '.venv'}"}
     try:
@@ -365,6 +476,14 @@ def restart_background_services() -> dict[str, Any]:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             startupinfo=hidden_subprocess_startupinfo(),
         )
-        return {"ok": True, "message": "亚托莉启动命令已发出"}
+        return {"ok": True, "message": success_message}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def start_background_services() -> dict[str, Any]:
+    return _launch_background_services("core", "亚托莉启动命令已发出")
+
+
+def restart_background_services() -> dict[str, Any]:
+    return _launch_background_services("recover", "亚托莉与 NapCat 重启命令已发出")

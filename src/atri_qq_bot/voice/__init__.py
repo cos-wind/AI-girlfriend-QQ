@@ -7,6 +7,7 @@ from .delivery import (
     build_explicit_voice_fallback,
     detect_explicit_delivery_intent,
     extract_explicit_spoken_text,
+    sanitize_voice_request,
     stabilize_explicit_voice_request,
 )
 from .calls import CallInviteRequest, VoiceCallSession, VoiceCallStore
@@ -40,6 +41,7 @@ __all__ = [
     "build_explicit_voice_fallback",
     "detect_explicit_delivery_intent",
     "extract_explicit_spoken_text",
+    "sanitize_voice_request",
     "stabilize_explicit_voice_request",
     "SynthesisResult",
     "TranscriptionResult",

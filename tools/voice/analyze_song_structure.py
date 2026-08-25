@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import subprocess
 import tempfile
+import wave
 from pathlib import Path
 from typing import Iterable
 
@@ -22,6 +24,168 @@ def choose_section_count(duration: float, requested: int = 0) -> int:
     if duration < 240:
         return 4
     return 5
+
+
+def choose_delivery_boundaries(
+    duration: float,
+    bar_times: Iterable[float],
+    *,
+    target_seconds: float = 30.0,
+) -> list[float]:
+    """为 QQ 语音挑选约 30 秒的完整乐句边界。
+
+    每个候选边界都落在 4/4 小节位置；在 20--45 秒的可接受窗口内，
+    选择最接近目标时长的点，防止把唱词或鼓点硬切断。
+    """
+    total = max(0.0, float(duration))
+    if total <= 0.1:
+        return [0.0]
+    target = min(45.0, max(20.0, float(target_seconds or 30.0)))
+    bars = sorted({round(max(0.0, min(total, float(value))), 3) for value in bar_times})
+    if not bars:
+        bars = [round(value, 3) for value in range(0, int(math.ceil(total)) + 1, 4)]
+    if not bars or bars[0] > 0:
+        bars.insert(0, 0.0)
+    if bars[-1] < total:
+        bars.append(total)
+    boundaries = [0.0]
+    while total - boundaries[-1] > target * 1.45:
+        start = boundaries[-1]
+        candidates = [point for point in bars if start + 20.0 <= point <= min(total - 12.0, start + 45.0)]
+        if not candidates:
+            candidates = [point for point in bars if point > start + 1.0]
+        if not candidates:
+            break
+        boundary = min(candidates, key=lambda point: abs((point - start) - target))
+        if boundary <= start:
+            break
+        boundaries.append(round(boundary, 3))
+    if boundaries[-1] < total:
+        boundaries.append(round(total, 3))
+    return boundaries
+
+
+def plan_delivery_segments(source: Path, *, target_seconds: float = 30.0) -> dict[str, object]:
+    """分析完整歌曲并返回用于导出 QQ 语音片段的边界。"""
+    import imageio_ffmpeg
+    try:
+        import librosa
+        import numpy as np
+    except ModuleNotFoundError:
+        return _fallback_delivery_segments(
+            source,
+            target_seconds=target_seconds,
+            imageio_ffmpeg=imageio_ffmpeg,
+        )
+
+    sample_rate = 22_050
+    hop_length = 512
+    with tempfile.TemporaryDirectory(prefix="atri-delivery-segments-") as temporary:
+        analysis_wav = Path(temporary) / "source.wav"
+        subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(source.resolve()), "-ac", "1", "-ar", str(sample_rate),
+                "-c:a", "pcm_s16le", str(analysis_wav),
+            ],
+            check=True,
+            timeout=180,
+        )
+        audio, sample_rate = librosa.load(str(analysis_wav), sr=sample_rate, mono=True)
+    duration = float(librosa.get_duration(y=audio, sr=sample_rate))
+    if duration <= 0.1:
+        raise ValueError("歌曲时长过短，无法切分")
+    onset = librosa.onset.onset_strength(y=audio, sr=sample_rate, hop_length=hop_length)
+    _tempo, beat_frames = librosa.beat.beat_track(
+        onset_envelope=onset, sr=sample_rate, hop_length=hop_length, trim=False
+    )
+    beat_times = librosa.frames_to_time(np.asarray(beat_frames, dtype=int), sr=sample_rate, hop_length=hop_length)
+    bars = [0.0, *beat_times[::4].tolist(), duration] if beat_times.size else []
+    boundaries = choose_delivery_boundaries(duration, bars, target_seconds=target_seconds)
+    segments = [
+        {
+            "index": index,
+            "label": "完整乐句片段",
+            "start_seconds": round(start, 3),
+            "end_seconds": round(end, 3),
+            "duration_seconds": round(end - start, 3),
+        }
+        for index, (start, end) in enumerate(zip(boundaries, boundaries[1:]), start=1)
+        if end - start >= 1.0
+    ]
+    return {
+        "version": 1,
+        "method": "beat+bar delivery segmentation",
+        "duration_seconds": round(duration, 3),
+        "target_seconds": target_seconds,
+        "segments": segments,
+    }
+
+
+def _fallback_delivery_segments(
+    source: Path,
+    *,
+    target_seconds: float,
+    imageio_ffmpeg,
+) -> dict[str, object]:
+    """缺少 librosa 时用轻量时长和近似小节边界完成分段。"""
+    duration = _probe_audio_duration(source, imageio_ffmpeg)
+    if duration <= 0.1:
+        raise ValueError("歌曲时长过短，无法分段")
+    bar_times = [float(value) for value in range(0, int(math.ceil(duration)) + 1, 4)]
+    boundaries = choose_delivery_boundaries(
+        duration,
+        bar_times,
+        target_seconds=target_seconds,
+    )
+    segments = [
+        {
+            "index": index,
+            "label": "兼容模式 / 近似小节边界",
+            "start_seconds": round(start, 3),
+            "end_seconds": round(end, 3),
+            "duration_seconds": round(end - start, 3),
+        }
+        for index, (start, end) in enumerate(zip(boundaries, boundaries[1:]), start=1)
+        if end - start >= 1.0
+    ]
+    return {
+        "version": 1,
+        "method": "bar-approximation fallback (librosa unavailable)",
+        "duration_seconds": round(duration, 3),
+        "target_seconds": target_seconds,
+        "segments": segments,
+    }
+
+
+def _probe_audio_duration(source: Path, imageio_ffmpeg) -> float:
+    """优先用标准库读取 WAV，其他格式通过 ffmpeg 探测时长。"""
+    if source.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(source), "rb") as handle:
+                frame_rate = handle.getframerate()
+                frame_count = handle.getnframes()
+            if frame_rate > 0:
+                return frame_count / frame_rate
+        except (OSError, wave.Error):
+            pass
+    process = subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(source.resolve())],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    match = re.search(
+        r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+        process.stdout + process.stderr,
+    )
+    if not match:
+        raise ValueError("无法读取歌曲时长，请检查音频文件是否完整")
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def snap_boundaries(

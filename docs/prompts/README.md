@@ -19,6 +19,8 @@
 - `scene_control.md`：私聊、群聊、情绪和原作话题的运行时模板。
 - `proactive.md`：主动消息生成模板。
 - `proactive_topic_rule.md`：主动消息的话题切入规则。
+- `cognition_identity.md`：稳定身份、原作经历、主体性、情绪与持续自我的基础约束。
+- `capabilities.md`：当前 QQ 项目真实能力、自然语言承接、执行闭环与用户可见失败边界。
 
 ## 编辑原则
 

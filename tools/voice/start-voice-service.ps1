@@ -34,13 +34,10 @@ $PidFile = Join-Path $RuntimeDir "voice-service.pid"
 
 function Get-ListeningProcessId {
     param([int]$Port)
-    $Connection = Get-NetTCPConnection `
-        -LocalPort $Port `
-        -State Listen `
-        -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($Connection) {
-        return [int]$Connection.OwningProcess
+    foreach ($Line in (netstat.exe -ano -p TCP 2>$null)) {
+        if ($Line -match ("^\s*TCP\s+\S+:" + $Port + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) {
+            return [int]$Matches[1]
+        }
     }
     return $null
 }
@@ -62,14 +59,14 @@ if (-not (Test-Path -LiteralPath $Python)) {
 }
 $ExistingProcessId = Get-ListeningProcessId -Port 8790
 if ($ExistingProcessId) {
-    for ($i = 0; $i -lt 60; $i++) {
+    for ($i = 0; $i -lt 180; $i++) {
         if (Test-VoiceReady) {
             Write-Host "Voice service is ready at http://127.0.0.1:8790"
             return
         }
         Start-Sleep -Milliseconds 500
     }
-    throw "Voice service is listening but did not become ready within 30 seconds."
+    throw "Voice service is listening but did not become ready within 90 seconds."
 }
 
 New-Item -ItemType Directory -Force -Path $RuntimeDir, $LogDir, $ModelRoot | Out-Null
@@ -104,7 +101,11 @@ $OriginalVoiceFolder = "ATRI" + [char]0x8BAD + [char]0x7EC3 + [char]0x97F3 +
     [char]0x9891 + [char]0x7D20 + [char]0x6750
 $env:ATRI_ORIGINAL_VOICE_LIBRARY = Join-Path $env:USERPROFILE (Join-Path "Music" $OriginalVoiceFolder)
 $env:ATRI_ORIGINAL_CLIP_ENABLED = "true"
-$env:ATRI_TTS_QUALITY_GATE_ENABLED = "true"
+$env:ATRI_TTS_QUALITY_GATE_ENABLED = "false"
+$env:ATRI_TTS_PREWARM_ENABLED = "true"
+$env:ATRI_TTS_IDLE_SHUTDOWN_SECONDS = "0"
+$env:ATRI_TTS_TOTAL_TIMEOUT_SECONDS = "75"
+$env:ATRI_TTS_STARTUP_TIMEOUT_SECONDS = "45"
 $env:ATRI_TTS_QUALITY_MAX_ERROR_RATE = "0.22"
 $env:ATRI_TTS_QUALITY_RETRIES = "1"
 $env:ATRI_SINGING_ENABLED = "true"
@@ -127,7 +128,7 @@ $Process = Start-Process `
     -RedirectStandardOutput (Join-Path $LogDir "voice-service.log") `
     -RedirectStandardError (Join-Path $LogDir "voice-service-error.log") `
     -PassThru
-for ($i = 0; $i -lt 60; $i++) {
+for ($i = 0; $i -lt 180; $i++) {
     Start-Sleep -Milliseconds 500
     $ListeningProcessId = Get-ListeningProcessId -Port 8790
     if ($ListeningProcessId -and (Test-VoiceReady)) {
@@ -139,4 +140,4 @@ for ($i = 0; $i -lt 60; $i++) {
         throw "Voice service exited during startup. Check logs\voice-service-error.log."
     }
 }
-throw "Voice service did not become ready within 30 seconds."
+throw "Voice service did not become ready within 90 seconds."

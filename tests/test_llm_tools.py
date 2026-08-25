@@ -233,6 +233,15 @@ def test_voice_tool_is_exposed_only_when_tts_is_enabled() -> None:
     assert "speak_as_atri" in {
         item["function"]["name"] for item in available_tool_schemas(enabled)
     }
+    voice_schema = next(
+        item
+        for item in available_tool_schemas(enabled)
+        if item["function"]["name"] == "speak_as_atri"
+    )
+    text_description = voice_schema["function"]["parameters"]["properties"]["text"][
+        "description"
+    ]
+    assert "禁止罗马音" in text_description
 
 
 def test_weather_tool_is_exposed_with_web_search_tools() -> None:

@@ -43,8 +43,14 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         _env("OPENAI_MODEL", "gpt-4.1-mini"),
     )
     openai_api_key = _optional_env("OPENAI_API_KEY")
+    bot_qq = _env_int("BOT_QQ", 0)
+    qq_records_root = _env_path(
+        "QQ_RECORDS_ROOT",
+        Path.home() / "Documents" / "Tencent Files",
+        root,
+    )
     return BotConfig(
-        bot_qq=_env_int("BOT_QQ", 0),
+        bot_qq=bot_qq,
         host=_env("HOST", "127.0.0.1"),
         port=_env_int("PORT", 8765),
         reply_mode=reply_mode,
@@ -54,6 +60,15 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         temperature=_env_float("TEMPERATURE", 0.8),
         frequency_penalty=_env_float("FREQUENCY_PENALTY", 0.25),
         max_tokens=_env_int("MAX_TOKENS", 350),
+        chat_request_timeout_seconds=max(
+            5.0, min(60.0, _env_float("CHAT_REQUEST_TIMEOUT_SECONDS", 25.0))
+        ),
+        chat_resource_wait_seconds=max(
+            5.0, min(60.0, _env_float("CHAT_RESOURCE_WAIT_SECONDS", 35.0))
+        ),
+        chat_quality_retries=max(
+            0, min(2, _env_int("CHAT_QUALITY_RETRIES", 1))
+        ),
         message_split_max_chars=_env_int("MESSAGE_SPLIT_MAX_CHARS", 44),
         message_split_max_parts=_env_int("MESSAGE_SPLIT_MAX_PARTS", 4),
         message_send_delay_min=_env_float("MESSAGE_SEND_DELAY_MIN", 0.55),
@@ -61,6 +76,11 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         sticker_dir=_env_path("STICKER_DIR", root / "data" / "stickers", root),
         sticker_trigger_file=_env_path(
             "STICKER_TRIGGER_FILE", root / "data" / "stickers" / "triggers.json", root
+        ),
+        sticker_capture_dir=_env_path(
+            "STICKER_CAPTURE_DIR",
+            qq_records_root / str(bot_qq) / "ATRI" / "chat_history",
+            root,
         ),
         sticker_chance=_env_float("STICKER_CHANCE", 0.24),
         sticker_cooldown_seconds=_env_int("STICKER_COOLDOWN_SECONDS", 120),
@@ -136,6 +156,9 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
             "",
         ),
         toolbox_vision_base_url=_env("TOOLBOX_VISION_BASE_URL", "").rstrip("/"),
+        toolbox_vision_fallback_base_url=_env(
+            "TOOLBOX_VISION_FALLBACK_BASE_URL", ""
+        ).rstrip("/"),
         toolbox_vision_api_key=_optional_env("TOOLBOX_VISION_API_KEY"),
         toolbox_vision_max_bytes=_env_int("TOOLBOX_VISION_MAX_BYTES", 8_000_000),
         toolbox_vision_retry_count=max(
@@ -146,8 +169,12 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
             5.0,
             min(
                 300.0,
-                _env_float("TOOLBOX_VISION_RESOURCE_WAIT_SECONDS", 120.0),
+                _env_float("TOOLBOX_VISION_RESOURCE_WAIT_SECONDS", 10.0),
             ),
+        ),
+        toolbox_vision_timeout_seconds=max(
+            20.0,
+            min(60.0, _env_float("TOOLBOX_VISION_TIMEOUT_SECONDS", 55.0)),
         ),
         toolbox_vision_unload_other_ollama_models=_env_bool(
             "TOOLBOX_VISION_UNLOAD_OTHER_OLLAMA_MODELS",
@@ -156,6 +183,10 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         toolbox_ocr_enabled=_env_bool("TOOLBOX_OCR_ENABLED", False),
         toolbox_video_frame_analysis_enabled=_env_bool("TOOLBOX_VIDEO_FRAME_ANALYSIS_ENABLED", True),
         toolbox_video_max_frames=max(1, min(8, _env_int("TOOLBOX_VIDEO_MAX_FRAMES", 4))),
+        toolbox_video_deadline_seconds=max(
+            20.0,
+            min(60.0, _env_float("TOOLBOX_VIDEO_DEADLINE_SECONDS", 60.0)),
+        ),
         llm_tools_enabled=_env_bool("LLM_TOOLS_ENABLED", True),
         llm_tool_max_calls=max(1, min(4, _env_int("LLM_TOOL_MAX_CALLS", 2))),
         llm_agent_protocol_enabled=_env_bool("LLM_AGENT_PROTOCOL_ENABLED", False),
@@ -165,6 +196,20 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
             min(6, _env_int("LLM_AGENT_MAX_TOOL_CALLS", 3)),
         ),
         human_reply_pipeline_enabled=_env_bool("HUMAN_REPLY_PIPELINE_ENABLED", True),
+        cognition_shadow_enabled=_env_bool("COGNITION_SHADOW_ENABLED", True),
+        cognition_state_path=_env_path(
+            "COGNITION_STATE_PATH",
+            root / "data" / "cognition" / "state.sqlite3",
+            root,
+        ),
+        cognition_shadow_timeout_seconds=max(
+            0.2,
+            min(10.0, _env_float("COGNITION_SHADOW_TIMEOUT_SECONDS", 2.0)),
+        ),
+        cognition_shadow_max_concurrency=max(
+            1,
+            min(4, _env_int("COGNITION_SHADOW_MAX_CONCURRENCY", 2)),
+        ),
         web_search_enabled=_env_bool("WEB_SEARCH_ENABLED", True),
         web_search_timeout_seconds=_env_float("WEB_SEARCH_TIMEOUT_SECONDS", 6.0),
         web_search_max_results=max(1, min(8, _env_int("WEB_SEARCH_MAX_RESULTS", 5))),
@@ -177,16 +222,13 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
             2.0, _env_float("VOICE_SERVICE_TIMEOUT_SECONDS", 180.0)
         ),
         voice_profile=_env("VOICE_PROFILE", "atri"),
-        voice_zh_rescue_profile=_env(
-            "VOICE_ZH_RESCUE_PROFILE",
-            "atri-official-v2pro-curated-gpt-e6",
-        ),
+        voice_zh_profile=_env("VOICE_ZH_PROFILE", ""),
         voice_group_enabled=_env_bool("VOICE_GROUP_ENABLED", False),
         voice_reply_to_voice=_env_bool("VOICE_REPLY_TO_VOICE", False),
         voice_max_chars=max(20, min(500, _env_int("VOICE_MAX_CHARS", 160))),
         voice_segment_max_chars=max(
             16,
-            min(60, _env_int("VOICE_SEGMENT_MAX_CHARS", 34)),
+            min(120, _env_int("VOICE_SEGMENT_MAX_CHARS", 100)),
         ),
         voice_cooldown_seconds=max(0, _env_int("VOICE_COOLDOWN_SECONDS", 30)),
         voice_input_max_bytes=max(

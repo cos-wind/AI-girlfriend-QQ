@@ -1,0 +1,5 @@
+# -*- coding: utf-8 -*-
+# ATRI 可选的评测/群聊总结增强依赖。
+# 安装：.\.venv\Scripts\python.exe -m pip install -r requirements-insights.txt
+jieba>=0.42.1,<1.0
+sentence-transformers>=3.0.0,<6.0.0

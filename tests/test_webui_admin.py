@@ -1,12 +1,15 @@
 import asyncio
 import json
+import shutil
+import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.runtime.control import runtime_status
 from atri_webui import config_admin
-from atri_webui.memory_admin import MemoryAdmin
+from atri_webui.memory_admin import MemoryAdmin, memory_admin_for_config
 from atri_webui import model_profiles as model_profiles_module
 from atri_webui import server as webui_server
 from atri_webui.model_profiles import (
@@ -26,6 +29,81 @@ from atri_webui.upload_parser import (
     multipart_text,
     parse_multipart_form,
 )
+from atri_webui.user_directory import UserDirectory
+
+
+def test_user_directory_exposes_bot_and_group_activity_from_memory() -> None:
+    directory = UserDirectory(
+        memory_payload={
+            "bot_activity": {"messages": 42, "last_seen_at": 1700000000},
+            "items": [
+                {
+                    "id": "group:20001",
+                    "kind": "group",
+                    "display_name": "测试群",
+                    "messages": 18,
+                    "last_user_at": 1699999999,
+                    "activity": 76.5,
+                    "activity_label": "活跃",
+                    "summary": "群里最近在讨论测试。",
+                    "memory_counts": {"l1": 1, "l2": 2, "l3": 3, "candidates": 0, "total": 6},
+                    "proactive_override": "auto",
+                    "target": {"group_id": "20001"},
+                }
+            ],
+        },
+        bot_qq="100000001",
+    )
+
+    bot = directory.overview("100000001")
+    group = directory.group_overview("20001")
+
+    assert bot is not None
+    assert bot["message_count"] == 42
+    assert bot["last_seen_at"] == "1700000000"
+    assert group is not None
+    assert group["relationship"]["activity"] == 76.5
+    assert group["relationship"]["activity_label"] == "活跃"
+    assert group["relationship"]["summary"] == "群里最近在讨论测试。"
+    assert group["relationship"]["memory_counts"]["total"] == 6
+
+
+def test_user_directory_page_loads_memory_immediately_and_does_not_rerender_per_selection() -> None:
+    page = render_index()
+
+    assert "Promise.race([directoryQZoneBoot" not in page
+    assert ".forEach(key=>selectUserDirectoryUser(key, true))" not in page
+    assert "/api/users?limit=1000" in page
+
+
+def test_user_directory_can_return_more_than_five_hundred_users() -> None:
+    directory = UserDirectory(
+        qzone_friends=[
+            {"user_id": str(1000000000 + index), "nickname": f"用户 {index}"}
+            for index in range(566)
+        ]
+    )
+
+    payload = directory.list_users(limit=1000)
+
+    assert payload["total"] == 566
+    assert len(payload["items"]) == 566
+
+
+def test_memory_admin_from_runtime_config_uses_configured_paths(tmp_path: Path) -> None:
+    memory_path = tmp_path / "custom-memory" / "users.json"
+    retrieval_path = tmp_path / "custom-memory" / "semantic.sqlite3"
+
+    admin = memory_admin_for_config(
+        SimpleNamespace(
+            memory_path=memory_path,
+            memory_retrieval_path=retrieval_path,
+        )
+    )
+
+    assert admin.memory_path == memory_path
+    assert admin.backup_dir == memory_path.parent / "backups"
+    assert admin.semantic_memory_path == retrieval_path
 
 
 def test_memory_admin_summarizes_and_reads_details(tmp_path: Path) -> None:
@@ -40,6 +118,8 @@ def test_memory_admin_summarizes_and_reads_details(tmp_path: Path) -> None:
                         "target": {"user_id": 10001},
                         "message_count": 2,
                         "last_user_at": 1000,
+                        "bot_reply_count": 3,
+                        "last_bot_at": 1002,
                         "affection_score": 70,
                         "structured_memory": {
                             "l1": [
@@ -68,6 +148,7 @@ def test_memory_admin_summarizes_and_reads_details(tmp_path: Path) -> None:
 
     assert summary["path"] == str(memory_path)
     assert summary["conversations"] == 1
+    assert summary["bot_activity"] == {"messages": 3, "last_seen_at": 1002.0}
     assert summary["items"][0]["id"] == "person:10001"
     assert summary["items"][0]["kind"] == "person"
     assert summary["items"][0]["type"] == "人物档案"
@@ -780,6 +861,40 @@ def test_model_page_shows_feedback_for_local_model_actions() -> None:
     assert "仅发现模型文件" in html
 
 
+def test_evaluation_layout_contains_long_record_width_guards() -> None:
+    html = render_index()
+
+    assert "#evaluationDashboardPanel > .surface,#evaluationDashboardPanel > .split { min-width:0; }" in html
+    assert "#evaluationDashboardPanel .scroll { width:100%; max-width:100%; min-width:0; }" in html
+    assert "#evaluationDashboardPanel table { table-layout:fixed; }" in html
+    assert "#evaluationDashboardPanel th,#evaluationDashboardPanel td { overflow-wrap:anywhere; word-break:break-word; }" in html
+
+
+def test_group_summary_schedule_button_avoids_broken_inline_quote_escape() -> None:
+    html = render_index()
+
+    assert 'onclick="saveGroupSummarySchedule(this.dataset.group)"' in html
+    assert "saveGroupSummarySchedule('' +" not in html
+
+
+def test_rendered_webui_inline_script_has_valid_javascript_syntax() -> None:
+    node = shutil.which("node")
+    if node is None:
+        return
+    html = render_index()
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+
+    result = subprocess.run(
+        [node, "--check", "-"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_voice_page_has_separate_policy_profile_and_preview_controls() -> None:
     html = render_index()
 
@@ -864,7 +979,7 @@ def test_voice_test_audio_is_saved_in_cache_with_safe_generated_name(
     assert saved.read_bytes() == b"RIFFvoice"
 
 
-def test_webui_test_chat_reports_when_fallback_is_used(
+def test_webui_test_chat_reports_failure_without_fallback_reply(
     tmp_path: Path, monkeypatch
 ) -> None:
     class FailingEngine:
@@ -894,7 +1009,7 @@ def test_webui_test_chat_reports_when_fallback_is_used(
     result = asyncio.run(webui_server.test_chat(config, "你好"))
 
     assert result["used_ai"] is False
-    assert result["reply"] == "fallback reply"
+    assert result["reply"] == ""
     assert "backend unavailable" in result["error"]
 
 
@@ -922,9 +1037,6 @@ def test_webui_test_chat_uses_the_same_relaxed_quality_mode_as_runtime(
             if strict_quality:
                 raise RuntimeError("工具型回复被误判为长段说明")
             return reply
-
-        def _fallback_reply(self, conversation_id: str, text: str) -> str:
-            return "fallback reply"
 
     monkeypatch.setattr(webui_server, "AtriReplyEngine", ToolReplyEngine)
     config = BotConfig(
@@ -963,6 +1075,22 @@ def test_voice_preview_enables_safe_best_effort_quality_fallback() -> None:
     assert options["allow_best_effort"] is True
 
 
+def test_voice_preview_fast_mode_skips_quality_round_trip() -> None:
+    options = webui_server._voice_preview_synthesis_options_for_mode(
+        {
+            "original_clip_enabled": True,
+            "quality_gate_enabled": True,
+            "quality_max_error_rate": 0.12,
+            "quality_retries": 2,
+        },
+        "fast",
+    )
+
+    assert options["quality_gate"] is False
+    assert options["quality_retries"] == 0
+    assert options["allow_best_effort"] is True
+
+
 def test_runtime_status_keeps_webui_contract(monkeypatch) -> None:
     snapshots: list[bool] = []
 
@@ -996,10 +1124,50 @@ def test_runtime_status_keeps_webui_contract(monkeypatch) -> None:
     assert status["atri"] is True
     assert status["napcat"] is True
     assert status["ollama"] is False
+    assert status["ollama_on_demand"] is False
     assert status["voice"] is False
     assert status["onebot"] == "ws://127.0.0.1:8765/onebot"
     assert status["webui_url"] == "http://127.0.0.1:8787"
+    assert status["maibot_webui"] == {
+        "url": "http://127.0.0.1:8001",
+        "reachable": False,
+    }
     assert snapshots == [True]
+
+
+def test_runtime_status_marks_local_vision_fallback_as_on_demand(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "atri_qq_bot.runtime.control.tcp_rows",
+        lambda: [
+            {"local_port": 8765, "remote_port": 0, "state": "LISTENING", "pid": 100},
+        ],
+    )
+    monkeypatch.setattr(
+        "atri_qq_bot.runtime.control._ollama_executable_available",
+        lambda: True,
+        raising=False,
+    )
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key=None,
+        openai_base_url="https://api.example.com/v1",
+        openai_model="cloud-chat",
+        temperature=0.8,
+        max_tokens=350,
+        toolbox_vision_enabled=True,
+        toolbox_vision_model="cloud-vision",
+        toolbox_vision_base_url="https://vision.example.com/v1",
+        toolbox_vision_fallback_model="qwen3-vl:4b-instruct",
+    )
+
+    status = runtime_status(config)
+
+    assert status["ollama"] is False
+    assert status["ollama_on_demand"] is True
+    assert status["vision_available"] is True
 
 
 def test_sticker_admin_payload_and_path_guard(tmp_path: Path, monkeypatch) -> None:

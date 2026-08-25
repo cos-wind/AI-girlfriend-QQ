@@ -1,0 +1,38 @@
+{
+  "manifest_version": 2,
+  "id": "atri.qqzone",
+  "version": "0.1.0",
+  "name": "ATRI QQ动态",
+  "description": "在 MaiBot WebUI 查看、点赞、评论和发布 QQ 空间动态，并提供可受控的 LLM Tools 与主动发布能力。",
+  "author": {
+    "name": "AI_ATRI",
+    "url": "https://github.com/Mai-with-u/MaiBot"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/Mai-with-u/MaiBot",
+    "homepage": "https://github.com/Mai-with-u/MaiBot",
+    "documentation": "https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md",
+    "issues": "https://github.com/Mai-with-u/MaiBot/issues"
+  },
+  "host_application": {
+    "min_version": "1.2.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.7.1",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "send.text",
+    "llm.generate",
+    "chat.get_all_streams",
+    "message.get_recent",
+    "message.build_readable"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}

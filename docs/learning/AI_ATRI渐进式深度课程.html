@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI_ATRI 渐进式深度课程</title>
+<style>
+:root{--bg:#f5f7fb;--card:#fff;--ink:#202638;--muted:#647089;--line:#e3e8f2;--blue:#4262d5;--soft:#eaf0ff;--purple:#8068ca;--green:#148468;--orange:#ac6820;--shadow:0 14px 38px rgba(37,54,103,.08)}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 8% 0,#edf2ff 0,transparent 32%),var(--bg);color:var(--ink);font:15px/1.78 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.hero{padding:64px 24px 52px;color:#fff;background:linear-gradient(135deg,#1e3158,#4659a1 52%,#8063c5)}.wrap,main{max-width:1140px;margin:auto}.eyebrow{font-size:12px;letter-spacing:.16em;text-transform:uppercase;opacity:.78}.hero h1{font-size:clamp(30px,5vw,56px);line-height:1.15;margin:12px 0}.hero p{max-width:850px;margin:0;color:#eef2ff;font-size:17px}
+main{padding:30px 24px 72px}.toc,.card{background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}.toc{padding:22px 26px;margin-bottom:24px}.toc a{color:var(--blue);text-decoration:none;margin-right:18px}.card{padding:28px;margin:22px 0}h2{margin:0 0 14px;color:#30468e;font-size:26px}h3{margin:22px 0 8px;color:#405487;font-size:19px}.lead{font-size:17px;color:#3d4964}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.box{padding:16px;border:1px solid #dfe6f4;border-radius:13px;background:#fbfcff}.box b{display:block;color:var(--blue);font-size:18px}.box span{color:var(--muted)}.flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:14px 0}.node{padding:8px 11px;border-radius:9px;background:var(--soft);border:1px solid #d7e1ff;color:#3551a0;font-weight:600}.node.tool{background:#fff5e5;border-color:#f0d4aa;color:var(--orange)}.node.safe{background:#eaf8f2;border-color:#c6ecdf;color:var(--green)}.arr{color:#94a1bd;font-size:20px}pre{overflow:auto;background:#182133;color:#e8eeff;border-radius:12px;padding:17px;line-height:1.65}code{font-family:Consolas,"Cascadia Code",monospace;background:#eef1f7;color:#3e4d71;border-radius:5px;padding:2px 5px;font-size:.92em}.formula{background:#f7f2ff;border-left:4px solid var(--purple);padding:14px 17px;color:#503c91;font-family:Consolas,monospace}.warn{background:#fff8e9;border:1px solid #f0ddb7;color:#77521f;padding:13px 16px;border-radius:11px}.good{background:#ebf9f3;border:1px solid #c3ecde;color:#166e58;padding:13px 16px;border-radius:11px}table{border-collapse:collapse;width:100%;margin:12px 0}th,td{padding:10px 11px;text-align:left;vertical-align:top;border-bottom:1px dashed var(--line)}th{color:#354b90;background:#f4f6ff}tr:hover td{background:#fbfcff}details{border:1px solid var(--line);border-radius:11px;padding:11px 14px;margin:9px 0;background:#fcfdff}summary{cursor:pointer;color:#3d56a0;font-weight:700}.badge{display:inline-block;border-radius:999px;background:#e9eeff;color:#3d56a0;padding:3px 10px;margin:3px}.footer{text-align:center;color:var(--muted);font-size:13px;margin-top:32px}@media(max-width:760px){.grid{grid-template-columns:1fr}.card{padding:20px}main{padding:20px 14px 50px}.toc a{display:block;margin:5px 0}}
+</style>
+</head>
+<body>
+<header class="hero"><div class="wrap"><div class="eyebrow">Progressive learning · AI application engineering</div><h1>AI_ATRI<br>渐进式深度课程</h1><p>从 Python 运行机制开始，逐步理解分层架构、Agent 状态机、工具调用、上下文工程、记忆与 RAG、多模态、可靠性和测试。每个概念都对应项目中的真实源码。</p></div></header>
+<main>
+<nav class="toc"><b>课程导航：</b><a href="#map">学习地图</a><a href="#python">Python 与异步</a><a href="#arch">架构与契约</a><a href="#agent">Agent 框架</a><a href="#context">上下文工程</a><a href="#memory">记忆与 RAG</a><a href="#multi">多模态</a><a href="#reliable">可靠性</a><a href="#practice">实验路线</a></nav>
+
+<section class="card" id="map">
+<h2>0. 学习地图：先建立正确的抽象</h2>
+<p class="lead">不要把这个项目理解为“一个提示词加一个模型”。更准确的模型是：外部事件进入系统后，被转换成状态；Agent 基于状态提出行动；工具产生证据或副作用；系统最终把结果编译成可交付消息。</p>
+<div class="grid"><div class="box"><b>输入</b><span>OneBot 事件、引用消息、图片、语音、文件、群聊上下文</span></div><div class="box"><b>状态</b><span>会话历史、用户画像、认知状态、工具回执、资源状态</span></div><div class="box"><b>输出</b><span>文本、表情、语音、音乐片段和可观察日志</span></div></div>
+<div class="flow"><span class="node">Event</span><span class="arr">→</span><span class="node">Normalize</span><span class="arr">→</span><span class="node">Context</span><span class="arr">→</span><span class="node tool">Reason / Act</span><span class="arr">→</span><span class="node safe">Validate</span><span class="arr">→</span><span class="node">Deliver</span></div>
+<p>学习时始终区分三件事：<b>理解</b>是对用户目标建模，<b>执行</b>是调用外部能力，<b>表达</b>是把结果变成符合人格和平台格式的回复。混在一起，就会出现工具调用不准、上下文丢失和失败后幻觉。</p>
+</section>
+
+<section class="card" id="python">
+<h2>1. Python 运行机制：为什么要用 asyncio、线程和进程</h2>
+<h3>1.1 四种任务类型</h3>
+<table><thead><tr><th>任务</th><th>示例</th><th>适合的执行方式</th></tr></thead><tbody>
+<tr><td>网络 I/O</td><td>WebSocket 收消息、HTTP 调模型</td><td><code>asyncio</code> 协程</td></tr>
+<tr><td>短 CPU 任务</td><td>文本整理、JSON 解析</td><td>直接运行或线程</td></tr>
+<tr><td>阻塞本地推理</td><td>OCR、embedding、模型加载</td><td><code>asyncio.to_thread</code> 或独立进程</td></tr>
+<tr><td>重资源服务</td><td>GPT-SoVITS、Ollama、NapCat</td><td>独立进程和生命周期管理</td></tr>
+</tbody></table>
+<h3>1.2 事件循环的直觉</h3>
+<p>asyncio 不是让 CPU 计算变快，而是让一个线程在等待网络时去处理其他任务：</p>
+<pre>while True:
+    task = ready_queue.pop()
+    result = task.step()
+    if task.is_waiting_io:
+        io_selector.register(task)
+    else:
+        ready_queue.append(task)</pre>
+<p>所以模型推理、文件锁和音频处理不能直接在协程中长时间阻塞；项目使用 <code>asyncio.to_thread()</code> 把阻塞操作移出事件循环。</p>
+<h3>1.3 会话队列为什么重要</h3>
+<p>如果同一个用户连续发送 A、B，两次模型请求并发执行，B 可能先返回，模型还没有看到 A 的回复。按 <code>conversation_id</code> 建立 FIFO 队列，可以保证同一会话顺序一致，同时允许不同用户并行。</p>
+<div class="warn">常见错误：用一个全局锁锁住所有对话，会让一个慢视觉请求阻塞所有用户；正确做法是“每会话串行 + 不同会话可并行 + 重模型另用资源锁”。</div>
+</section>
+
+<section class="card" id="arch">
+<h2>2. 分层架构：从“能运行”到“可维护”</h2>
+<h3>2.1 端口与适配器思想</h3>
+<p>应用层不应该知道具体的 NapCat、Ollama 或 GPT-SoVITS。它依赖抽象契约，外部系统通过适配器接入：</p>
+<div class="flow"><span class="node">OneBot Adapter</span><span class="arr">→</span><span class="node">ConversationTurn</span><span class="arr">←</span><span class="node">Agent Runner</span><span class="arr">←</span><span class="node tool">Tool Adapter</span></div>
+<p><code>application/contracts.py</code> 中的 dataclass 就是数据端口：<code>ConversationTurnRequest</code> 描述输入，<code>ArtifactEvidence</code> 描述证据，<code>AgentRunResult</code> 描述 Agent 结果，<code>DeliveryPlan</code> 描述交付动作。</p>
+<h3>2.2 一次轮次的应用编排</h3>
+<pre>request
+  ↓
+context_assembler(request)  # OCR、引用、记忆、RAG
+  ↓
+agent_runner(request, evidence)  # 模型、工具、校验
+  ↓
+delivery_planner(result)  # 文本/表情/语音/音乐
+  ↓
+TurnOutcome</pre>
+<p><code>ConversationTurn</code> 的价值是把顺序和失败不变量集中在一个地方：上下文准备失败、Agent 空回复、没有交付动作，都可以被统一观察和测试。</p>
+<h3>2.3 为什么不把所有逻辑放在 persona.py</h3>
+<p>人格是领域规则的一部分，不应承担协议解析、网络请求、音频转换、数据库写入和消息分段。模块拆开后，可以单独测试“人格文本质量”“工具正确性”“OneBot 交付”和“记忆提取”。</p>
+</section>
+
+<section class="card" id="agent">
+<h2>3. Agent 框架：模型调用为什么还不等于 Agent</h2>
+<h3>3.1 三个层次</h3>
+<div class="grid"><div class="box"><b>LLM</b><span>根据上下文预测下一段文本或结构化 tool call。</span></div><div class="box"><b>Agent Loop</b><span>把模型输出、工具执行和下一轮模型请求连接起来。</span></div><div class="box"><b>Agent System</b><span>再加入记忆、状态、权限、观测、重试和交付。</span></div></div>
+<p>AI_ATRI 的 Agent 主要由自定义编排组成：<code>AutomaticToolRunner</code> 负责工具循环，<code>ToolRegistry</code> 负责能力注册，<code>ToolReceipt</code> 负责执行事实，<code>CognitionKernel</code> 负责连续状态。</p>
+<h3>3.2 ReAct、工作流和状态图</h3>
+<table><thead><tr><th>范式</th><th>特点</th><th>适合本项目的部分</th></tr></thead><tbody>
+<tr><td>ReAct</td><td>模型在思考和行动间循环</td><td>开放式搜索和工具使用</td></tr>
+<tr><td>固定工作流</td><td>步骤确定、易测试</td><td>语音、音乐、消息交付</td></tr>
+<tr><td>状态图</td><td>状态显式、节点可回放</td><td>认知内核和未来规划</td></tr>
+</tbody></table>
+<p>当前设计的取舍是：旧链路继续负责生产回复；LangGraph 先以 shadow 模式观察状态。这比一次性让新图接管 QQ 副作用更容易回滚和验证。</p>
+<h3>3.3 工具调用的可靠性</h3>
+<pre>模型提出 tool_call
+  ├─ 解析失败：生成参数错误回执
+  ├─ 执行成功：生成 ok receipt
+  ├─ 执行异常：生成 failed receipt
+  └─ 超过预算：禁止继续调用，要求总结</pre>
+<ul><li>工具调用次数上限：防止死循环和 token 膨胀。</li><li>超时：防止一个工具拖死当前会话。</li><li>权限/副作用边界：发送、点赞、发歌等动作不能只凭模型文本确认。</li><li>幂等性：重复收到同一事件时，不能重复执行不可逆动作。</li></ul>
+</section>
+
+<section class="card" id="context">
+<h2>4. 上下文工程：模型质量的真正瓶颈</h2>
+<h3>4.1 Prompt 不是越长越好</h3>
+<p>上下文的目标是让模型在有限 token 内看到“当前问题真正需要的信息”。项目把上下文分成：</p>
+<ol><li>稳定人格和原作设定：保持身份连续。</li><li>能力与回复合同：规定能不能调用工具、如何处理失败。</li><li>认知上下文：当前目标、情绪、未完成步骤。</li><li>相关记忆：只注入和当前问题有关的 L1/L2。</li><li>最近对话：承接省略表达和上下文。</li><li>本轮证据与工具回执：事实优先级最高。</li></ol>
+<h3>4.2 上下文优先级</h3>
+<p>可以把上下文看成一个排序问题：当前用户指令和工具真实回执优先于旧的闲聊；明确纠正优先于模型上轮猜测；已过期事件不应覆盖当前事实。</p>
+<div class="formula">有效上下文 = 稳定规则 + 当前目标 + 相关记忆 + 最近承接 + 真实证据</div>
+<h3>4.3 输出校验与重写</h3>
+<p>模型生成的文本不是最终结果。项目还会检查：空回复、垃圾语言、重复问题、未回答当前目标、越权声称、过长、敏感内容和视觉证据越界。第一次不合格时用较低温度和更明确的修复指令重试，连续失败再使用短兜底。</p>
+</section>
+
+<section class="card" id="memory">
+<h2>5. 记忆系统与 RAG：从存储到可用知识</h2>
+<h3>5.1 三层记忆的算法意义</h3>
+<table><thead><tr><th>层</th><th>机器学习视角</th><th>工程规则</th></tr></thead><tbody>
+<tr><td>L1</td><td>长期用户特征</td><td>需要置信度、证据、冲突修正</td></tr>
+<tr><td>L2</td><td>时间相关事件</td><td>需要时间、状态、衰减和更新</td></tr>
+<tr><td>L3</td><td>短期工作记忆</td><td>有限窗口、滚动保留、服务当前目标</td></tr>
+</tbody></table>
+<h3>5.2 记忆提取为什么异步</h3>
+<p>回复是用户直接感知的主链路，画像更新是旁路任务。如果每条消息都同步调用记忆模型，记忆模型超时就会表现为“机器人不回复”。因此项目使用有界队列、单线程消费者和模型熔断状态。</p>
+<pre>用户消息 → 立即进入回复链路
+       └→ submit(memory_request) → 后台提取 → 去重/确认 → 写入 WebUI 可见画像</pre>
+<h3>5.3 FTS5 与 embedding</h3>
+<p>FTS5 更擅长精确词、专名和中文字符二元组；embedding 更擅长语义相似。余弦相似度为：</p>
+<div class="formula">cos(q,d) = (q · d) / (||q|| × ||d||)</div>
+<p>两路排名使用 Reciprocal Rank Fusion：</p>
+<div class="formula">RRF(d) = Σ<sub>retriever</sub> 1 / (k + rank<sub>retriever</sub>(d))</div>
+<p>这是一种不强行比较不同检索器原始分数的融合方法，适合当前“小规模本地记忆 + 可选向量增强”的场景。</p>
+<h3>5.4 画像污染与隐私边界</h3>
+<p>群聊中必须区分 group scope 和 member scope：某个成员喜欢什么，不能自动变成整个群喜欢什么；一次玩笑也不能直接升级为 L1 事实。来源、置信度、可见范围和更新时间是画像可维护性的基础字段。</p>
+</section>
+
+<section class="card" id="multi">
+<h2>6. 多模态：OCR、视觉、视频和语音的组合</h2>
+<h3>6.1 OCR 与 VLM 不是替代关系</h3>
+<div class="flow"><span class="node">图片</span><span class="arr">→</span><span class="node">预处理</span><span class="arr">→</span><span class="node safe">OCR：文字证据</span><span class="arr">+</span><span class="node tool">VLM：画面语义</span><span class="arr">→</span><span class="node">证据合并</span></div>
+<p>“能读出图片文字”不等于“理解了图片”。OCR 的输出可以作为直接证据，视觉模型还需要判断主体、关系、表情和上下文。两者结果必须分开保存，才能在视觉模型失败时准确降级。</p>
+<h3>6.2 视频抽帧</h3>
+<p>视频理解通常不是把全部帧送入模型，而是均匀采样有限关键帧。设视频有 <code>N</code> 帧、采样 <code>K</code> 帧，位置可以近似为：</p>
+<div class="formula">i<sub>j</sub> = round(j × (N - 1) / (K - 1)), j = 0...K-1</div>
+<p>这样在成本、上下文长度和覆盖率之间取得平衡；快速变化场景可以进一步加入场景切分算法。</p>
+<h3>6.3 语音服务</h3>
+<p><code>VoiceManager</code> 负责 QQ 侧的语音事件和交付；<code>atri_voice_service</code> 通过本地 HTTP 独立持有 ASR/TTS 资源。语音模型加载或超时不应拖垮文字聊天。</p>
+</section>
+
+<section class="card" id="reliable">
+<h2>7. 可靠性工程：为什么系统要有这么多兜底</h2>
+<table><thead><tr><th>失败类型</th><th>表现</th><th>正确策略</th></tr></thead><tbody>
+<tr><td>输入失败</td><td>OneBot segment 缺字段</td><td>保留原始事件，降级为短文本摘要</td></tr>
+<tr><td>能力失败</td><td>OCR/视觉/联网超时</td><td>记录 limitation，禁止补造事实</td></tr>
+<tr><td>模型失败</td><td>空响应、接口错误、乱码</td><td>有限重试，最后短兜底</td></tr>
+<tr><td>交付失败</td><td>OneBot action 失败</td><td>记录 action 回执，避免假装发送成功</td></tr>
+<tr><td>资源失败</td><td>内存不足、锁被占用</td><td>释放/等待/降级，不能无限重启重模型</td></tr>
+</tbody></table>
+<h3>7.1 超时、重试和熔断</h3>
+<p>重试不是“失败了再无限试”。对可重试的网络错误进行有限次数重试；参数错误先修正参数；资源繁忙快速降级；连续模型失败后短暂熔断，避免电脑和接口被打满。</p>
+<h3>7.2 可观察性</h3>
+<p>日志是 Agent 的行为轨迹：消息接收、上下文准备、工具调用、工具回执、模型响应、交付 action 和异常都应有时间、会话 ID、工具名和耗时。</p>
+<div class="good">对于“不回复”，先判断事件有没有进 OneBot、是否进入队列、模型是否返回、交付 action 是否成功，再决定修哪里。</div>
+</section>
+
+<section class="card" id="practice">
+<h2>8. 由浅入深的实验路线</h2>
+<details open><summary>实验 1：手写一个最小消息管线</summary><p>构造假的 <code>ConversationTurnRequest</code>，依次实现固定上下文、固定 Agent 和文本交付，观察 <code>TurnOutcome</code>。目标：理解契约而不是模型。</p></details>
+<details><summary>实验 2：实现成功/失败工具</summary><p>向 <code>ToolRegistry</code> 注册两个工具，分别返回正常结果和异常。观察 <code>ToolReceipt.ok</code> 如何影响下一轮回复。</p></details>
+<details><summary>实验 3：比较三种上下文</summary><p>同一个问题分别只提供最近对话、只提供 L1 记忆、提供 RAG 结果，比较模型是否能正确承接目标，并记录 token 数。</p></details>
+<details><summary>实验 4：测量 RAG</summary><p>准备 20 条带标签的用户事实，构造查询集合，计算 Recall@k、Precision@k 和平均上下文长度，比较 FTS5、embedding、RRF。</p></details>
+<details><summary>实验 5：构造视觉失败</summary><p>分别模拟 OCR 成功/VLM 失败、OCR 失败/VLM 成功、两者都失败，验证系统是否只输出证据覆盖的内容。</p></details>
+<details><summary>实验 6：压测资源锁</summary><p>同时启动两个本地推理请求，记录等待时间、峰值内存和失败降级，确认跨进程文件锁的效果。</p></details>
+<h3>建议阅读顺序</h3>
+<ol><li><code>src/atri_qq_bot/application/contracts.py</code></li><li><code>src/atri_qq_bot/application/turn.py</code></li><li><code>src/atri_qq_bot/onebot/message_parser.py</code></li><li><code>src/atri_qq_bot/onebot/server.py</code></li><li><code>src/atri_qq_bot/persona/core.py</code></li><li><code>src/atri_qq_bot/application/automatic_tool_runner.py</code></li><li><code>src/atri_qq_bot/memory_parts/ingestion.py</code></li><li><code>src/atri_qq_bot/retrieval/repository.py</code></li><li><code>src/atri_qq_bot/toolbox.py</code></li><li><code>src/atri_qq_bot/runtime/inference_lock.py</code></li></ol>
+</section>
+
+<section class="card">
+<h2>9. 面向 AI 专业开发者的研究方向</h2>
+<div><span class="badge">Agent Evaluation</span><span class="badge">Memory Quality</span><span class="badge">RAG Recall</span><span class="badge">Tool Reliability</span><span class="badge">Multimodal Grounding</span><span class="badge">Resource Scheduling</span></div>
+<ul><li>为工具调用建立成功率、参数修正率、平均调用轮次和伪完成率指标。</li><li>为 L1/L2/L3 记忆建立准确率、冲突率、过期率和召回有效率指标。</li><li>建立“用户目标是否完成”的对话级评测，而不只看回复文本相似度。</li><li>为视觉回答标注 OCR 正确率、主体识别准确率和证据越界率。</li><li>将 shadow cognition 与真实回复做离线 replay，比较新旧策略而不影响 QQ 运行。</li><li>引入 tracing/span，把一次消息的输入、检索、模型、工具和交付串成完整调用链。</li></ul>
+<p class="warn">先建立可观测指标，再做架构升级。没有 replay、日志和评测集，Agent 重构很容易变成“感觉更聪明”，却无法证明更可靠。</p>
+</section>
+
+<p class="footer">AI_ATRI 渐进式深度课程 · 本地自包含 HTML · 不依赖外部资源</p>
+</main>
+</body>
+</html>

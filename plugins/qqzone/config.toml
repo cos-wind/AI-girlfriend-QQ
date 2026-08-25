@@ -1,0 +1,54 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[bridge]
+# 先部署并登录 onebot-qzone，再改为 true。
+enabled = true
+base_url = "http://127.0.0.1:5700"
+access_token = ""
+timeout_seconds = 10.0
+allow_remote = false
+include_image_data = false
+# 读取/点赞/评论仍走 onebot-qzone；发布可选用 NapCat 近期新增的 send_qzone_msg。
+post_backend = "qzone_bridge"
+napcat_base_url = "http://127.0.0.1:3000"
+napcat_access_token = ""
+
+[safety]
+# WebUI 人工确认的写操作始终可用；下面三项只控制 LLM Tool 的直接写权限。
+allow_llm_like = false
+allow_llm_comment = false
+allow_llm_post = false
+comment_max_chars = 120
+post_max_chars = 240
+daily_post_limit = 2
+# 0=所有人，1=好友，2=仅自己
+default_visibility = 1
+
+[proactive]
+enabled = false
+schedule_hours = "9,18,22"
+schedule_minute = 0
+timezone = "Asia/Shanghai"
+minimum_interval_minutes = 360
+source_stream_ids = []
+max_source_streams = 3
+context_messages_per_stream = 12
+persona_name = "亚托莉"
+topic_prompt = ""
+content_prompt = ""
+mood_hint = ""
+generation_temperature = 0.8
+generation_max_tokens = 300
+interactions_enabled = false
+auto_like_enabled = true
+auto_comment_enabled = true
+interaction_schedule_hours = "10,19"
+interaction_schedule_minute = 30
+interaction_minimum_interval_minutes = 180
+max_likes_per_run = 3
+max_comments_per_run = 1
+interaction_feed_limit = 20
+comment_prompt = "友善、简短、像亚托莉本人，不透露私聊或隐私；只有确实有话可说时才评论。"
+ignored_user_ids = []

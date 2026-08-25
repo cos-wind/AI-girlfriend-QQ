@@ -1,5 +1,5 @@
 {
-  "说明": "用户提供的 ATRI 图片表情包映射。文件放在顶层情绪文件夹，优先级高于 _curated、_chat_history 和 _online_default。",
+  "说明": "用户提供的 ATRI 图片表情包映射。模型发送时只从 STICKER_DIR 下的情绪文件夹读取。",
   "添加时间": "2026-06-01",
   "源目录": "C:/Users/YOUR_NAME/Pictures/Screenshots/ACGN/ATRI",
   "图片": [

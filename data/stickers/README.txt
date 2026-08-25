@@ -47,16 +47,16 @@
 
 你或别人发给亚托莉的图片/表情包，如果 NapCat 消息里带可下载 URL，会自动保存到：
 
-_chat_history\<emotion>
+<Documents>\Tencent Files\<BOT_QQ>\ATRI\chat_history\<emotion>
 
 例如：
 
-_chat_history\happy
-_chat_history\comfort
-_chat_history\pout
-_chat_history\unsorted
+<BOT_QQ>\ATRI\chat_history\happy
+<BOT_QQ>\ATRI\chat_history\comfort
+<BOT_QQ>\ATRI\chat_history\pout
+<BOT_QQ>\ATRI\chat_history\unsorted
 
-能判断情绪的图片会自动加入对应情绪库。判断不出来的会先进 _chat_history\unsorted，不会自动发送；你确认含义后，把图片移动到 happy、comfort 等正确文件夹即可。
+能判断情绪的图片会自动加入对应情绪目录。判断不出来的会先进 `unsorted`，不会自动发送；聊天记录归档目录不会作为模型发送来源。
 
 网络精选表情：
 
@@ -64,7 +64,7 @@ _chat_history\unsorted
 
 _curated\<emotion>
 
-这个文件夹也可以手动添加。优先级是：你手动放入的 <emotion> 文件夹 > _curated > _chat_history 同情绪 > _online_default。
+这个文件夹也可以手动添加；但模型自动发送仍只读取 `STICKER_DIR`。
 
 默认联网表情缓存：
 

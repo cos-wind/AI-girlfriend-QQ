@@ -5,6 +5,26 @@ import subprocess
 from typing import Any
 
 
+if os.environ.get("ATRI_G2PW_FORCE_CPU", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    # GPT-SoVITS v2Pro only uses ONNX Runtime for the small Chinese G2PW
+    # front-end. The bundled ORT GPU wheel targets CUDA 13 while this runtime
+    # uses PyTorch CUDA 12, so probing CUDA emits a missing-cublas error and
+    # delays the first Chinese sentence before falling back to CPU. Keep the
+    # acoustic models on CUDA and expose CPU only to this ONNX front-end.
+    try:
+        import onnxruntime as _onnxruntime
+
+        _onnxruntime.preload_dlls = lambda *args, **kwargs: None
+        _onnxruntime.get_available_providers = lambda: ["CPUExecutionProvider"]
+    except ImportError:
+        pass
+
+
 if os.name == "nt" and not getattr(subprocess.Popen, "_atri_hidden", False):
     _OriginalPopen = subprocess.Popen
 

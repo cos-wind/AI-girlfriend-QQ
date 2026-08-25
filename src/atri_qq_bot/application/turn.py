@@ -60,6 +60,8 @@ class ConversationTurn:
         request: ConversationTurnRequest,
         trace: TurnTrace | None = None,
     ) -> TurnOutcome:
+        # 这是应用层的“单轮事务”：上下文准备、Agent 运行、交付计划必须按顺序完成。
+        # 每一步只通过 Protocol 交互，所以 OneBot、云端模型和视觉模块都可替换。
         turn_trace = trace or TurnTrace(request.turn_id)
         turn_trace.record(
             "intake",
@@ -79,6 +81,7 @@ class ConversationTurn:
             proposed_actions=len(result.proposed_actions),
             failed=bool(result.failure_reason),
         )
+        # 没有文本结果时不创建空的发送动作；调用方可根据 failure_reason 统一降级。
         if result.failure_reason or not result.reply_text.strip():
             reason = result.failure_reason or "agent returned an empty reply"
             turn_trace.record("failed", reason=reason)

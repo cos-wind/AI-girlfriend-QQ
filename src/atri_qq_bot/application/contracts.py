@@ -1,3 +1,9 @@
+"""应用层的数据契约。
+
+这些 dataclass 是适配层、Agent 和交付层之间的稳定边界。它们不依赖 QQ、
+HTTP 或具体模型，因此可以用纯单元测试验证数据流和失败条件。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,7 +17,11 @@ EvidenceLevel = Literal["full_content", "partial", "ocr_only", "metadata_only", 
 
 @dataclass(frozen=True)
 class ConversationTurnRequest:
-    """The stable interface for one inbound or proactive conversation turn."""
+    """一次对话轮次的规范输入。
+
+    `conversation_id` 表示上下文容器，`profile_id` 表示应该写入的用户档案；
+    群聊因此可以共享场景上下文，同时把个人特征写入发言者自己的档案。
+    """
 
     turn_id: str
     conversation_id: str
@@ -20,6 +30,10 @@ class ConversationTurnRequest:
     user_text: str
     nickname: str | None = None
     actor_id: str | None = None
+    quoted_text: str = ""
+    reply_focus_source: str = ""
+    reply_focus_text: str = ""
+    addressed_to_bot: bool = True
     raw_event: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
@@ -42,7 +56,7 @@ class ToolReceipt:
 
 @dataclass(frozen=True)
 class ArtifactEvidence:
-    """Facts an LLM may use, with the limits that keep it grounded."""
+    """模型可以使用的证据，以及限制模型越界推断的证据等级。"""
 
     source: str
     level: EvidenceLevel
@@ -89,4 +103,5 @@ class TurnOutcome:
 
     @property
     def succeeded(self) -> bool:
+        # 空回复即使没有抛异常也属于失败；这样发送层不会静默丢消息。
         return bool(self.reply_text.strip()) and not self.failure_reason

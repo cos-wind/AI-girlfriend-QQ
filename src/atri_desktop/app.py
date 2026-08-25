@@ -17,6 +17,8 @@ from .single_instance import acquire_single_instance, release_single_instance
 
 
 REFRESH_INTERVAL_MS = 10_000
+STARTUP_REFRESH_INTERVAL_MS = 1_000
+STARTUP_GUARD_MS = 30_000
 TRANSPARENT_COLOR = "#010203"
 COLOR_KEY_RGB = (1, 2, 3)
 COLOR_KEY_ALPHA_THRESHOLD = 96
@@ -26,10 +28,20 @@ WINDOWS_APP_ID = "AtriQQBot.DesktopPet"
 
 
 def status_bubble_message(status: DesktopPetStatus) -> str:
-    if status.atri and status.napcat:
-        return random.choice(("后台连接正常。", "高性能运行中。", "Atri 和 NapCat 都在线。"))
     if status.napcat_state == "login_required":
-        return "QQ 登录已失效，请扫描已弹出的二维码重新登录。"
+        if status.maibot_webui_url and status.maibot_webui_reachable:
+            return "MaiBot 已启动，NapCat 未登录，请打开对应 WebUI。"
+        if status.maibot_webui_url:
+            return "亚托莉已启动，MaiBot 和 NapCat 都需要检查登录。"
+        return "NapCat 未登录，请打开 NapCat WebUI 手动扫码。"
+    if status.atri and status.maibot_webui_url and not status.maibot_webui_reachable:
+        return "亚托莉已启动，MaiBot 正在后台启动。"
+    if status.atri and status.maibot_webui_url and status.maibot_webui_reachable and not status.napcat:
+        return "亚托莉和 MaiBot 已启动，NapCat 等待登录。"
+    if status.atri and status.napcat:
+        if status.maibot_webui_reachable:
+            return random.choice(("后台连接正常。", "高性能运行中。", "Atri、MaiBot 和 NapCat 都在线。"))
+        return random.choice(("后台连接正常。", "高性能运行中。", "Atri 和 NapCat 都在线。"))
     if status.atri:
         return "Atri 已启动，NapCat 还没连上。"
     return "Atri 未运行。右键可以启动亚托莉。"
@@ -184,7 +196,7 @@ class DesktopPetApp:
         if self.startup_guard_after_id is not None:
             self._say("亚托莉正在启动中，稍等一下。")
             return
-        self.startup_guard_after_id = self.root.after(90_000, self._clear_startup_guard)
+        self.startup_guard_after_id = self.root.after(STARTUP_GUARD_MS, self._clear_startup_guard)
         self._run_background("start", self.controller.start_services)
 
     def stop_atri(self) -> None:
@@ -219,6 +231,12 @@ class DesktopPetApp:
                         else "NapCat WebUI：未配置"
                     ),
                     f"NapCat WebUI 状态：{_state_text(status.napcat_webui_reachable)}",
+                    (
+                        f"MaiBot WebUI：{status.maibot_webui_url}"
+                        if status.maibot_webui_url
+                        else "MaiBot WebUI：未配置"
+                    ),
+                    f"MaiBot WebUI 状态：{_state_text(status.maibot_webui_reachable)}",
                     f"QQ：{status.bot_qq}",
                 ]
             ),
@@ -352,7 +370,12 @@ class DesktopPetApp:
             return
         if self.status_after_id is not None:
             self.root.after_cancel(self.status_after_id)
-        self.status_after_id = self.root.after(REFRESH_INTERVAL_MS, self._run_scheduled_status_refresh)
+        interval_ms = (
+            STARTUP_REFRESH_INTERVAL_MS
+            if self.startup_guard_after_id is not None
+            else REFRESH_INTERVAL_MS
+        )
+        self.status_after_id = self.root.after(interval_ms, self._run_scheduled_status_refresh)
 
     def _run_scheduled_status_refresh(self) -> None:
         if self.closing:
@@ -362,7 +385,9 @@ class DesktopPetApp:
 
     def _render_status(self, status: DesktopPetStatus) -> None:
         self.current_status = status
-        if status.atri and status.napcat:
+        # The start action owns only the ATRI core. NapCat may legitimately be
+        # waiting for a manual WebUI login and must not lock the button for 90s.
+        if status.atri:
             self._clear_startup_guard()
         expression = expression_for_status(status.atri, status.napcat)
         self._set_expression(expression)

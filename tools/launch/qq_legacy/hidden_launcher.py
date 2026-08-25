@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import ctypes
 from ctypes import wintypes
 import json
@@ -8,6 +7,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -26,10 +26,15 @@ NAPCAT_REQUIRED_FILES = (
     "qqnt.json",
 )
 BOT_PORT = 8765
+QZONE_BRIDGE_PORT = 5700
+MAIBOT_PORT = 8001
 OLLAMA_PORT = 11434
 VOICE_PORT = 8790
 MUSIC_BRIDGE_PORT = 8793
 GPT_SOVITS_PORT = 9880
+NAPCAT_CONNECTION_POLL_SECONDS = 0.75
+OPTIONAL_SERVICES_WAIT_SECONDS = 30
+OPTIONAL_SERVICES_STAGGER_SECONDS = 2.0
 DEFAULT_OLLAMA_MODELS = Path.home() / ".ollama" / "models"
 DEFAULT_VOICE_ASCII_MODELS = Path(r"D:\AtriModels")
 WEBUI_STATUS_URL = "http://127.0.0.1:8787/api/status"
@@ -37,7 +42,6 @@ VOICE_HEALTH_URL = f"http://127.0.0.1:{VOICE_PORT}/health"
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "hidden-launcher.log"
 NAPCAT_STATE_FILE = PROJECT_DIR / "data" / "runtime" / "napcat-state.json"
-NAPCAT_QR_MAX_AGE_SECONDS = 300
 NAPCAT_WEBUI_PORT = 6099
 DEFAULT_QQ_PROFILE_DIR = PROJECT_DIR / "data" / "runtime" / "qq-profile"
 _LAUNCHER_MUTEX_HANDLE: int | None = None
@@ -66,13 +70,11 @@ def publish_napcat_state(
     state: str,
     *,
     detail: str = "",
-    qrcode: Path | None = None,
 ) -> None:
     payload = {
         "state": state,
         "detail": detail,
         "updated_at": time.time(),
-        "qrcode": str(qrcode) if qrcode else "",
     }
     try:
         NAPCAT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -84,30 +86,6 @@ def publish_napcat_state(
         os.replace(temporary, NAPCAT_STATE_FILE)
     except OSError as exc:
         log(f"Could not publish NapCat runtime state: {exc}")
-
-
-def fresh_napcat_qrcode(
-    napcat_dir: Path,
-    *,
-    since: float | None = None,
-) -> Path | None:
-    qrcode = napcat_dir / "cache" / "qrcode.png"
-    try:
-        minimum_mtime = (
-            since
-            if since is not None
-            else time.time() - NAPCAT_QR_MAX_AGE_SECONDS
-        )
-        return qrcode if qrcode.stat().st_mtime >= minimum_mtime else None
-    except OSError:
-        return None
-
-
-def show_login_qrcode(qrcode: Path) -> None:
-    try:
-        os.startfile(qrcode)  # type: ignore[attr-defined]
-    except (AttributeError, OSError) as exc:
-        log(f"Could not open NapCat login QR code {qrcode}: {exc}")
 
 
 def acquire_single_instance_mutex(name: str) -> bool:
@@ -153,18 +131,50 @@ def popen_hidden(
     )
 
 
-def run_hidden(args: list[str] | tuple[str, ...]) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [str(arg) for arg in args],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        startupinfo=startupinfo(),
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+def start_launcher_mode_in_background(mode: str) -> bool:
+    """Run a launcher slice in its own hidden process.
+
+    Long-running recovery work (notably NapCat login detection) must not hold
+    up the core launcher or delay the local ATRI service.
+    """
+    python_exe = PROJECT_PYTHONW if PROJECT_PYTHONW.exists() else PROJECT_PYTHON
+    if not python_exe.exists():
+        log(f"Cannot start launcher mode {mode}: project Python was not found.")
+        return False
+    try:
+        popen_hidden(
+            [str(python_exe), str(Path(__file__).resolve()), mode],
+            cwd=PROJECT_DIR,
+        )
+    except OSError as exc:
+        log(f"Could not start launcher mode {mode}: {exc}")
+        return False
+    log(f"Launcher mode {mode} requested in background.")
+    return True
+
+
+def run_hidden(
+    args: list[str] | tuple[str, ...],
+    *,
+    timeout_seconds: float = 10.0,
+) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            [str(arg) for arg in args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            startupinfo=startupinfo(),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        log(f"Hidden command timed out after {timeout_seconds:.1f}s: {args[0] if args else 'unknown'}")
+        return subprocess.CompletedProcess(args=args, returncode=124, stdout=output, stderr="")
 
 
 def project_env_value(name: str) -> str:
@@ -206,7 +216,7 @@ def qq_executable() -> Path:
 
 
 def qq_profile_dir() -> Path:
-    """返回项目 QQ 专用的 Chromium/Electron 配置目录。
+    r"""返回项目 QQ 专用的 Chromium/Electron 配置目录。
 
     QQ 的聊天数据库仍由 QQ 按账号写入 ``Documents\Tencent Files\<QQ号>``；
     这里隔离的是两个不同版本 QQ 最容易互相污染的界面缓存、WebStorage、
@@ -463,6 +473,50 @@ def launch_isolated_napcat_qq(
         kernel32.CloseHandle(process.hProcess)
 
 
+def launch_napcat_boot_process(
+    *,
+    launcher: Path,
+    hook: Path,
+    qq_exe: Path,
+    qq_uin: str,
+    profile_dir: Path,
+    cwd: Path,
+    env: dict[str, str],
+) -> int:
+    """通过 NapCat 自带引导器启动专用 QQ。
+
+    之前这里复刻引导器的远程注入流程。该流程在 Windows 重启后的某些
+    会话/安全策略下可能卡在 CreateProcessW 或 CreateRemoteThread，导致
+    隐藏启动器永久占用互斥锁。官方引导器已经负责同样的注入和参数转发，
+    因此只提交一次受控子进程，不在本进程里执行不可中断的注入调用。
+    """
+    qq_exe, profile_dir = validate_qq_isolation(qq_exe, profile_dir)
+    if not hook.is_file():
+        raise FileNotFoundError(f"NapCat hook not found: {hook}")
+    if not launcher.is_file():
+        raise FileNotFoundError(f"NapCat launcher not found: {launcher}")
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # launcher-user.bat 的实际调用约定：NapCatWinBootMain.exe
+    # <QQ.exe> <NapCatWinBootHook.dll> [QQ arguments...]
+    qq_args = isolated_qq_arguments(qq_exe, qq_uin, profile_dir)[1:]
+    command = [str(launcher), str(qq_exe), str(hook), *qq_args]
+    child = popen_hidden(command, cwd=cwd, env=env)
+
+    # 只观察引导器很短时间，避免启动器因等待第三方进程而永久阻塞。
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        return_code = child.poll()
+        if return_code is not None:
+            if return_code != 0:
+                raise OSError(
+                    f"NapCat official launcher exited with code {return_code}."
+                )
+            break
+        time.sleep(0.1)
+    return int(child.pid)
+
+
 def find_napcat_dir(
     search_roots: tuple[Path, ...] | None = None,
 ) -> Path | None:
@@ -597,6 +651,18 @@ def ollama_process_env() -> dict[str, str]:
     except OSError as exc:
         log(f"Could not create Ollama models directory {models_path}: {exc}")
     env["OLLAMA_MODELS"] = str(models_path)
+    # 16GB 系统内存下只保留一个本地模型并串行推理；聊天、embedding 与视觉
+    # 依次切换，避免同时加载两个 4B 模型耗尽 Windows 提交内存。
+    defaults = {
+        "OLLAMA_MAX_LOADED_MODELS": "1",
+        "OLLAMA_NUM_PARALLEL": "1",
+        "OLLAMA_MAX_QUEUE": "32",
+        "OLLAMA_KEEP_ALIVE": "0",
+        "OLLAMA_FLASH_ATTENTION": "1",
+        "OLLAMA_KV_CACHE_TYPE": "q8_0",
+    }
+    for name, default in defaults.items():
+        env[name] = project_env_value(name) or env.get(name) or default
     return env
 
 
@@ -690,6 +756,12 @@ def start_voice_if_needed(*, wait_for_ready: bool = True) -> None:
         str(local_sensevoice) if (local_sensevoice / "model.pt").exists() else "iic/SenseVoiceSmall",
     )
     env.setdefault("ATRI_ASR_DEVICE", "cpu")
+    # GPT-SoVITS 冷启动可能需要加载数 GB 权重；启动等待与单次推理预算
+    # 分开配置，且成功后保持常驻，避免每轮聊天重新冷启动。
+    env.setdefault("ATRI_TTS_TOTAL_TIMEOUT_SECONDS", "75")
+    env.setdefault("ATRI_TTS_STARTUP_TIMEOUT_SECONDS", "45")
+    env.setdefault("ATRI_TTS_PREWARM_ENABLED", "true")
+    env.setdefault("ATRI_TTS_IDLE_SHUTDOWN_SECONDS", "0")
     if not already_listening:
         log("Starting isolated voice service in background.")
         popen_hidden(
@@ -782,16 +854,137 @@ def onebot_connection_established() -> bool:
     return has_established_port(BOT_PORT)
 
 
-def process_rows() -> list[dict[str, str]]:
-    result = run_hidden(["tasklist.exe", "/FO", "CSV", "/NH"])
-    if result.returncode != 0:
+def start_qzone_bridge_if_needed(*, wait_for_ready: bool = True) -> None:
+    """Start the local QQ-space Bridge together with the core ATRI runtime."""
+    enabled = project_env_value("QZONE_BRIDGE_ENABLED").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        log("QZone Bridge is disabled in .env; skipping startup.")
+        return
+    if port_open(QZONE_BRIDGE_PORT):
+        log(f"QZone Bridge already listening on {QZONE_BRIDGE_PORT}.")
+        return
+    bridge_dir = PROJECT_DIR / "tools" / "onebot-qzone"
+    bridge_script = bridge_dir / "start_bridge.ps1"
+    if not bridge_script.exists():
+        log(f"QZone Bridge startup script not found: {bridge_script}")
+        return
+    log("Starting QZone Bridge in background.")
+    popen_hidden(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(bridge_script),
+        ],
+        cwd=bridge_dir,
+    )
+    if not wait_for_ready:
+        return
+    for _ in range(30):
+        time.sleep(0.5)
+        if port_open(QZONE_BRIDGE_PORT):
+            log(f"QZone Bridge is ready on {QZONE_BRIDGE_PORT}.")
+            return
+    log("QZone Bridge did not report ready within timeout; ATRI will retry when it is available.")
+
+
+def maibot_root() -> Path | None:
+    configured = project_env_value("MAIBOT_ROOT") or os.environ.get("MAIBOT_ROOT", "")
+    candidates = [Path(configured)] if configured else []
+    candidates.extend((Path(r"D:\MaiBot-install"), PROJECT_DIR.parent / "MaiBot-install"))
+    for candidate in candidates:
+        if (candidate / "bot.py").exists():
+            return candidate
+    return None
+
+
+def start_maibot_if_needed(*, wait_for_ready: bool = False) -> None:
+    """Start the local MaiBot WebUI service without opening a console window."""
+    if port_open(MAIBOT_PORT):
+        log(f"MaiBot already listening on {MAIBOT_PORT}.")
+        return
+    root = maibot_root()
+    if root is None:
+        log("MaiBot installation was not found; skipping MaiBot startup.")
+        return
+    script = root / "start_maibot.ps1"
+    if not script.exists():
+        log(f"MaiBot startup script not found: {script}")
+        return
+    log(f"Starting MaiBot WebUI in background: {root}")
+    popen_hidden(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+        ],
+        cwd=root,
+    )
+    if not wait_for_ready:
+        return
+    for _ in range(60):
+        time.sleep(0.5)
+        if port_open(MAIBOT_PORT):
+            log(f"MaiBot is ready on {MAIBOT_PORT}.")
+            return
+    log("MaiBot did not report ready within timeout; check D:\\MaiBot-install\\logs\\startup.log.")
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+def _windows_process_rows() -> list[dict[str, str]]:
+    """使用 Toolhelp 快照枚举进程，避免冷启动时 tasklist/WMI 卡死。"""
+    if os.name != "nt":
         return []
-    rows: list[dict[str, str]] = []
-    for row in csv.reader(result.stdout.splitlines()):
-        if len(row) < 2:
-            continue
-        rows.append({"name": row[0], "pid": row[1]})
-    return rows
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        return []
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return []
+        rows: list[dict[str, str]] = []
+        while True:
+            rows.append({"name": str(entry.szExeFile), "pid": str(int(entry.th32ProcessID))})
+            entry.dwSize = ctypes.sizeof(entry)
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+        return rows
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def process_rows() -> list[dict[str, str]]:
+    return _windows_process_rows()
 
 
 def process_name_by_pid(pid: int) -> str | None:
@@ -869,50 +1062,20 @@ def taskkill(image_name: str) -> None:
     run_hidden(["taskkill.exe", "/IM", image_name, "/F"])
 
 
-def show_qq_window(timeout_seconds: int = 35) -> bool:
-    user32 = ctypes.windll.user32
-    handles: list[int] = []
-    enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-    def collect_window(hwnd: int, _lparam: int) -> bool:
-        pid = ctypes.c_ulong()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value not in qq_pids:
-            return True
-        class_name = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(hwnd, class_name, 256)
-        title = ctypes.create_unicode_buffer(256)
-        user32.GetWindowTextW(hwnd, title, 256)
-        visible = bool(user32.IsWindowVisible(hwnd))
-        if visible or class_name.value.startswith("Chrome_WidgetWin"):
-            handles.append(hwnd)
-        return True
-
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        qq_pids = set(project_qq_pids())
-        if not qq_pids:
-            time.sleep(0.35)
-            continue
-        handles.clear()
-        user32.EnumWindows(enum_proc_type(collect_window), 0)
-        if handles:
-            hwnd = handles[0]
-            user32.ShowWindowAsync(hwnd, 5)
-            time.sleep(0.15)
-            user32.ShowWindowAsync(hwnd, 9)
-            user32.SetForegroundWindow(hwnd)
-            log(f"QQ window restored: handle={hwnd}.")
-            return True
-        time.sleep(0.35)
-    log(f"QQ window was not found within {timeout_seconds} seconds.")
-    return False
-
-
 def start_ollama_if_needed(*, wait_for_ready: bool = True) -> None:
+    configured_models = ollama_models_path()
     if port_open(OLLAMA_PORT):
-        log(f"Ollama already listening on {OLLAMA_PORT}.")
-        return
+        # 端口在监听不等于当前进程加载了项目模型目录。旧版 Ollama
+        # 桌面进程可能先占用 11434，却使用 C:\Users\...\.ollama\models，
+        # 这会让项目看到空模型列表并持续返回 404。
+        if ollama_api_has_models() and ollama_has_project_models(configured_models):
+            log(f"Ollama already listening on {OLLAMA_PORT} with project models.")
+            return
+        log(
+            f"Ollama is listening on {OLLAMA_PORT} but project models are unavailable; "
+            "restarting it with the configured model directory."
+        )
+        stop_ollama_processes()
 
     candidates = [
         Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe",
@@ -932,13 +1095,45 @@ def start_ollama_if_needed(*, wait_for_ready: bool = True) -> None:
         return
     for _ in range(30):
         time.sleep(0.5)
-        if port_open(OLLAMA_PORT):
+        # Ollama opens its TCP port before the model registry API is ready.
+        # Treating the socket as readiness lets the first chat request race
+        # startup and surface as a timeout/502.
+        if port_open(OLLAMA_PORT) and ollama_api_has_models():
             log("Ollama is ready.")
             return
     log("Ollama did not report ready within timeout.")
 
 
-def start_atri_if_needed(*, wait_for_ready: bool = True) -> None:
+def ollama_has_project_models(models_path: Path) -> bool:
+    """检查项目模型目录是否有 Ollama manifest，避免把空服务当成可用。"""
+    manifest_root = models_path / "manifests"
+    try:
+        return any(manifest_root.rglob("*") if manifest_root.is_dir() else ())
+    except OSError:
+        return False
+
+
+def ollama_api_has_models() -> bool:
+    """读取当前 11434 服务的模型列表，识别“空 Ollama 服务”状态。"""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{OLLAMA_PORT}/api/tags",
+            timeout=2.0,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        return bool(payload.get("models")) if isinstance(payload, dict) else False
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def stop_ollama_processes() -> None:
+    """仅停止 Ollama 进程，不影响 QQ、NapCat 或项目 Python 服务。"""
+    for process in run_hidden(["taskkill", "/F", "/T", "/IM", "ollama.exe"]).stdout.splitlines():
+        if process.strip():
+            log(f"Stopped stale Ollama process: {process.strip()}")
+
+
+def start_atri_if_needed(*, wait_for_ready: bool = True) -> bool:
     if port_open(BOT_PORT):
         if bot_connected():
             log(f"Atri service already listening on {BOT_PORT} and NapCat is connected.")
@@ -947,24 +1142,29 @@ def start_atri_if_needed(*, wait_for_ready: bool = True) -> None:
                 f"Atri service already listening on {BOT_PORT}; "
                 "keeping it alive while NapCat connects."
             )
-        return
+        return True
 
     python_exe = PROJECT_PYTHONW if PROJECT_PYTHONW.exists() else PROJECT_PYTHON
     if not python_exe.exists():
         log(r"Python venv not found. Run tools\launch\atri\start-atri.bat once to repair dependencies.")
-        return
+        return False
 
     log("Starting Atri service in background.")
-    popen_hidden([str(python_exe), "-m", "atri_qq_bot"], cwd=PROJECT_DIR)
+    try:
+        popen_hidden([str(python_exe), "-m", "atri_qq_bot"], cwd=PROJECT_DIR)
+    except OSError as exc:
+        log(f"Atri process could not be started: {exc}")
+        return False
     if not wait_for_ready:
         log("Atri startup requested; NapCat may start in parallel.")
-        return
+        return True
     for _ in range(75):
         time.sleep(0.2)
         if port_open(BOT_PORT):
             log("Atri service is ready.")
-            return
+            return True
     log("Atri service did not report ready within timeout.")
+    return False
 
 
 def required_napcat_files() -> tuple[Path, Path, Path, Path, Path] | None:
@@ -997,12 +1197,14 @@ def wait_for_connection(
     while time.monotonic() < deadline:
         if keep_qq_hidden:
             hide_qq_windows()
-        time.sleep(0.1 if keep_qq_hidden else 0.25)
         if bot_connected():
             if keep_qq_hidden:
                 hide_qq_windows()
             log("NapCat connected to Atri.")
             return True
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(NAPCAT_CONNECTION_POLL_SECONDS, remaining))
     return False
 
 
@@ -1034,6 +1236,35 @@ def hide_qq_windows() -> bool:
     return hidden
 
 
+def close_project_qq_windows(pids: list[int] | tuple[int, ...]) -> bool:
+    """Ask only the project QQ windows to close so login tokens can be flushed."""
+    if os.name != "nt":
+        return False
+    qq_pids = {int(pid) for pid in pids}
+    if not qq_pids:
+        return False
+
+    user32 = ctypes.windll.user32
+    close_requested = False
+    enum_proc_type = ctypes.WINFUNCTYPE(
+        ctypes.c_bool,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+
+    def close_window(hwnd: int, _lparam: int) -> bool:
+        nonlocal close_requested
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in qq_pids:
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            close_requested = True
+        return True
+
+    user32.EnumWindows(enum_proc_type(close_window), 0)
+    return close_requested
+
+
 def wait_for_process_exit(
     image_names: tuple[str, ...],
     timeout_seconds: float = 3.0,
@@ -1062,6 +1293,81 @@ def wait_for_project_qq_exit(timeout_seconds: float = 5.0) -> bool:
     return False
 
 
+def stop_atri_service(timeout_seconds: float = 5.0) -> bool:
+    """停止占用项目 OneBot 端口的 ATRI 进程。"""
+    try:
+        from atri_qq_bot.runtime.control import tcp_rows
+    except ImportError as exc:
+        log(f"Could not inspect Atri listener: {exc}")
+        return False
+
+    listener_pids = sorted(
+        {
+            int(row["pid"])
+            for row in tcp_rows()
+            if row.get("state") == "LISTENING"
+            and row.get("local_port") == BOT_PORT
+            and isinstance(row.get("pid"), int)
+        }
+    )
+    if not listener_pids:
+        return True
+
+    log(f"Stopping Atri listener processes: pids={listener_pids}")
+    for pid in listener_pids:
+        if pid != os.getpid():
+            taskkill_process_tree(pid)
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not port_open(BOT_PORT):
+            return True
+        time.sleep(0.1)
+    log(f"Atri listener did not stop within {timeout_seconds:.1f}s.")
+    return False
+
+
+def stop_project_napcat(timeout_seconds: float = 8.0) -> bool:
+    """仅停止项目专用 QQ/NapCat，不影响用户独立安装的桌面 QQ。"""
+    project_pids = sorted(set(project_qq_pids()))
+    if not project_pids:
+        return True
+
+    log(f"Closing project NapCat QQ gracefully: pids={project_pids}")
+    close_project_qq_windows(project_pids)
+    if wait_for_project_qq_exit(timeout_seconds):
+        return True
+
+    remaining_pids = sorted(set(project_qq_pids()))
+    log(
+        f"Project NapCat QQ did not close within {timeout_seconds:.1f}s; "
+        f"forcing remaining pids={remaining_pids}."
+    )
+    for pid in remaining_pids:
+        taskkill_process_tree(pid)
+    return wait_for_project_qq_exit(2.0)
+
+
+def recover_background_services() -> bool:
+    """重建 ATRI 与项目专用 NapCat 会话，清除假在线和失效 QQ 内核。"""
+    required = required_napcat_files()
+    if required is None:
+        publish_napcat_state("failed", detail="NapCat 运行文件不完整，无法执行恢复")
+        return False
+
+    publish_napcat_state("recovering", detail="正在重启 ATRI 与项目专用 NapCat/QQ")
+    if not stop_atri_service():
+        publish_napcat_state("failed", detail="ATRI 旧进程未能停止")
+        return False
+    if not stop_project_napcat():
+        publish_napcat_state("failed", detail="项目专用 NapCat/QQ 旧进程未能停止")
+        return False
+    if not start_atri_if_needed(wait_for_ready=True):
+        publish_napcat_state("failed", detail="ATRI 重启失败")
+        return False
+    return launch_napcat(required)
+
+
 def launch_napcat(
     required: tuple[Path, Path, Path, Path, Path] | None = None,
 ) -> bool:
@@ -1076,8 +1382,6 @@ def launch_napcat(
     qq_exe = qq_executable()
     profile_dir = qq_profile_dir()
     napcat_dir = launcher.parent
-    launch_started_at = time.time()
-
     napcat_uri = "file:///" + str(napcat_main).replace("\\", "/").replace(" ", "%20")
     load_path.write_text(f'(async () => {{await import("{napcat_uri}")}})()\n', encoding="utf-8")
 
@@ -1098,9 +1402,10 @@ def launch_napcat(
     )
     publish_napcat_state("starting", detail="正在启动专用 NapCat/QQ")
     try:
-        pid = launch_isolated_napcat_qq(
-            qq_exe=qq_exe,
+        pid = launch_napcat_boot_process(
+            launcher=launcher,
             hook=hook,
+            qq_exe=qq_exe,
             qq_uin=qq_uin,
             profile_dir=profile_dir,
             cwd=napcat_dir,
@@ -1114,21 +1419,13 @@ def launch_napcat(
     log(f"Isolated NapCat QQ process started: pid={pid}")
     if wait_for_connection(20, keep_qq_hidden=True):
         return True
-    qrcode = fresh_napcat_qrcode(napcat_dir, since=launch_started_at)
-    if qrcode is not None:
-        detail = "QQ 登录已失效，需要扫码登录"
-        log(f"{detail}. QR code: {qrcode}")
-        publish_napcat_state("login_required", detail=detail, qrcode=qrcode)
-        show_qq_window(timeout_seconds=20)
-        show_login_qrcode(qrcode)
-        return False
-    log("NapCat quick login is delayed; showing QQ for possible manual login.")
-    show_qq_window(timeout_seconds=20)
+    log("NapCat login is not confirmed; waiting for manual login through NapCat WebUI.")
     if wait_for_connection(55):
         return True
     if port_open(NAPCAT_WEBUI_PORT) or process_running("NapCatWinBootMain.exe"):
-        log("NapCat started, waiting for OneBot connection.")
-        publish_napcat_state("connecting", detail="NapCat 已启动，正在等待 OneBot 连接")
+        detail = "NapCat 已启动但 QQ 未登录，请打开 NapCat WebUI 手动扫码登录"
+        log(detail)
+        publish_napcat_state("login_required", detail=detail)
     else:
         log("NapCat failed to stay running.")
         publish_napcat_state("failed", detail="NapCat 启动后意外退出")
@@ -1162,34 +1459,9 @@ def start_napcat_if_needed() -> None:
     napcat_runtime_running = napcat_boot_running or port_open(NAPCAT_WEBUI_PORT)
 
     if qq_running and napcat_runtime_running:
-        if status_payload().get("napcat_state") in {
-            "event_stale",
-            "probe_stale",
-            "qq_offline",
-        }:
-            log("NapCat event stream is stale; restarting only the isolated QQ instance.")
-            publish_napcat_state(
-                "recovering",
-                detail="检测到 NapCat 事件流假在线，正在重启专用 NapCat/QQ 进程",
-            )
-            for pid in project_qq_pids():
-                taskkill_pid(pid)
-            wait_for_project_qq_exit()
-            if napcat_boot_running:
-                taskkill("NapCatWinBootMain.exe")
-                wait_for_process_exit(("NapCatWinBootMain.exe",))
-            launch_napcat(required)
-            return
-        qrcode = fresh_napcat_qrcode(required[0].parent)
-        if qrcode is not None:
-            detail = "QQ 登录已失效，需要扫码登录"
-            log("QQ and NapCat are already waiting for login; preserving the current session.")
-            publish_napcat_state("login_required", detail=detail, qrcode=qrcode)
-        else:
-            detail = "QQ 与 NapCat 已启动，正在等待 OneBot 连接"
-            log("QQ and NapCat are already starting; preserving the current session.")
-            publish_napcat_state("connecting", detail=detail)
-        show_qq_window(timeout_seconds=5)
+        detail = "NapCat 已启动但 QQ 未登录，请打开 NapCat WebUI 手动扫码登录"
+        log("QQ and NapCat are running without an Atri connection; login is required.")
+        publish_napcat_state("login_required", detail=detail)
         return
 
     if qq_running:
@@ -1202,36 +1474,90 @@ def start_napcat_if_needed() -> None:
 
     if napcat_runtime_running:
         log("NapCat boot process is already running.")
-        show_qq_window(timeout_seconds=12)
         if wait_for_connection(45):
             return
-        log("NapCat boot looks stale; restarting QQ/NapCat once.")
-
-        if napcat_boot_running:
-            taskkill("NapCatWinBootMain.exe")
-            wait_for_process_exit(("NapCatWinBootMain.exe",))
+        detail = "NapCat 已启动但未连接，请打开 NapCat WebUI 手动扫码登录"
+        log(detail)
+        publish_napcat_state("login_required", detail=detail)
+        return
     else:
         log("No stale QQ/NapCat process found; starting directly.")
     launch_napcat(required)
 
 
-def main() -> int:
-    if not acquire_single_instance_mutex("AtriQQHiddenLauncher"):
-        log("Hidden QQ launcher is already running; ignoring duplicate request.")
+def main(mode: str = "core") -> int:
+    """Start one bounded runtime slice instead of every model at once.
+
+    ``core`` is the desktop-pet default. It brings up ATRI first, then delegates
+    NapCat recovery and optional integrations to isolated modes. Heavy inference
+    services are launched by their first real request, so normal QQ text chat
+    cannot exhaust Windows virtual memory or destabilise system audio.
+    """
+    normalized_mode = str(mode or "core").strip().lower()
+    supported_modes = {
+        "core",
+        "recover",
+        "napcat",
+        "optional",
+        "voice-asr",
+        "voice-tts",
+        "ollama",
+        "music",
+    }
+    if normalized_mode not in supported_modes:
+        log(f"Unknown launcher mode: {normalized_mode}.")
+        return 2
+    if not acquire_single_instance_mutex(f"AtriQQHiddenLauncher-{normalized_mode}"):
+        log(f"Hidden launcher mode {normalized_mode} is already running; ignoring duplicate request.")
         return 0
-    log("Hidden QQ launcher invoked.")
+    log(f"Hidden QQ launcher invoked. mode={normalized_mode}")
 
-    # Bring text chat online first. Model and voice services are optional and
-    # must not delay or destabilize the OneBot connection.
-    start_atri_if_needed(wait_for_ready=False)
-    start_napcat_if_needed()
+    if normalized_mode == "core":
+        # QQ text chat is the critical path.  Confirm ATRI is listening first,
+        # then let NapCat recovery continue independently because manual login
+        # can legitimately take much longer than service startup.
+        if not start_atri_if_needed(wait_for_ready=True):
+            log("Core startup stopped because Atri did not become ready.")
+            return 1
+        start_launcher_mode_in_background("napcat")
+        start_launcher_mode_in_background("optional")
+        return 0
+    if normalized_mode == "recover":
+        return 0 if recover_background_services() else 1
+    if normalized_mode == "napcat":
+        start_napcat_if_needed()
+        return 0
+    if normalized_mode == "optional":
+        # Give the QQ chat path first access to disk and CPU after a cold boot.
+        # Optional integrations still start if login requires manual action.
+        if not wait_for_connection(OPTIONAL_SERVICES_WAIT_SECONDS):
+            log("NapCat is not ready yet; starting optional services without blocking chat recovery.")
+        try:
+            start_qzone_bridge_if_needed(wait_for_ready=False)
+        except Exception as exc:
+            log(f"Optional QZone Bridge startup failed: {exc}")
+        time.sleep(OPTIONAL_SERVICES_STAGGER_SECONDS)
+        try:
+            start_maibot_if_needed(wait_for_ready=False)
+        except Exception as exc:
+            log(f"Optional MaiBot startup failed: {exc}")
+        return 0
+    if normalized_mode == "voice-asr":
+        start_voice_if_needed(wait_for_ready=True)
+        return 0
+    if normalized_mode == "voice-tts":
+        # 只恢复轻量服务；GPT-SoVITS 必须由请求在全局推理锁内启动。
+        start_voice_if_needed(wait_for_ready=True)
+        return 0
+    if normalized_mode == "ollama":
+        start_ollama_if_needed(wait_for_ready=True)
+        return 0
+    if normalized_mode == "music":
+        start_music_bridge_if_needed()
+        return 0
 
-    start_gpt_sovits_if_needed()
-    start_ollama_if_needed(wait_for_ready=False)
-    start_voice_if_needed(wait_for_ready=False)
-    start_music_bridge_if_needed()
-    return 0
+    return 2
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else "core"))

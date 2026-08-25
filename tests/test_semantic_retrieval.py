@@ -66,6 +66,59 @@ def test_planner_retrieves_lore_only_for_lore_questions(tmp_path, monkeypatch) -
     assert "YHN-04B" not in casual_context
 
 
+def test_lore_index_excludes_generic_persona_chunks_from_plot_retrieval(tmp_path, monkeypatch) -> None:
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    (prompt_dir / "lore.md").write_text(
+        "# 起点：命令与有用性\n亚托莉提出成为夏生先生的腿，因为她想用行动补足夏生的困难。",
+        encoding="utf-8",
+    )
+    (prompt_dir / "atri_persona.md").write_text(
+        "# 通用人格\n亚托莉说话要自然、简短，不要每句话使用高性能。",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("atri_qq_bot.retrieval.planner.PROMPT_DIR", prompt_dir)
+
+    planner = ContextRetrievalPlanner(
+        RetrievalSettings(enabled=True, database_path=tmp_path / "semantic.sqlite3")
+    )
+    profile = {
+        "conversation_id": "private:1",
+        "personal_question_interval": "五到八轮",
+        "structured_memory": {"l1": [], "l2": [], "l3": [], "candidates": []},
+    }
+
+    planner.build(profile, "为什么要成为夏生先生的腿？")
+    entries = planner.repository.search("lore:atri", "为什么要成为夏生先生的腿？", 10)
+
+    assert entries
+    assert all(entry.metadata.get("document") == "lore.md" for entry in entries)
+    assert "补足夏生的困难" in entries[0].content
+
+
+def test_plot_lore_marks_forty_five_days_as_a_negotiated_period(tmp_path, monkeypatch) -> None:
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    (prompt_dir / "lore.md").write_text(
+        "# 起点\n四十五天是向夏生争取的共同生活与暂缓处理期限，不是乃音子原命令写死的时限。",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("atri_qq_bot.retrieval.planner.PROMPT_DIR", prompt_dir)
+    planner = ContextRetrievalPlanner(
+        RetrievalSettings(enabled=True, database_path=tmp_path / "semantic.sqlite3")
+    )
+    profile = {
+        "conversation_id": "private:1",
+        "personal_question_interval": "五到八轮",
+        "structured_memory": {"l1": [], "l2": [], "l3": [], "candidates": []},
+    }
+
+    context = planner.build(profile, "四十五天是原作命令写死的吗？")
+
+    assert "共同生活与暂缓处理期限" in context
+    assert "不是乃音子原命令写死的时限" in context
+
+
 def test_repository_can_store_and_search_optional_vectors_without_a_vector_database(tmp_path) -> None:
     repo = SemanticMemoryRepository(tmp_path / "semantic.sqlite3")
     repo.replace_scope_source(

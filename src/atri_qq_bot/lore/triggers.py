@@ -24,12 +24,25 @@ LORE_TRIGGER_WORDS = (
     "发电",
     "学校",
     "岛",
+    "型号",
+    "年龄",
+    "外貌",
+    "诗菜",
+    "乃音子",
+    "日志",
+    "螃蟹",
+    "燕雀",
+    "伊甸",
+    "yhn-04b",
 )
 
 
 def has_lore_trigger(text: str) -> bool:
     lowered = text.lower()
-    explicit_lore = any(word in text for word in ("原作", "剧情", "设定", "梗", "名场面")) or "atri" in lowered
+    explicit_lore = (
+        any(word in text for word in ("原作", "剧情", "设定", "梗", "名场面", "亚托莉"))
+        or "atri" in lowered
+    )
     strong_triggers = (
         "高性能",
         "萝卜子",
@@ -49,6 +62,13 @@ def has_lore_trigger(text: str) -> bool:
         "机器人有没有心",
         "亚托莉有心",
         "水车",
+        "诗菜",
+        "乃音子",
+        "日志",
+        "螃蟹",
+        "燕雀",
+        "伊甸",
+        "yhn-04b",
     )
     if any(word in text for word in strong_triggers):
         return True

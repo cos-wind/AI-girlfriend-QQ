@@ -217,7 +217,8 @@ def test_server_routes_previous_share_and_focus_to_same_reply(monkeypatch, tmp_p
     server._voice_event_log = tmp_path / "voice-events.log"
     captured: dict[str, object] = {}
 
-    async def fake_analyze(event, plain_text, call_action):
+    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True):
+        del plain_text, call_action, allow_vision
         captured["analysis_event"] = event
         return None
 

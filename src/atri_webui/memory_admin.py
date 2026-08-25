@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -28,34 +29,63 @@ class MemoryAdmin:
             "semantic_memory.sqlite3"
         )
         self._lock = threading.RLock()
+        self._summary_cache_signature: tuple[int, int] | None = None
+        self._summary_cache: dict[str, Any] | None = None
 
     def summary(self) -> dict[str, Any]:
-        data = self.load()
-        conversations = self.conversations(data)
-        items = []
-        for user_id in person_user_ids(conversations):
-            items.append(person_summary_item(conversations, user_id))
-        for key, item in sorted(
-            conversations.items(),
-            key=lambda pair: _safe_float((pair[1] or {}).get("last_user_at") if isinstance(pair[1], dict) else 0),
-            reverse=True,
-        ):
-            if not isinstance(item, dict) or memory_kind(key) != "group":
-                continue
-            items.append(memory_summary_item(key, item))
-        items.sort(
-            key=lambda item: (
-                0 if item.get("kind") == "person" else 1,
-                -_safe_float(item.get("last_user_at")),
+        with self._lock:
+            try:
+                stat = self.memory_path.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                signature = (0, 0)
+            if self._summary_cache_signature == signature and self._summary_cache is not None:
+                return copy.deepcopy(self._summary_cache)
+
+            data = self.load()
+            conversations = self.conversations(data)
+            items = []
+            for user_id in person_user_ids(conversations):
+                items.append(person_summary_item(conversations, user_id))
+            for key, item in sorted(
+                conversations.items(),
+                key=lambda pair: _safe_float((pair[1] or {}).get("last_user_at") if isinstance(pair[1], dict) else 0),
+                reverse=True,
+            ):
+                if not isinstance(item, dict) or memory_kind(key) != "group":
+                    continue
+                items.append(memory_summary_item(key, item))
+            items.sort(
+                key=lambda item: (
+                    0 if item.get("kind") == "person" else 1,
+                    -_safe_float(item.get("last_user_at")),
+                )
             )
-        )
-        return {
-            "path": str(self.memory_path),
-            "conversations": len(items),
-            "raw_conversations": len(conversations),
-            "items": items,
-            "retrieval": SemanticMemoryRepository(self.semantic_memory_path).status(),
-        }
+            payload = {
+                "path": str(self.memory_path),
+                "conversations": len(items),
+                "raw_conversations": len(conversations),
+                "items": items,
+                "bot_activity": {
+                    "messages": sum(
+                        int(item.get("bot_reply_count") or 0)
+                        for item in conversations.values()
+                        if isinstance(item, dict)
+                    ),
+                    "last_seen_at": max(
+                        [
+                            _safe_float(item.get("last_bot_at"))
+                            for item in conversations.values()
+                            if isinstance(item, dict)
+                        ]
+                        or [0.0]
+                    ),
+                },
+                "retrieval": SemanticMemoryRepository(self.semantic_memory_path).status(),
+            }
+            self._summary_cache_signature = signature
+            self._summary_cache = copy.deepcopy(payload)
+            return payload
 
     def detail(self, query: str) -> dict[str, Any]:
         conversation_id = parse_qs(query).get("id", [""])[0]
@@ -212,6 +242,8 @@ class MemoryAdmin:
             try:
                 tmp_path.write_text(payload, encoding="utf-8")
                 os.replace(tmp_path, self.memory_path)
+                self._summary_cache_signature = None
+                self._summary_cache = None
             finally:
                 if tmp_path.exists():
                     tmp_path.unlink()
@@ -238,6 +270,18 @@ class MemoryAdmin:
             else:
                 target.write_text(json.dumps({"version": 2, "conversations": {}}, indent=2), encoding="utf-8")
             return target
+
+
+def memory_admin_for_config(config: Any) -> MemoryAdmin:
+    """Build the WebUI memory module from the current validated config."""
+
+    memory_path = Path(getattr(config, "memory_path"))
+    retrieval_path = getattr(config, "memory_retrieval_path", None)
+    return MemoryAdmin(
+        memory_path=memory_path,
+        backup_dir=memory_path.parent / "backups",
+        semantic_memory_path=Path(retrieval_path) if retrieval_path else None,
+    )
 
 
 DEFAULT_MEMORY_ADMIN = MemoryAdmin()

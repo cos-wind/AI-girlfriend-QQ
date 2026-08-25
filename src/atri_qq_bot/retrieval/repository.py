@@ -225,6 +225,8 @@ class SemanticMemoryRepository:
                 row = conn.execute("SELECT COUNT(*) FROM semantic_embeddings").fetchone()
         return int(row[0]) if row else 0
 
+    # 当前记忆规模适合 SQLite 内的精确余弦扫描：实现简单、结果可复现，也不需要
+    # 额外常驻向量数据库。规模扩大时可在本层替换为 sqlite-vec/HNSW，上层接口不变。
     def vector_search(
         self, scope: str, model: str, query: list[float], limit: int = 5
     ) -> list[RetrievedEntry]:
@@ -316,10 +318,17 @@ class SemanticMemoryRepository:
 def _search_terms(text: str) -> str:
     """为 unicode61 补上中文二元词，避免连续中文被当成一个超长 token。"""
 
-    compact = re.sub(r"[^0-9A-Za-z\u3400-\u9fff]+", "", str(text or "").lower())
-    latin = re.findall(r"[a-z0-9]{2,}", compact)
-    grams = [compact[index : index + 2] for index in range(max(0, len(compact) - 1))]
-    return " ".join(dict.fromkeys([*latin, *grams]))
+    # 不能先把空格和标点全部删除：否则“日志 心”和“日志心”会跨词拼成
+    # 同一串二元词，查询里只要出现“亚托莉”就可能把所有 lore 分块排成近似顺序。
+    # 保留每个连续片段，再在中文片段内部生成二元词，改善剧情短语的精确召回。
+    parts = re.findall(r"[0-9A-Za-z\u3400-\u9fff]+", str(text or "").lower())
+    terms: list[str] = []
+    for part in parts:
+        if re.fullmatch(r"[a-z0-9]+", part) and len(part) >= 2:
+            terms.append(part)
+        if any("\u3400" <= char <= "\u9fff" for char in part):
+            terms.extend(part[index : index + 2] for index in range(max(0, len(part) - 1)))
+    return " ".join(dict.fromkeys(terms))
 
 
 def _fts_query(text: str) -> str:

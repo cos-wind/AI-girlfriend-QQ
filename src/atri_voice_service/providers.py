@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib.util
+import json
+import os
 import re
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from atri_qq_bot.runtime.paths import PROJECT_ROOT
 from atri_qq_bot.voice import SynthesisResult, TranscriptionResult, VoiceRequest
 
 from .asr_lexicon import AsrLexicon
@@ -79,6 +85,16 @@ class SenseVoiceProvider:
     async def warmup(self) -> None:
         await self._get_model()
 
+    async def unload(self) -> None:
+        """Release the lazy ASR model after a bounded transcription."""
+        async with self._load_lock:
+            model = self._model
+            self._model = None
+        if model is None:
+            return
+        del model
+        await asyncio.to_thread(gc.collect)
+
     async def transcribe(self, audio_path: Path, language: str) -> TranscriptionResult:
         model = await self._get_model()
         prepared = PreparedAudio(Path(audio_path).resolve())
@@ -129,7 +145,7 @@ class SenseVoiceProvider:
             except ImportError as exc:
                 self._loading = False
                 self._load_error = "未安装 funasr"
-                raise ProviderError("未安装 funasr，请先运行语音运行时安装脚本") from exc
+                raise ProviderError("未安装 funasr，请先安装语音运行时") from exc
             try:
                 model_source = await self._model_source()
                 model_options: dict[str, Any] = {
@@ -143,10 +159,7 @@ class SenseVoiceProvider:
                     model_options["vad_kwargs"] = {
                         "max_single_segment_time": self.vad_max_segment_ms
                     }
-                self._model = await asyncio.to_thread(
-                    AutoModel,
-                    **model_options,
-                )
+                self._model = await asyncio.to_thread(AutoModel, **model_options)
             except Exception as exc:
                 self._load_error = str(exc)
                 raise ProviderError(f"SenseVoice 模型加载失败：{exc}") from exc
@@ -174,6 +187,124 @@ class SenseVoiceProvider:
         return str(snapshot) if snapshot.is_dir() else self.model_name
 
 
+class IsolatedSenseVoiceProvider:
+    """在一次性子进程里执行 SenseVoice，确保 PyTorch 内存真正释放。
+
+    Windows 下删除模型对象和 ``gc.collect`` 不能保证 PyTorch/ONNX 的提交内存
+    立即归还系统。让工作进程在一次识别后退出，可由操作系统完整回收资源，
+    而 8790 控制服务仍保持在线。
+    """
+
+    def __init__(self, config: VoiceServiceConfig) -> None:
+        self.config = config
+        self.lexicon = AsrLexicon(config.asr_lexicon_path)
+        self._loading = False
+        self._load_error = ""
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "provider": "sensevoice",
+            "dependency_available": importlib.util.find_spec("funasr") is not None,
+            "model": self.config.asr_model,
+            "device": self.config.asr_device,
+            "vad_model": self.config.asr_vad_model,
+            "preprocess_enabled": self.config.asr_preprocess_enabled,
+            "audio_format": "16kHz mono PCM",
+            "hotwords": self.lexicon.terms(),
+            "loaded": False,
+            "loading": self._loading,
+            "isolated_worker": True,
+            "load_error": self._load_error,
+            "last_preprocess_error": "",
+        }
+
+    async def warmup(self) -> None:
+        # 预热会让数 GB 模型常驻，违背隔离进程的资源边界。
+        return None
+
+    async def unload(self) -> None:
+        # 子进程在每次调用结束后已经退出，没有父进程模型需要卸载。
+        return None
+
+    async def transcribe(self, audio_path: Path, language: str) -> TranscriptionResult:
+        job_dir = self.config.cache_dir / "asr-jobs"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        job_id = uuid.uuid4().hex
+        request_path = job_dir / f"{job_id}.request.json"
+        result_path = job_dir / f"{job_id}.result.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    "audio_path": str(Path(audio_path).expanduser().resolve()),
+                    "language": str(language or "auto"),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self._loading = True
+        self._load_error = ""
+        try:
+            return_code = await asyncio.to_thread(
+                _run_asr_worker,
+                request_path,
+                result_path,
+                max(90, self.config.asr_max_duration_seconds + 90),
+            )
+            if not result_path.is_file():
+                raise ProviderError(
+                    f"SenseVoice 隔离进程异常退出（代码 {return_code}）"
+                )
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            if not payload.get("ok"):
+                raise ProviderError(str(payload.get("error") or "SenseVoice 识别失败"))
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                raise ProviderError("SenseVoice 没有识别出文本")
+            return TranscriptionResult(
+                text,
+                str(payload.get("language") or language or "auto"),
+                str(payload.get("emotion") or "neutral"),
+                payload.get("confidence"),
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._load_error = str(exc)
+            raise ProviderError(f"SenseVoice 隔离识别失败：{exc}") from exc
+        finally:
+            self._loading = False
+            request_path.unlink(missing_ok=True)
+            result_path.unlink(missing_ok=True)
+
+
+def _run_asr_worker(request_path: Path, result_path: Path, timeout_seconds: int) -> int:
+    options: dict[str, Any] = {
+        "cwd": str(PROJECT_ROOT),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "timeout": max(30, int(timeout_seconds)),
+        "check": False,
+    }
+    if os.name == "nt":
+        options["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = 0
+            options["startupinfo"] = startupinfo
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "atri_voice_service.asr_worker",
+            str(request_path),
+            str(result_path),
+        ],
+        **options,
+    )
+    return int(completed.returncode)
+
+
 class GptSovitsProvider:
     def __init__(
         self,
@@ -194,6 +325,7 @@ class GptSovitsProvider:
         self.target_rms_dbfs = float(target_rms_dbfs)
         self.max_gain_db = float(max_gain_db)
         self._active_weights: tuple[str, str] | None = None
+        self._last_inference_preset = ""
         self._last_postprocess: dict[str, float] | None = None
         self._last_postprocess_error = ""
 
@@ -202,6 +334,7 @@ class GptSovitsProvider:
             "provider": "gpt_sovits",
             "api_url": "http://127.0.0.1:9880",
             "active_weights": list(self._active_weights) if self._active_weights else None,
+            "last_inference_preset": self._last_inference_preset,
             "pronunciations": self.pronunciations.terms(),
             "postprocess_enabled": self.postprocess_enabled,
             "last_postprocess": self._last_postprocess,
@@ -223,7 +356,8 @@ class GptSovitsProvider:
         )
         if not reference or not Path(reference).is_file():
             raise ProviderError("角色语音档案还没有有效的参考音频")
-        style = _tts_style(request.emotion, request.intensity)
+        preset = _tts_inference_preset(profile, request.emotion, text_language)
+        style = _tts_style(request.emotion, request.intensity, preset=preset)
         spoken_text = self.prepare_spoken_text(request, profile)
         if not spoken_text:
             raise ProviderError("语音文本清理后为空")
@@ -241,7 +375,11 @@ class GptSovitsProvider:
             "prompt_lang": prompt_language,
             "media_type": "wav",
             "streaming_mode": False,
-            "text_split_method": _tts_split_method(spoken_text, text_language),
+            "text_split_method": _tts_split_method(
+                spoken_text,
+                text_language,
+                preset=preset,
+            ),
             "top_k": style["top_k"],
             "top_p": style["top_p"],
             "temperature": style["temperature"],
@@ -249,9 +387,12 @@ class GptSovitsProvider:
             "fragment_interval": style["fragment_interval"],
             "repetition_penalty": style["repetition_penalty"],
             "seed": _tts_seed(text_language) + max(0, int(variation)) * 9973,
+            # Keep the v0.3-compatible serial path.  Parallel inference and
+            # length bucketing caused long silent spans with this v2Pro model.
             "parallel_infer": False,
             "split_bucket": False,
         }
+        self._last_inference_preset = preset
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 await self._activate_profile(client, profile)
@@ -342,19 +483,25 @@ class GptSovitsProvider:
     ) -> None:
         if not profile.gpt_weights and not profile.sovits_weights:
             return
-        weights = (profile.gpt_weights, profile.sovits_weights)
+        # Profiles may refer to the same files through the Unicode model root
+        # or its ASCII junction. Compare the engine-facing paths so changing
+        # language/reference does not reload identical multi-GB weights.
+        weights = (
+            _engine_weight_path(profile.gpt_weights),
+            _engine_weight_path(profile.sovits_weights),
+        )
         if weights == self._active_weights:
             return
         if not all(path and Path(path).is_file() for path in weights):
             raise ProviderError("语音模型权重不完整，请在 WebUI 查看候选模型状态")
         base_url = profile.api_url.rsplit("/", 1)[0]
         for endpoint, path in (
-            ("set_sovits_weights", profile.sovits_weights),
-            ("set_gpt_weights", profile.gpt_weights),
+            ("set_sovits_weights", weights[1]),
+            ("set_gpt_weights", weights[0]),
         ):
             response = await client.get(
                 f"{base_url}/{endpoint}",
-                params={"weights_path": _engine_weight_path(path)},
+                params={"weights_path": path},
             )
             if response.is_error:
                 detail = response.text[:500]
@@ -372,20 +519,10 @@ def _engine_weight_path(value: str) -> str:
     return str(alias) if alias.is_file() else str(path)
 
 
-def create_asr_provider(config: VoiceServiceConfig) -> SenseVoiceProvider:
+def create_asr_provider(config: VoiceServiceConfig) -> IsolatedSenseVoiceProvider:
     if config.asr_provider != "sensevoice":
         raise ProviderError(f"不支持的 ASR 提供器：{config.asr_provider}")
-    return SenseVoiceProvider(
-        config.asr_model,
-        config.asr_device,
-        config.modelscope_cache,
-        vad_model=config.asr_vad_model,
-        vad_max_segment_ms=config.asr_vad_max_segment_ms,
-        audio_cache_dir=config.cache_dir / "asr-normalized",
-        lexicon_path=config.asr_lexicon_path,
-        preprocess_enabled=config.asr_preprocess_enabled,
-        max_duration_seconds=config.asr_max_duration_seconds,
-    )
+    return IsolatedSenseVoiceProvider(config)
 
 
 def parse_sensevoice_output(raw: str) -> tuple[str, str, str]:
@@ -424,12 +561,20 @@ def _reference_context(
     language: str = "auto",
 ) -> tuple[str, str, str]:
     emotion_reference = profile.emotion_references.get(emotion)
+    emotion_prompt_text = profile.emotion_prompt_texts.get(emotion, "")
+    emotion_prompt_language = (
+        profile.emotion_prompt_languages.get(emotion)
+        or _prompt_language(emotion_prompt_text, profile.prompt_language)
+    )
+    if emotion_reference and language not in {"", "auto"}:
+        if emotion_prompt_language != language:
+            emotion_reference = None
     language_reference = profile.language_references.get(language)
     reference = emotion_reference or language_reference or profile.reference_audio
     prompt_text = profile.prompt_text
     prompt_language = profile.prompt_language
     if emotion_reference:
-        configured_prompt = profile.emotion_prompt_texts.get(emotion)
+        configured_prompt = emotion_prompt_text
         filename_prompt = Path(reference).stem.strip("… .")
         prompt_text = configured_prompt or (
             filename_prompt
@@ -437,7 +582,7 @@ def _reference_context(
             else prompt_text
         )
         prompt_language = (
-            profile.emotion_prompt_languages.get(emotion)
+            emotion_prompt_language
             or _prompt_language(prompt_text, profile.prompt_language)
         )
     elif language_reference:
@@ -480,6 +625,22 @@ def _prompt_language(text: str, fallback: str) -> str:
     return fallback
 
 
+def _tts_inference_preset(
+    profile: VoiceProfile,
+    emotion: str,
+    language: str,
+) -> str:
+    emotion_preset = profile.emotion_inference_presets.get(emotion)
+    if not emotion_preset:
+        return profile.inference_preset
+    prompt_text = profile.emotion_prompt_texts.get(emotion, "")
+    prompt_language = (
+        profile.emotion_prompt_languages.get(emotion)
+        or _prompt_language(prompt_text, profile.prompt_language)
+    )
+    return emotion_preset if prompt_language == language else profile.inference_preset
+
+
 def _tts_language(requested: str, configured: str, text: str = "") -> str:
     language = requested if requested not in {"", "auto"} else configured
     if language not in {"", "auto"}:
@@ -494,7 +655,21 @@ def _tts_language(requested: str, configured: str, text: str = "") -> str:
     return "en" if has_latin else "zh"
 
 
-def _tts_style(emotion: str, intensity: float) -> dict[str, float | int]:
+def _tts_style(
+    emotion: str,
+    intensity: float,
+    *,
+    preset: str = "stable",
+) -> dict[str, float | int]:
+    if preset == "fidelity":
+        return {
+            "top_k": 15,
+            "top_p": 0.9,
+            "temperature": 0.8,
+            "speed_factor": 0.967,
+            "fragment_interval": 0.311,
+            "repetition_penalty": 1.35,
+        }
     strength = min(1.0, max(0.0, float(intensity)))
     targets = {
         "neutral": (5, 0.76, 0.58, 1.0, 0.18, 1.30),
@@ -524,7 +699,9 @@ def _tts_style(emotion: str, intensity: float) -> dict[str, float | int]:
     }
 
 
-def _tts_split_method(text: str, language: str) -> str:
+def _tts_split_method(text: str, language: str, *, preset: str = "stable") -> str:
+    if preset == "fidelity":
+        return "cut5"
     if language == "en":
         units = len(re.findall(r"[A-Za-z0-9]+", text))
         return "cut0" if units <= 18 else "cut5"
@@ -550,4 +727,7 @@ def _http_response_detail(response: httpx.Response) -> str:
 
 
 def _tts_seed(language: str) -> int:
-    return 19 if language == "zh" else 42
+    # The former seeds (19/42) reproducibly made this v2Pro checkpoint emit
+    # long near-silent WAVs for ordinary short replies.  These alternates were
+    # verified against Chinese, Japanese and English speech samples.
+    return 9992 if language == "zh" else 10015

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 import time
@@ -69,6 +70,36 @@ _FILENAME_CONTEXT_ALIASES = {
     "委屈": ("委屈", "欺负我", "不开心"),
 }
 _FILENAME_SPLIT_RE = re.compile(r"[\s,，、;；。.!！?？_\-—()（）【】\[\]{}]+")
+_STICKER_REQUEST_RE = re.compile(
+    r"(?:发|来|整|甩|给我).{0,10}(?:表情包|表情|贴图)"
+    r"|(?:表情包|表情|贴图).{0,10}(?:发|来|整|甩|给)"
+)
+_STICKER_NEGATION_RE = re.compile(
+    r"(?:别|不要|不用|不许|禁止).{0,10}(?:表情包|表情|贴图)"
+)
+
+
+def _default_capture_dir() -> Path:
+    configured = os.getenv("STICKER_CAPTURE_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    records_root = os.getenv("QQ_RECORDS_ROOT", "").strip()
+    root = (
+        Path(records_root).expanduser()
+        if records_root
+        else Path.home() / "Documents" / "Tencent Files"
+    )
+    bot_qq = os.getenv("BOT_QQ", "0").strip() or "0"
+    return root / bot_qq / "ATRI" / "chat_history"
+
+
+def is_explicit_sticker_request(text: str) -> bool:
+    """识别用户明确要求发送表情的自然语言，并排除否定表达。"""
+
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact or _STICKER_NEGATION_RE.search(compact):
+        return False
+    return bool(_STICKER_REQUEST_RE.search(compact))
 
 
 @dataclass(frozen=True)
@@ -78,12 +109,22 @@ class StickerChoice:
     face_id: str | None = None
     emoji_text: str | None = None
     triggered: bool = False
+    local: bool = False
 
 
 class StickerManager:
-    def __init__(self, sticker_dir: Path, trigger_file: Path | None = None) -> None:
+    def __init__(
+        self,
+        sticker_dir: Path,
+        trigger_file: Path | None = None,
+        capture_dir: Path | None = None,
+    ) -> None:
         self.sticker_dir = sticker_dir
         self.trigger_file = trigger_file or sticker_dir / "triggers.json"
+        # The production server passes this explicitly. The fallback is still
+        # account-scoped so direct construction can never write into the model
+        # source directory.
+        self.capture_dir = capture_dir or _default_capture_dir()
         self._custom = self._load_custom_config()
 
     def detect_emotion(self, user_text: str, reply_text: str = "") -> str:
@@ -123,9 +164,14 @@ class StickerManager:
         triggered = False
         emotion = "neutral"
         forced_image: Path | str | None = None
+        explicit_request = is_explicit_sticker_request(user_text)
 
         custom_match = self._match_custom_trigger(user_text)
-        if custom_match:
+        if explicit_request:
+            # 明确的发送请求属于动作，不应再受随机概率或冷却限制。
+            emotion = self.detect_emotion(user_text, reply_text)
+            triggered = True
+        elif custom_match:
             emotion, forced_image = custom_match
             emotion = _normalize_emotion(emotion)
             triggered = True
@@ -147,11 +193,16 @@ class StickerManager:
             image_path = forced_image
         else:
             image_path = semantic_image or forced_image or self._pick_image(emotion)
+        if image_path is None and explicit_request:
+            image_path = self._pick_any_primary_image()
         if isinstance(image_path, Path):
             return StickerChoice(
                 emotion=emotion,
                 file_url=str(image_path.resolve()),
                 triggered=triggered,
+                # _online_default is a downloaded fallback image, not part of
+                # the user's QQ sticker library and must stay a normal image.
+                local=not self._is_online_default_file(image_path),
             )
         if isinstance(image_path, str):
             return StickerChoice(emotion=emotion, file_url=image_path, triggered=triggered)
@@ -235,16 +286,6 @@ class StickerManager:
             if manual_candidates:
                 return sorted(set(manual_candidates))
 
-        for root in roots:
-            for emotion_dir in (
-                root / "_curated" / emotion,
-                root / "_chat_history" / emotion,
-                root / "_online_default" / emotion,
-            ):
-                candidates = _image_files_in_dir(emotion_dir)
-                if candidates:
-                    return sorted(set(candidates))
-
         return []
 
     def _pick_semantic_image(
@@ -273,16 +314,28 @@ class StickerManager:
         best_score = max(score for score, _ in scored)
         return random.choice([path for score, path in scored if score == best_score])
 
+    def _pick_any_primary_image(self) -> Path | None:
+        """为“发个表情”这类泛化请求从用户表情库选一张。"""
+
+        if not self.sticker_dir.exists():
+            return None
+        candidates = [
+            path
+            for path in self.sticker_dir.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in IMAGE_EXTENSIONS
+            and not any(
+                part.startswith("_")
+                for part in path.relative_to(self.sticker_dir).parts[:-1]
+            )
+        ]
+        return random.choice(candidates) if candidates else None
+
     def _library_roots(self) -> list[Path]:
-        roots = [self.sticker_dir]
-        trigger_root = self.trigger_file.parent
-        try:
-            same_root = trigger_root.resolve() == self.sticker_dir.resolve()
-        except OSError:
-            same_root = trigger_root == self.sticker_dir
-        if not same_root:
-            roots.append(trigger_root)
-        return roots
+        # The configured sticker directory is the only automatic sending
+        # source. The trigger file remains configuration; explicit trigger
+        # paths are resolved separately and are not mixed into discovery.
+        return [self.sticker_dir]
 
     def _is_primary_file(self, path: Path) -> bool:
         try:
@@ -291,14 +344,18 @@ class StickerManager:
         except (OSError, ValueError):
             return False
 
+    def _is_online_default_file(self, path: Path) -> bool:
+        try:
+            relative_parts = path.resolve().relative_to(self.sticker_dir.resolve()).parts
+        except (OSError, ValueError):
+            return False
+        return "_online_default" in relative_parts
+
     def _resolve_file(self, value: Any) -> Path | None:
         if not value:
             return None
         path = Path(str(value))
-        candidates = [path] if path.is_absolute() else [
-            self.sticker_dir / path,
-            self.trigger_file.parent / path,
-        ]
+        candidates = [path] if path.is_absolute() else [self.sticker_dir / path]
         for candidate in candidates:
             if (
                 candidate.exists()
@@ -410,7 +467,7 @@ class StickerManager:
 
         digest = hashlib.sha1(content).hexdigest()[:12]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        target_dir = self.sticker_dir / "_chat_history" / emotion
+        target_dir = self.capture_dir / emotion
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"chat_{timestamp}_{index}_{digest}{suffix}"
 

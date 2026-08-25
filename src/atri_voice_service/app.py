@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from atri_qq_bot.voice import VoiceRequest
+from atri_qq_bot.runtime.inference_lock import InferencePriority
 
 from .config import VoiceServiceConfig
 from .model_registry import install_candidate_profiles
@@ -17,6 +19,32 @@ from .speech_pipeline import (
     SpeechSynthesisOptions,
     synthesize_with_quality,
 )
+from .runtime_services import (
+    ensure_gpt_sovits_runtime,
+    gpt_sovits_runtime_ready,
+    prepare_asr_runtime,
+    stop_gpt_sovits_runtime,
+)
+
+
+def conversation_synthesis_timeout_seconds(
+    text: str,
+    *,
+    runtime_ready: bool,
+    maximum_seconds: float,
+) -> float:
+    """Return one bounded deadline for queue, startup and one TTS inference.
+
+    Warm short replies fail fast; longer text gets proportionally more time. A
+    cold GPT-SoVITS runtime receives a measured startup allowance without
+    restoring the former unbounded 120/150-second conversation waits.
+    """
+
+    spoken_units = max(1, sum(1 for char in str(text or "") if not char.isspace()))
+    warm_budget = 20.0 + min(25.0, spoken_units * 0.5)
+    budget = warm_budget + (0.0 if runtime_ready else 35.0)
+    hard_cap = max(5.0, min(75.0, float(maximum_seconds)))
+    return min(hard_cap, max(10.0, budget))
 
 
 class SpeechApplication:
@@ -28,6 +56,7 @@ class SpeechApplication:
         self.asr = create_asr_provider(config)
         self.tts = GptSovitsProvider(
             config.cache_dir,
+            timeout_seconds=config.tts_inference_timeout_seconds,
             pronunciation_path=config.tts_pronunciation_path,
             postprocess_enabled=config.tts_postprocess_enabled,
             target_rms_dbfs=config.tts_target_rms_dbfs,
@@ -45,6 +74,7 @@ class SpeechApplication:
             originals=self.originals,
             profiles=self.profiles,
             resources=self.resources,
+            ensure_tts_runtime=self._ensure_tts_runtime,
         )
         self.singing_service = SingingService(
             config,
@@ -56,6 +86,14 @@ class SpeechApplication:
         self.singing = self.singing_service.original_provider
         self.singing_jobs = self.singing_service.jobs
         self._last_quality: dict[str, Any] | None = None
+        self._tts_idle_shutdown_task: Any | None = None
+
+    async def _ensure_tts_runtime(self) -> bool:
+        """Allow cold-start loading without extending ordinary inference forever."""
+
+        return await ensure_gpt_sovits_runtime(
+            timeout_seconds=self.config.tts_startup_timeout_seconds
+        )
 
     def health(self) -> dict[str, Any]:
         profiles = [profile.public_dict() for profile in self.profiles.list()]
@@ -74,8 +112,9 @@ class SpeechApplication:
             "singing_jobs": singing_status["jobs"],
             "inference_resources": self.resources.status(),
             "profiles": profiles,
+            # The service is request-ready before SenseVoice is resident.
+            # ASR's own ``loaded`` flag still reports its exact model state.
             "ready": bool(asr_status.get("dependency_available"))
-            and bool(asr_status.get("loaded"))
             and not bool(asr_status.get("load_error"))
             and any(profile["ready"] for profile in profiles),
         }
@@ -88,12 +127,37 @@ class SpeechApplication:
             # The error remains visible through /health; a later request can retry.
             return
 
+    async def prewarm_tts(self) -> None:
+        """Load GPT-SoVITS before the first authorized conversation needs it."""
+        try:
+            async with self.resources.lease(
+                "tts:prewarm",
+                priority=InferencePriority.BACKGROUND,
+            ):
+                ready = await ensure_gpt_sovits_runtime(timeout_seconds=120.0)
+            if ready:
+                self._schedule_tts_idle_shutdown()
+        except (ProviderError, TimeoutError):
+            return
+
     async def transcribe(self, payload: dict[str, Any]) -> dict[str, Any]:
         audio_path = Path(str(payload.get("audio_path") or "")).expanduser().resolve()
         if not audio_path.is_file():
             raise ProviderError("待识别语音文件不存在")
-        async with self.resources.lease("asr"):
-            result = await self.asr.transcribe(audio_path, str(payload.get("language") or "auto"))
+        try:
+            async with self.resources.lease("asr"):
+                asr_device = str(self.config.asr_device or "cpu").strip().lower()
+                requires_gpu = asr_device.startswith(("cuda", "gpu"))
+                if not await prepare_asr_runtime(requires_gpu=requires_gpu):
+                    raise ProviderError("无法为语音识别释放本地推理资源")
+                result = await self.asr.transcribe(
+                    audio_path,
+                    str(payload.get("language") or "auto"),
+                )
+        finally:
+            # QQ voice input is sporadic. Do not leave this multi-GB model
+            # resident alongside GPT-SoVITS and Ollama after one message.
+            await self.asr.unload()
         return {
             "ok": True,
             "text": result.text,
@@ -103,51 +167,70 @@ class SpeechApplication:
         }
 
     async def synthesize(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._cancel_tts_idle_shutdown()
         request = VoiceRequest.from_tool_arguments(payload, max_chars=500)
-        if request.mode == "singing":
-            result = await self.singing_service.synthesize_clip(request)
-        else:
-            result = await self.conversation_speech.synthesize(
-                request,
-                str(payload.get("profile") or "atri"),
-                SpeechSynthesisOptions(
-                    prefer_original=_payload_bool(
-                        payload,
-                        "prefer_original",
-                        self.config.original_clip_enabled,
-                    ),
-                    quality_gate=_payload_bool(
-                        payload,
-                        "quality_gate",
-                        self.config.tts_quality_gate_enabled,
-                    ),
-                    quality_retries=_payload_int(
-                        payload,
-                        "quality_retries",
-                        self.config.tts_quality_retries,
-                        minimum=0,
-                        maximum=3,
-                    ),
-                    quality_max_error_rate=_payload_float(
-                        payload,
-                        "quality_max_error_rate",
-                        self.config.tts_quality_max_error_rate,
-                        minimum=0.0,
-                        maximum=1.0,
-                    ),
-                    allow_context_original_fallback=_payload_bool(
-                        payload,
-                        "allow_context_original_fallback",
-                        False,
-                    ),
-                    allow_best_effort=_payload_bool(
-                        payload,
-                        "allow_best_effort",
-                        False,
-                    ),
-                ),
-            )
-            self._last_quality = self.conversation_speech.last_quality
+        try:
+            if request.mode == "singing":
+                result = await self.singing_service.synthesize_clip(request)
+            else:
+                runtime_ready = await gpt_sovits_runtime_ready()
+                timeout_seconds = conversation_synthesis_timeout_seconds(
+                    request.text,
+                    runtime_ready=runtime_ready,
+                    maximum_seconds=self.config.tts_total_timeout_seconds,
+                )
+                try:
+                    result = await asyncio.wait_for(
+                        self.conversation_speech.synthesize(
+                            request,
+                            str(payload.get("profile") or "atri"),
+                            SpeechSynthesisOptions(
+                                prefer_original=_payload_bool(
+                                    payload,
+                                    "prefer_original",
+                                    self.config.original_clip_enabled,
+                                ),
+                                quality_gate=_payload_bool(
+                                    payload,
+                                    "quality_gate",
+                                    self.config.tts_quality_gate_enabled,
+                                ),
+                                quality_retries=_payload_int(
+                                    payload,
+                                    "quality_retries",
+                                    self.config.tts_quality_retries,
+                                    minimum=0,
+                                    maximum=3,
+                                ),
+                                quality_max_error_rate=_payload_float(
+                                    payload,
+                                    "quality_max_error_rate",
+                                    self.config.tts_quality_max_error_rate,
+                                    minimum=0.0,
+                                    maximum=1.0,
+                                ),
+                                allow_context_original_fallback=_payload_bool(
+                                    payload,
+                                    "allow_context_original_fallback",
+                                    False,
+                                ),
+                                allow_best_effort=_payload_bool(
+                                    payload,
+                                    "allow_best_effort",
+                                    False,
+                                ),
+                            ),
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                except TimeoutError as exc:
+                    raise ProviderError(
+                        f"语音合成超过 {timeout_seconds:.0f} 秒，已取消本次任务",
+                        retryable=False,
+                    ) from exc
+                self._last_quality = self.conversation_speech.last_quality
+        finally:
+            self._schedule_tts_idle_shutdown()
         return {
             "ok": True,
             "audio_path": str(result.audio_path),
@@ -155,6 +238,45 @@ class SpeechApplication:
             "source": result.source,
             "quality": result.quality,
         }
+
+    def _cancel_tts_idle_shutdown(self) -> None:
+        # 兼容测试、插件或旧集成通过 ``__new__`` 构造应用的方式。
+        task = getattr(self, "_tts_idle_shutdown_task", None)
+        self._tts_idle_shutdown_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_tts_idle_shutdown(self) -> None:
+        self._cancel_tts_idle_shutdown()
+        if self.config.tts_idle_shutdown_seconds <= 0:
+            return
+        self._tts_idle_shutdown_task = asyncio.create_task(
+            self._stop_tts_after_idle(),
+            name="atri-tts-idle-shutdown",
+        )
+
+    async def _stop_tts_after_idle(self) -> None:
+        try:
+            await asyncio.sleep(self.config.tts_idle_shutdown_seconds)
+            # 停止 GPT-SoVITS 是跨进程操作（PowerShell/子进程），不能无限期
+            # 占用共享推理租约。此前 stop-gpt-sovits.ps1 偶发卡住时，这个
+            # 后台任务会一直持有租约，导致文本、视觉和记忆任务全部超时。
+            # 到时只放弃本次卸载，释放租约；下一次语音请求仍可复用或重启引擎。
+            # 空闲卸载是后台维护，不能抢在聊天/视觉任务前面，也不能无限
+            # 等待前台任务；拿不到租约就跳过本轮，下一次语音结束后会重排。
+            async with self.resources.lease(
+                "tts:idle-shutdown",
+                timeout_seconds=1.0,
+                priority=InferencePriority.BACKGROUND,
+            ):
+                await asyncio.wait_for(
+                    stop_gpt_sovits_runtime(),
+                    timeout=8.0,
+                )
+        except asyncio.CancelledError:
+            return
+        except (asyncio.TimeoutError, TimeoutError):
+            return
 
     async def create_singing_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.singing_service.submit(payload)

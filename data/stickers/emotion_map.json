@@ -4,15 +4,11 @@
     "triggers.json 自定义触发词",
     "用户消息关键词情绪判定",
     "亚托莉回复关键词辅助判定",
-    "本地 emotion 文件夹",
-    "_curated 开源精选表情",
-    "_chat_history 聊天记录同情绪表情",
-    "_online_default 默认开源兜底图",
+    "STICKER_DIR 下的本地 emotion 文件夹",
     "QQ 内置表情或轻量 emoji"
   ],
-  "人工添加位置": "data/stickers/<emotion>",
-  "网络精选位置": "data/stickers/_curated/<emotion>",
-  "聊天记录位置": "data/stickers/_chat_history/<emotion>",
+  "人工添加位置": "STICKER_DIR/<emotion>",
+  "聊天记录位置": "Documents/Tencent Files/<BOT_QQ>/ATRI/chat_history/<emotion>",
   "情绪": {
     "happy": {
       "含义": "开心、成功、轻松、一起笑",

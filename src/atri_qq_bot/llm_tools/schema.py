@@ -146,13 +146,17 @@ def _voice_schema(config: Any) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "speak_as_atri",
-            "description": "让亚托莉用角色语音说一小段话。仅在用户想听语音或语音明显比文字更合适时调用。",
+            "description": "让亚托莉用角色语音说一小段话。仅在用户想听语音或语音明显比文字更合适时调用；mode=singing 仅限用户明确要求唱歌，系统只会按歌名发送完整音乐目录中的整首成品，绝不临时合成或朗读歌词。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": f"要说出的完整口语文本，不含网址或舞台说明，最多 {max_chars} 字。",
+                        "description": (
+                            f"要说出的完整口语文本，不含网址或舞台说明，最多 {max_chars} 字。"
+                            "必须直接书写目标语言：中文用汉字，日语用假名/汉字，英文用英文；"
+                            "禁止罗马音、拼音、语言标签和翻译说明。"
+                        ),
                         "maxLength": max_chars,
                     },
                     "emotion": {
@@ -199,7 +203,23 @@ def _voice_schema(config: Any) -> dict[str, Any]:
                     "mode": {
                         "type": "string",
                         "enum": ["speech", "singing"],
-                        "description": "普通语音使用 speech；唱歌、哼唱使用 singing。",
+                        "description": "普通语音使用 speech；仅在用户明确要求唱歌或哼唱时使用 singing。唱歌只匹配完整音乐目录中的整首成品。",
+                    },
+                    "song_title": {
+                        "type": "string",
+                        "description": "mode=singing 时填写用户点名的已学会歌曲名；没有点名时留空，不要编造歌名。",
+                        "maxLength": 120,
+                    },
+                    "segment_index": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 99,
+                        "description": "兼容字段。mode=singing 现在始终发送整首歌曲，用户提到片段或高潮时也请留空。",
+                    },
+                    "segment_hint": {
+                        "type": "string",
+                        "description": "用户说“开头/高潮/后半段”等非编号段落时填写原意，供本地选择器兜底。",
+                        "maxLength": 80,
                     },
                 },
                 "required": ["text", "reason"],

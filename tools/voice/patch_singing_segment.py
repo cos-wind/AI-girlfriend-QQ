@@ -7,7 +7,13 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from singing_audio_engineering import _fit_length, apply_expression, patch_selected_range, quality_report
+from singing_audio_engineering import (
+    align_converted_to_source,
+    apply_expression,
+    apply_vocal_activity_mask,
+    patch_selected_range,
+    quality_report,
+)
 
 
 def _read_mono(path: Path, expected_rate: int | None = None) -> tuple[np.ndarray, int]:
@@ -45,10 +51,15 @@ def main() -> None:
     source, _ = _read_mono(args.source_vocal, sample_rate)
     parameters = json.loads(args.parameters_json)
     print("[ATRI_PROGRESS] 40% 应用选区音色与表现力参数", flush=True)
-    # Seed-VC can return a context a few milliseconds longer or shorter. Align
-    # the complete context before slicing the selected absolute time range.
-    replacement = _fit_length(replacement, len(source_context))
+    # Seed-VC can return a context a few milliseconds late. Shift/pad against
+    # the source envelope; never linearly stretch the singing waveform.
+    replacement, _offset = align_converted_to_source(
+        replacement,
+        source_context,
+        sample_rate,
+    )
     replacement = apply_expression(replacement, source_context, sample_rate, parameters)
+    replacement = apply_vocal_activity_mask(replacement, source_context, sample_rate)
     output = patch_selected_range(
         base,
         replacement,

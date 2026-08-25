@@ -18,6 +18,9 @@ from .config import VoiceServiceConfig
 MAX_REQUEST_BYTES = 1_000_000
 _VOICE_MUTEX_HANDLE: int | None = None
 
+# 语音服务采用轻量 HTTP 边界：机器人传入文本/音频路径，服务返回结果路径
+# 或任务状态。独立进程可单实例持有语音模型，关闭时不影响 OneBot。
+
 
 def _acquire_single_instance() -> bool:
     """防止不同 Python 环境同时加载一套语音模型，避免内存被重复占用。"""
@@ -159,7 +162,12 @@ def create_server(config: VoiceServiceConfig | None = None) -> VoiceHttpServer:
             return None
 
     server = VoiceHttpServer((resolved.host, resolved.port), Handler)
-    server.run_background(app.warmup_asr())
+    if resolved.tts_prewarm_enabled:
+        server.run_background(app.prewarm_tts())
+
+    # SenseVoice is intentionally lazy-loaded by the first transcription.
+    # Warming it here used several GB while Ollama and GPT-SoVITS were also
+    # starting, which could exhaust Windows virtual memory and kill Audiosrv.
     return server
 
 

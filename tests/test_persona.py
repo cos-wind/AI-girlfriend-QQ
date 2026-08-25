@@ -7,6 +7,7 @@ from atri_qq_bot.persona import (
     AtriReplyEngine,
     _group_fallback_reply,
     _looks_like_tool_schema_error,
+    _looks_incomplete_reply,
     _normalize_reply,
     _persona_repair_fallback,
     _persona_violations,
@@ -16,9 +17,7 @@ from atri_qq_bot.toolbox import ToolAnalysisResult
 
 
 def assert_model_unavailable(reply: str) -> None:
-    assert "回复失败" in reply
-    assert "聊天模型当前未启用" in reply
-    assert "未使用本地内容模板" in reply
+    assert reply == ""
 
 
 def test_final_reply_rejects_unfinished_ellipsis_and_redacts_group_secrets(tmp_path) -> None:
@@ -40,6 +39,14 @@ def test_final_reply_rejects_unfinished_ellipsis_and_redacts_group_secrets(tmp_p
     with pytest.raises(RuntimeError, match="没有完整收尾"):
         engine._finalize_reply("private:1", "继续", "工具结果是...", strict_quality=False)
 
+    with pytest.raises(RuntimeError, match="失败兜底文案"):
+        engine._finalize_reply(
+            "private:1",
+            "继续",
+            "刚才没接住，再说一遍吧。",
+            strict_quality=False,
+        )
+
     reply = engine._finalize_reply(
         "group:1",
         "发给我",
@@ -48,6 +55,37 @@ def test_final_reply_rejects_unfinished_ellipsis_and_redacts_group_secrets(tmp_p
     )
     assert "13800138000" not in reply
     assert "sk-abcdefghijk" not in reply
+
+
+def test_reply_repairs_incomplete_model_output_instead_of_staying_silent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="smart",
+        openai_api_key="test-key",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=180,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    monkeypatch.setattr(engine, "_needs_rewrite", lambda *args, **kwargs: False)
+
+    async def incomplete_reply(*args, **kwargs) -> str:
+        return "这件事先别急，我们先确认最重要的限制，然后…"
+
+    monkeypatch.setattr(engine, "_reply_with_guarded_api", incomplete_reply)
+
+    reply = asyncio.run(engine.reply("group:100", "这个问题应该怎么处理？"))
+
+    assert reply
+    assert _looks_incomplete_reply(reply) is False
 
 
 def test_visual_evidence_is_after_history_and_unrelated_memory_is_suppressed(
@@ -150,7 +188,7 @@ def test_disabled_model_returns_diagnostic_instead_of_persona_template() -> None
     assert_model_unavailable(reply)
 
 
-def test_local_fallback_handles_singing_without_generic_task_template() -> None:
+def test_local_fallback_never_generates_a_user_visible_template() -> None:
     config = BotConfig(
         bot_qq=100000001,
         host="127.0.0.1",
@@ -166,9 +204,7 @@ def test_local_fallback_handles_singing_without_generic_task_template() -> None:
 
     reply = engine._fallback_reply("private:10001", "唱首歌")
 
-    assert "先讲重点" not in reply
-    assert "别让这话题散掉" not in reply
-    assert "朗读糊弄" in reply
+    assert reply == ""
 
 
 def test_model_error_is_not_misclassified_as_tool_schema_error() -> None:
@@ -262,7 +298,7 @@ def test_greeting_does_not_fake_weather() -> None:
     reply = asyncio.run(engine.reply("private:10001", "你好"))
 
     assert "天气不错" not in reply
-    assert reply
+    assert reply == "" or "天气不错" not in reply
 
 
 def test_persona_change_request_uses_model_without_fixed_rejection(monkeypatch) -> None:
@@ -1062,6 +1098,215 @@ def test_recent_private_context_includes_actual_assistant_reply_for_continuity(
     assert messages == [
         {"role": "user", "content": "我准备玩一会儿游戏"},
         {"role": "assistant", "content": "我猜你又瘫着不动了"},
+    ]
+
+
+def test_normal_private_turn_injects_actual_assistant_history_without_singing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="private",
+        openai_api_key="test-key",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    engine.memory.observe_user("private:10001", "随机生成20个数字", now=1)
+    engine.memory.observe_bot(
+        "private:10001",
+        "12、47、3、88、25、61、9、73、34、56、18、92、41、7、65、29、80、14、52、36",
+        now=2,
+    )
+    engine.memory.observe_user("private:10001", "找出这串数字的规律", now=3)
+    captured: dict[str, object] = {}
+
+    async def fake_post(client, headers, payload):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "这组数是随机生成的，没有唯一规律。"}}]}
+
+    monkeypatch.setattr(engine, "_post_chat_completion", fake_post)
+
+    reply = asyncio.run(
+        engine._reply_with_api(
+            "private:10001",
+            "找出这串数字的规律",
+            None,
+            profile_id="private:10001",
+            allow_reply_voice=False,
+        )
+    )
+
+    messages = captured["messages"]
+    assert reply == "这组数是随机生成的，没有唯一规律。"
+    assert {
+        "role": "assistant",
+        "content": "12、47、3、88、25、61、9、73、34、56、18、92、41、7、65、29、80、14、52、36",
+    } in messages
+    assert any(
+        message.get("role") == "system" and "当前目标" in str(message.get("content"))
+        for message in messages
+    )
+
+
+def test_group_turn_keeps_lore_and_capability_self_knowledge(tmp_path, monkeypatch) -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="smart",
+        openai_api_key="test-key",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    captured: dict[str, object] = {}
+
+    async def fake_post(client, headers, payload):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "我当然认得自己。"}}]}
+
+    monkeypatch.setattr(engine, "_post_chat_completion", fake_post)
+    asyncio.run(
+        engine._reply_with_api(
+            "group:20001",
+            "你是谁，会做什么？",
+            "群友A",
+            allow_reply_voice=False,
+        )
+    )
+
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in captured["messages"]
+        if message.get("role") == "system"
+    )
+    assert "YHN-04B" in system_text
+    assert "斑鸠夏生" in system_text
+    assert "视频通过抽取关键帧" in system_text
+    assert "只有用户明确要求唱歌" in system_text
+
+
+def test_ordinary_group_chat_does_not_inject_full_lore_or_capability_catalog(
+    tmp_path, monkeypatch
+) -> None:
+    """普通闲聊不能被完整角色档案抢走注意力。"""
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="smart",
+        openai_api_key="test-key",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    captured: dict[str, object] = {}
+
+    async def fake_post(client, headers, payload):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "吃过啦。"}}]}
+
+    monkeypatch.setattr(engine, "_post_chat_completion", fake_post)
+    asyncio.run(
+        engine._reply_with_api(
+            "group:20001",
+            "今天吃过饭了吗？",
+            "群友A",
+            allow_reply_voice=False,
+        )
+    )
+
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in captured["messages"]
+        if message.get("role") == "system"
+    )
+    # 人格核心仍保留身份锚点；被移除的是整份原作百科与能力清单。
+    assert "四十五天是我向夏生先生争取的共同生活" not in system_text
+    assert "视频通过抽取关键帧" not in system_text
+    assert "只有用户明确要求唱歌" not in system_text
+
+
+def test_local_chat_ensures_ollama_inside_inference_lease(tmp_path, monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+    from atri_qq_bot.persona import core as persona_core
+
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="private",
+        openai_api_key="ollama",
+        openai_base_url="http://127.0.0.1:11434/v1",
+        openai_model="qwen3:4b-instruct",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def fake_lease(name: str, timeout_seconds: float, *, priority=None):
+        events.append(f"lease:{name}:{int(priority)}")
+        yield
+
+    async def fake_ensure(*, timeout_seconds: float) -> bool:
+        events.append("ensure")
+        return True
+
+    async def fake_release(model: str, base_url: str) -> bool:
+        assert model == "qwen3:4b-instruct"
+        assert base_url == "http://127.0.0.1:11434/v1"
+        events.append("release")
+        return True
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": "收到。"}}]}
+
+    class FakeClient:
+        async def post(self, *args, **kwargs):
+            events.append("post")
+            return FakeResponse()
+
+    monkeypatch.setattr(persona_core, "inference_resource_lease", fake_lease)
+    monkeypatch.setattr(persona_core, "ensure_ollama_service", fake_ensure)
+    monkeypatch.setattr(
+        persona_core,
+        "release_ollama_model",
+        fake_release,
+        raising=False,
+    )
+
+    data = asyncio.run(engine._post_chat_completion(FakeClient(), {}, {"messages": []}))
+
+    assert data["choices"]
+    assert events == [
+        "lease:chat:qwen3:4b-instruct:0",
+        "ensure",
+        "post",
+        "release",
     ]
 
 
