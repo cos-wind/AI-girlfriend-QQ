@@ -55,17 +55,29 @@ ConversationTurn
 
 ### 相比 v0.3 的新增功能与技术优化
 
-| 领域 | v0.3 状态 | v0.4 新增/优化 | 结果 |
-|------|-----------|----------------|------|
-| 持续状态 | 主要依赖人格提示词、短期上下文和三层用户记忆 | 新增 `cognition/`；LangGraph 显式状态图连接理解节点与能力提案节点，`CognitionStateStore` 用 SQLite/WAL 保存目标、情绪、自我经历和未解决问题 | 有连续状态，但 shadow mode 不会越权发消息或执行副作用 |
-| 单轮编排 | OneBot 服务承载较多上下文、模型和投递逻辑 | 新增 `application/contracts.py` 与 `application/turn.py`，用 `ContextAssembler`、`AgentRunner`、`DeliveryPlanner` 三个 Protocol 解耦 | 模型、视觉、OneBot 适配器可替换，失败边界可单测 |
-| 记忆代码 | `memory.py` / `memory_parts/` 集中管理 | 拆为 `memory/`：`state`、`observation`、`extraction`、`profile_rules`、`affection_rules`、`proactive` 等职责模块 | 降低耦合，支持污染过滤、回填、关系状态和规则独立演进 |
-| OneBot 服务 | 连接、事件、投递、主动规划集中在单体服务 | 拆为 `onebot/server_parts/` mixins；加入每会话队列、防抖合并、顺序投递、健康探测、视觉上下文 TTL 和资源失败降级 | 慢模型或媒体任务不再轻易打乱同一会话消息顺序 |
-| 回复质量 | 没有独立的系统化质量旁路 | 新增 `insights/`：异步 evaluation worker、SQLite store、六维 LLM 评测、语义评分和群聊主题聚类 | 评测/总结不阻塞主回复，可在 WebUI 追踪趋势 |
-| WebUI | 页面集中在单个 `page.py`，开发入口较重 | 拆成 `page/body_*`、`page/script_*` 和 `server_parts/handler_*`；新增评测、群总结、音乐、QQ 空间和用户目录页面 | 页面功能可以独立扩展和回归测试 |
-| QQ 空间 | v0.3 没有项目内扩展边界 | 新增 `plugins/qqzone/`、`qzone_admin.py` 和 `qzone_automation/`，通过本机 Bridge 执行，默认关闭 | Cookie 留在 Bridge，点赞/评论保留人工确认边界 |
-| 音乐与语音 | 语音/歌声能力已有，但运行入口和资源竞争更集中 | 新增 `music/library.py`、`music/session.py`、运行时服务和跨进程推理锁；Ollama 按需启动，模型请求后释放 | 语音、视觉、embedding 和聊天共享 GPU 时更可控 |
-| 发布与依赖 | 本地配置、运行数据和源码边界不够清晰 | 更新 `.env.example`、`.gitignore`、`uv.lock`；加入 LangGraph、SQLite checkpoint、Insights 可选依赖 | 开源仓库只保留可复现的源码、文档和示例配置 |
+| 领域 | v0.3 | v0.4 |
+|------|------|------|
+| 持续状态 | 提示词 + 短期上下文 + 三层记忆 | `cognition/`、LangGraph、SQLite/WAL、shadow mode |
+| 单轮编排 | 逻辑集中在 OneBot 服务 | `ConversationTurn` + 三个 Protocol 协作者 |
+| 记忆代码 | `memory.py` / `memory_parts/` | 模块化 `memory/` 规则、提取、观察与回填 |
+| OneBot 服务 | 单体连接与投递逻辑 | `server_parts/`、会话队列、防抖、健康检查 |
+| 回复质量 | 无独立质量旁路 | `insights/`、异步 worker、六维 LLM 评测 |
+| WebUI | 集中式 `page.py` | 模块化页面、评测、总结、音乐和 QQ 空间 |
+| QQ 空间 | 无项目内扩展 | QQ 空间插件 + 本机 Bridge，默认关闭 |
+| 音乐与资源 | 语音/歌声资源竞争较集中 | 音乐会话、按需 Ollama、跨进程推理锁 |
+| 发布依赖 | 配置与运行数据边界较弱 | `.env.example`、`.gitignore`、`uv.lock` 和可选 Insights 依赖 |
+
+#### 变化详解
+
+- **持续状态**：新增 `src/atri_qq_bot/cognition/`。`CognitionKernel` 使用 LangGraph `StateGraph` 连接“理解”和“能力提案”节点，再由 `CognitionStateStore` 写入 SQLite/WAL；当前只更新影子状态，不越权发送消息或执行副作用。
+- **单轮编排**：新增 `src/atri_qq_bot/application/turn.py`，将上下文组装、Agent 运行和交付计划固定成可追踪的事务顺序；`ContextAssembler`、`AgentRunner`、`DeliveryPlanner` 可替换且可单独测试。
+- **记忆与人格**：将原来的集中式记忆和人格逻辑拆分为 `memory/`、`persona/engine_*` 和规则模块，加入记忆污染过滤、结构化观察、关系状态、回填和主动关怀规则。
+- **OneBot 稳定性**：将连接、事件、投递、主动规划拆到 `src/atri_qq_bot/onebot/server_parts/`；每个会话独立排队，支持防抖合并、顺序投递、健康探测、视觉上下文 TTL 和超时降级。
+- **回复质量**：新增 `src/atri_qq_bot/insights/`，使用 SQLite store、异步 evaluation worker、六维 LLM 评测、语义评分和群聊主题聚类；这些任务在旁路运行，不阻塞主回复。
+- **WebUI**：将 `src/atri_webui/page.py` 拆为 `page/body_*`、`page/script_*`，并拆分 `server_parts/handler_*`；新增评测、群聊总结、音乐、QQ 空间和用户目录页面。
+- **QQ 空间**：新增 `plugins/qqzone/`、`qzone_admin.py` 和 `qzone_automation/`，通过本机 Bridge 执行，默认关闭；Cookie 只保留在 Bridge，不进入本项目配置。
+- **音乐与资源治理**：新增 `music/library.py`、`music/session.py`、运行时服务和跨进程推理锁；Ollama 按真实请求启动，推理完成后按配置释放模型，降低聊天、视觉、embedding 和语音之间的 GPU 争用。
+- **发布工程**：更新 `.env.example`、`.gitignore` 和 `uv.lock`，加入 LangGraph、SQLite checkpoint 及 Insights 可选依赖，明确源码、运行数据和隐私配置的边界。
 
 详细的评测、群聊总结和隐私配置见 [`docs/insights.md`](docs/insights.md)；语音运行时见 [`docs/voice.md`](docs/voice.md)。
 
