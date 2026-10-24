@@ -3,13 +3,70 @@ from __future__ import annotations
 from .support import ToolboxMixin
 
 
+def _knowledge_material(source, text, coverage, blocks=None):
+    return {"title": str(source).replace("\\", "/").rsplit("/", 1)[-1] or "资料",
+            "locator": str(source), "text": text, "coverage": coverage,
+            "blocks": blocks or [{"anchor": "text", "text": text}]}
+
+
 class ToolboxDocumentsMixin(ToolboxMixin):
     async def _analyze_url(self, url: str) -> ToolAnalysisResult:
-        parsed = urlparse(url)
-        domain = parsed.netloc.lower()
-        if "bilibili.com" in domain or "b23.tv" in domain:
-            return await self._analyze_bilibili(url)
-        return await self._analyze_webpage(url)
+        from ..toolbox_parts.douyin import is_douyin_url
+        if is_douyin_url(url):
+            result = await self._analyze_douyin(url)
+        else:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            if "bilibili.com" in domain or "b23.tv" in domain:
+                return await self._analyze_bilibili(url)
+            result = await self._analyze_webpage(url)
+        # QQ's message analyzer and desktop's durable imports enter here.
+        # Use the same reader fallback as the model's open_web_page tool,
+        # rather than letting imports stop at an empty HTML shell.
+        if (result.read_level == 'metadata_only' or not any(
+                m.get('text', '').strip() for m in result.knowledge_materials)) and bool(
+                getattr(self.config, 'web_search_enabled', True)):
+            from ..llm_tools.web_page_tool import open_web_page
+            evidence = await open_web_page({'url': url}, self.config)
+            if evidence.startswith(('已读取网页：', '已通过阅读代理读取网页：')):
+                from dataclasses import replace
+                result = replace(result, read_level='partial_content', findings=[*result.findings, evidence],
+                    knowledge_materials=[*result.knowledge_materials,
+                        _knowledge_material(url, evidence, 'reader_text_only')],
+                    limitations=[*result.limitations, '补读到网页文字；未读取图片、视频画面或音轨。'])
+        return result
+
+    async def _analyze_douyin(self, url: str) -> ToolAnalysisResult:
+        from ..toolbox_parts.douyin import public_item, share_target
+        final_url = url
+        try:
+            raw, final_url, _ = await self._fetch_url(url)
+            target = share_target(final_url)
+            if not target:
+                raise ValueError('未能从跳转地址识别抖音作品编号')
+            kind, item_id = target
+            item = public_item(_decode_bytes(raw), item_id)
+            if not item:
+                # The public mobile share page can expose JSON even when the
+                # desktop page is only a JavaScript shell.
+                share_url = f'https://www.iesdouyin.com/share/{kind}/{item_id}/'
+                raw, _, _ = await self._fetch_url(share_url)
+                item = public_item(_decode_bytes(raw), item_id)
+            if not item:
+                label = '图文' if kind == 'note' else '视频'
+                raise ValueError(f'已识别抖音{label}作品 {item_id}，但公开页面未提供作品内容（可能需要登录、页面动态加载或平台访问限制）；未读到图片、视频或音轨。可上传原图/视频，或粘贴正文后分析')
+            text = '抖音作品公开文案：' + item['desc'].strip()
+            author = item.get('author') or {}
+            if isinstance(author, dict) and isinstance(author.get('nickname'), str):
+                text += '\n作者：' + author['nickname']
+            return ToolAnalysisResult(category='日常生活乐趣', style='准确严谨', sources=[final_url],
+                findings=[text], read_level='partial_content',
+                limitations=['仅提取公开作品文案；未读取图片、视频画面或音轨。'],
+                knowledge_materials=[dict(_knowledge_material(final_url, text, 'public_share_caption_only'),
+                    raw=raw, filename='douyin-share.html')])
+        except Exception as exc:
+            return ToolAnalysisResult(category='日常生活乐趣', style='准确严谨', sources=[final_url],
+                limitations=[f'抖音链接解析失败：{_exception_summary(exc)}'], read_level='metadata_only')
 
     async def _analyze_webpage(self, url: str) -> ToolAnalysisResult:
         try:
@@ -49,12 +106,16 @@ class ToolboxDocumentsMixin(ToolboxMixin):
             findings=findings,
             limitations=[] if findings else ["网页可访问，但正文很少或被脚本动态加载。"],
             read_level="full_content" if body else "partial_content",
+            knowledge_materials=[dict(_knowledge_material(final_url, body, "extracted_html_text"),
+                                      raw=data, filename="page.html")],
         )
 
     async def _analyze_bilibili(self, url: str) -> ToolAnalysisResult:
         findings: list[str] = []
+        materials = []
         limitations: list[str] = []
         sources = [url]
+        final_url = url
 
         try:
             data, final_url, _ = await self._fetch_url(url)
@@ -62,9 +123,15 @@ class ToolboxDocumentsMixin(ToolboxMixin):
             sources = [final_url]
         except Exception as exc:
             html_text = ""
+            # A short link may have resolved successfully before the video page
+            # rejected the request. Its BV number is still usable by the API.
+            response = getattr(exc, 'response', None)
+            if response is not None and _is_bilibili_url(str(response.url)):
+                final_url = str(response.url)
+                sources = [final_url]
             limitations.append(f"B站页面暂时读取失败：{exc}")
 
-        bvid = _extract_bvid(url) or _extract_bvid(html_text)
+        bvid = _extract_bvid(final_url) or _extract_bvid(url) or _extract_bvid(html_text)
         title = _extract_html_title(html_text)
         desc = _extract_meta_description(html_text)
 
@@ -73,6 +140,7 @@ class ToolboxDocumentsMixin(ToolboxMixin):
             api_result = await self._fetch_bilibili_api(bvid)
             findings.extend(api_result.findings)
             limitations.extend(api_result.limitations)
+            materials.extend(api_result.knowledge_materials)
         if title:
             findings.append(f"视频页标题：{_clean_bilibili_title(title)}")
         if desc:
@@ -80,7 +148,7 @@ class ToolboxDocumentsMixin(ToolboxMixin):
         if not bvid:
             limitations.append("没有识别到 BV 号，只能基于页面标题/简介判断。")
         limitations.append("目前不会自动下载视频画面；能读到公开标题、简介、分区、统计和公开字幕时才会分析。")
-        read_level = "partial_content" if any("公开字幕摘要" in item for item in findings) else "metadata_only"
+        read_level = "partial_content" if materials else "metadata_only"
         return ToolAnalysisResult(
             category="日常生活乐趣",
             style="抽象有趣",
@@ -88,15 +156,19 @@ class ToolboxDocumentsMixin(ToolboxMixin):
             findings=_dedupe(findings),
             limitations=_dedupe(limitations),
             read_level=read_level,
+            knowledge_materials=materials,
         )
 
     async def _fetch_bilibili_api(self, bvid: str) -> ToolAnalysisResult:
         findings: list[str] = []
+        materials = []
         limitations: list[str] = []
         url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
         try:
             data, _, _ = await self._fetch_url(url)
             payload = json.loads(_decode_bytes(data))
+            if payload.get('code', 0) != 0:
+                raise ValueError(f"接口错误 {payload['code']}：{payload.get('message') or '未返回视频信息'}")
             info = payload.get("data") or {}
         except Exception as exc:
             return ToolAnalysisResult(
@@ -132,13 +204,20 @@ class ToolboxDocumentsMixin(ToolboxMixin):
                 subtitle = await self._fetch_bilibili_subtitle(bvid, cid)
                 findings.extend(subtitle.findings)
                 limitations.extend(subtitle.limitations)
+                materials.extend(subtitle.knowledge_materials)
+        if not materials and info.get('title'):
+            text = 'B站公开视频资料（仅标题、简介等元数据；未读取视频画面、音轨或字幕）：\n' + '\n'.join(findings)
+            materials.append(dict(_knowledge_material(f'https://www.bilibili.com/video/{bvid}', text,
+                                                      'bilibili_public_metadata_only'),
+                                  raw=data, filename='bilibili-metadata.json'))
         return ToolAnalysisResult(
             category="日常生活乐趣",
             style="抽象有趣",
             sources=[url],
             findings=findings,
             limitations=limitations,
-            read_level="partial_content" if any("公开字幕摘要" in item for item in findings) else "metadata_only",
+            read_level="partial_content" if materials else "metadata_only",
+            knowledge_materials=materials,
         )
 
     async def _fetch_bilibili_subtitle(self, bvid: str, cid: Any) -> ToolAnalysisResult:
@@ -146,6 +225,8 @@ class ToolboxDocumentsMixin(ToolboxMixin):
         try:
             data, _, _ = await self._fetch_url(url)
             payload = json.loads(_decode_bytes(data))
+            if payload.get('code', 0) != 0:
+                raise ValueError(f"接口错误 {payload['code']}：{payload.get('message') or '未返回字幕信息'}")
             subtitles = (((payload.get("data") or {}).get("subtitle") or {}).get("subtitles") or [])
         except Exception as exc:
             return ToolAnalysisResult(
@@ -195,6 +276,9 @@ class ToolboxDocumentsMixin(ToolboxMixin):
             style="抽象有趣",
             findings=[f"公开字幕摘要：{_shorten(subtitle_text, 900)}"],
             read_level="partial_content",
+            knowledge_materials=[dict(_knowledge_material(subtitle_url, subtitle_text, "public_subtitles_only",
+                [{"anchor": f"seconds:{item.get('from', '?')}-{item.get('to', '?')}",
+                  "text": str(item.get("content") or "")} for item in body]), raw=data, filename="subtitle.json")],
         )
 
     async def _analyze_path(self, path: Path) -> ToolAnalysisResult:
@@ -219,6 +303,21 @@ class ToolboxDocumentsMixin(ToolboxMixin):
         return await self._analyze_file_bytes(path.read_bytes(), str(path), path.name)
 
     async def _analyze_file_bytes(
+        self, data: bytes, source: str, filename: str = "", content_type: str = "",
+    ) -> ToolAnalysisResult:
+        try:
+            result = await self._parse_file_bytes(data, source, filename, content_type)
+        except Exception as exc:
+            result = ToolAnalysisResult("生活学术研究", "准确严谨", [source],
+                                        limitations=[f"解析失败：{exc}"], read_level="metadata_only")
+        materials = list(result.knowledge_materials)
+        if not materials:
+            materials = [_knowledge_material(source, "\n".join(result.findings), "analysis_summary:" + result.read_level)]
+        # Preserve the bytes actually read, including when the parser fails.
+        materials[0] = dict(materials[0], raw=data, filename=filename or _basename_from_ref(source))
+        return replace(result, knowledge_materials=materials)
+
+    async def _parse_file_bytes(
         self,
         data: bytes,
         source: str,
@@ -264,6 +363,7 @@ class ToolboxDocumentsMixin(ToolboxMixin):
 
     def _analyze_text_bytes(self, data: bytes, source: str, ext: str) -> ToolAnalysisResult:
         text = _decode_bytes(data)
+        material = _knowledge_material(source, text, "decoded_text")
         if ext in {".csv", ".tsv"}:
             delimiter = "\t" if ext == ".tsv" else ","
             rows = [
@@ -279,7 +379,7 @@ class ToolboxDocumentsMixin(ToolboxMixin):
                     limitations=["表格文件没有读到有效行。"],
                 )
             findings = _summarize_table_rows(rows, "表格文件")
-            return ToolAnalysisResult("生活学术研究", "准确严谨", [source], findings)
+            return ToolAnalysisResult("生活学术研究", "准确严谨", [source], findings, knowledge_materials=[material])
         if ext == ".json":
             try:
                 parsed = json.loads(text)
@@ -288,6 +388,7 @@ class ToolboxDocumentsMixin(ToolboxMixin):
                     "准确严谨",
                     [source],
                     [_summarize_json(parsed)],
+                    knowledge_materials=[material],
                 )
             except json.JSONDecodeError:
                 pass
@@ -303,6 +404,7 @@ class ToolboxDocumentsMixin(ToolboxMixin):
             "准确严谨",
             [source],
             [f"文档摘要：{_shorten(text, 1200)}"],
+            knowledge_materials=[material],
         )
 
     def _analyze_docx(self, path: Path) -> ToolAnalysisResult:
@@ -343,6 +445,8 @@ class ToolboxDocumentsMixin(ToolboxMixin):
             "准确严谨",
             [source],
             findings,
+            knowledge_materials=[_knowledge_material(source, text, "docx_text_parts_only",
+                [{"anchor": name, "text": part_text} for name, part_text in parts])],
         )
 
     def _analyze_pdf_bytes(self, data: bytes, source: str) -> ToolAnalysisResult:
@@ -378,6 +482,10 @@ class ToolboxDocumentsMixin(ToolboxMixin):
                 f"PDF 文档：共 {page_count} 页，已读取前 {min(page_count, 20)} 页可复制文字。",
                 f"PDF 摘要：{_shorten(text, 1400)}",
             ],
+            read_level="partial_content",
+            knowledge_materials=[_knowledge_material(source, text,
+                f"pdf_text_pages:1-{min(page_count, 20)}/{page_count};images_not_ocr",
+                [{"anchor": f"page:{i + 1}", "text": part} for i, part in enumerate(page_texts)])],
         )
 
     def _analyze_xlsx(self, path: Path) -> ToolAnalysisResult:
@@ -411,7 +519,10 @@ class ToolboxDocumentsMixin(ToolboxMixin):
         findings = [f"Excel 表格：读取到 {len(non_empty)} 个工作表，总计约 {total_data_rows} 行数据。"]
         for name, rows in non_empty[:3]:
             findings.extend(_summarize_table_rows(rows, f"工作表 {name}", include_samples=len(findings) < 5))
-        return ToolAnalysisResult("生活学术研究", "准确严谨", [source], findings)
+        sheet_text = "\n\n".join(name + "\n" + "\n".join("\t".join(map(str, row)) for row in rows) for name, rows in non_empty)
+        return ToolAnalysisResult("生活学术研究", "准确严谨", [source], findings,
+            knowledge_materials=[_knowledge_material(source, sheet_text, "xlsx_cached_cells_only",
+                [{"anchor": f"sheet:{name}", "text": "\n".join("\t".join(map(str, row)) for row in rows)} for name, rows in non_empty])])
 
     async def _analyze_file_ref(
         self,

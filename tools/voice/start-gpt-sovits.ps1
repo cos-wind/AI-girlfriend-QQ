@@ -31,12 +31,12 @@ $Python = Join-Path $RuntimeRoot ".venv\Scripts\python.exe"
 $Pythonw = Join-Path $RuntimeRoot ".venv\Scripts\pythonw.exe"
 $DefaultLocalModelsRoot = $env:LOCAL_MODELS_ROOT
 if ([string]::IsNullOrWhiteSpace($DefaultLocalModelsRoot)) {
-    $DefaultLocalModelsRoot = Join-Path ("D:\" + [char]0x672C + [char]0x5730 + [char]0x5927 + [char]0x6A21 + [char]0x578B) "models"
+    $DefaultLocalModelsRoot = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".ollama\models"
 }
 $DefaultProjectModelRoot = Join-Path $DefaultLocalModelsRoot "AI_ATRI"
 $AsciiModelRoot = $env:ASCII_ATRI_MODELS_ROOT
 if ([string]::IsNullOrWhiteSpace($AsciiModelRoot)) {
-    $AsciiModelRoot = "D:\AtriModels"
+    $AsciiModelRoot = Join-Path $ProjectDir "models"
 }
 
 if ([string]::IsNullOrWhiteSpace($ModelRoot)) { $ModelRoot = $DefaultProjectModelRoot }
@@ -105,8 +105,8 @@ $InitialGptConfigPath = $InitialGptWeights.Replace('\', '/')
 $InitialSovitsConfigPath = $InitialSovitsWeights.Replace('\', '/')
 $Config = @"
 custom:
-  bert_base_path: D:/AtriModels/voice/base/gpt-sovits/pretrained_models/chinese-roberta-wwm-ext-large
-  cnhuhbert_base_path: D:/AtriModels/voice/base/gpt-sovits/pretrained_models/chinese-hubert-base
+  bert_base_path: "$($BaseModels.Replace('\', '/'))/chinese-roberta-wwm-ext-large"
+  cnhuhbert_base_path: "$($BaseModels.Replace('\', '/'))/chinese-hubert-base"
   device: cuda
   is_half: true
   t2s_weights_path: $InitialGptConfigPath

@@ -8,7 +8,9 @@ class ToolboxVideoMixin(ToolboxMixin):
         findings = [f"视频文件：{filename or _basename_from_ref(source) or '未命名视频'}，约 {len(data)} 字节。"]
         limitations: list[str] = []
         frame_ocr_texts: list[str] = []
+        archive_blocks = []
         vision_text = ""
+        deadline = time.monotonic() + self.video_deadline_seconds
 
         if not self.video_frame_analysis_enabled:
             return ToolAnalysisResult(
@@ -23,6 +25,9 @@ class ToolboxVideoMixin(ToolboxMixin):
                 visual_fallback_available=_meaningful_video_title(
                     filename or _basename_from_ref(source)
                 ),
+                knowledge_materials=[{"title": filename or "视频原件", "locator": source,
+                    "raw": data, "filename": filename or "video.bin", "text": "",
+                    "coverage": "video_original_only;frame_analysis_disabled"}],
             )
 
         try:
@@ -49,15 +54,21 @@ class ToolboxVideoMixin(ToolboxMixin):
                             self._extract_image_ocr(frame),
                             timeout=min(
                                 5.0,
-                                max(0.2, self.video_deadline_seconds - 25.0),
+                                max(0.2, deadline - time.monotonic()),
                             ),
                         )
                     except asyncio.TimeoutError:
                         ocr_result = OcrExtraction(error="视频帧 OCR 超时")
                     if ocr_result.text:
+                        archive_blocks.append({"anchor": f"sampled_frame:{index};timestamp_unknown", "text": ocr_result.text})
                         frame_ocr_texts.append(
                             f"帧 {index}：{_shorten(ocr_result.text, 500)}"
                         )
+                    elif ocr_result.error:
+                        limitations.append(f"帧 {index} OCR：{_shorten(ocr_result.error, 160)}")
+                    if time.monotonic() >= deadline:
+                        limitations.append("视频分析达到时间预算，后续帧未处理。")
+                        break
                 if frame_ocr_texts:
                     findings.append(
                         "独立 OCR 文字：" + "；".join(frame_ocr_texts)
@@ -93,7 +104,7 @@ class ToolboxVideoMixin(ToolboxMixin):
                         ),
                         timeout=min(
                             35.0,
-                            max(0.2, self.video_deadline_seconds - 24.0),
+                            max(0.2, deadline - time.monotonic()),
                         ),
                     )
                 except asyncio.TimeoutError:
@@ -130,6 +141,11 @@ class ToolboxVideoMixin(ToolboxMixin):
                 frame_ocr_texts
                 or _meaningful_video_title(filename or _basename_from_ref(source))
             ),
+            knowledge_materials=[{"title": filename or "视频抽样分析", "locator": source,
+                "raw": data, "filename": filename or "video.bin",
+                "text": "\n\n".join([b["text"] for b in archive_blocks] + ([vision_text] if vision_text else [])),
+                "blocks": archive_blocks + ([{"anchor": "sampled_frames_model_description", "text": vision_text}] if vision_text else []),
+                "coverage": "sampled_frames_only;no_audio;timestamps_unknown;model_description_unverified"}],
         )
 
     async def _fetch_url(self, url: str, filename_hint: str = "") -> tuple[bytes, str, str]:

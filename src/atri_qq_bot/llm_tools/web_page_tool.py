@@ -69,8 +69,9 @@ async def open_web_page(
                     raw = b"".join(chunks)
                     text = raw.decode(response.encoding or "utf-8", errors="replace")
                 extracted = extract_web_page_text(text)
-                if not extracted:
-                    return "网页读取失败：没有提取到可读正文。"
+                if not is_readable_page_text(extracted):
+                    fallback = await _jina_reader_fallback(current_url, max_chars, timeout)
+                    return fallback or "网页读取失败：没有提取到可读正文（空页面、动态加载或无效编码）。"
                 return (
                     f"已读取网页：{current_url}\n"
                     "以下是网页中实际提取到的正文，只能依据这些内容回答；缺失的信息不要补造：\n"
@@ -78,6 +79,10 @@ async def open_web_page(
                 )
             return "网页读取失败：页面跳转次数过多。"
     except Exception as exc:
+        # 直连失败（常见 403 反爬 / 超时）时，尝试 Jina Reader 代理降级。
+        fallback = await _jina_reader_fallback(current_url, max_chars, timeout)
+        if fallback:
+            return fallback
         return f"网页读取失败：{_short_error(exc)}。不要编造页面内容。"
 
 
@@ -187,6 +192,17 @@ def extract_web_page_text(value: str) -> str:
     return "\n".join(lines)
 
 
+def is_readable_page_text(value: str) -> bool:
+    """An HTTP success or undecoded binary is not evidence of reading a page."""
+    text = str(value or '').strip()
+    if not text:
+        return False
+    invalid = sum(ch == '\ufffd' or (ord(ch) < 32 and ch not in '\n\r\t') for ch in text)
+    if invalid / len(text) > .01:
+        return False
+    return not re.search(r'Warning: Target URL returned error|^Error\b|^Just a moment|^Access Denied', text, re.I)
+
+
 def _shorten(value: str, limit: int) -> str:
     text = str(value or "").strip()
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
@@ -200,7 +216,37 @@ def _request_headers() -> dict[str, str]:
     return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        # gzip/deflate work with every supported httpx installation. Claiming
+        # Brotli without its optional decoder makes compressed bytes look like
+        # a successful page read.
+        "Accept-Encoding": "gzip, deflate",
+        "Cache-Control": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
     }
+
+
+async def _jina_reader_fallback(url: str, max_chars: int, timeout: float) -> str:
+    """通过 Jina Reader 前缀服务提取正文，用于绕过强反爬站点。"""
+    import httpx
+
+    reader_url = f"https://r.jina.ai/{url}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.get(reader_url, headers=_request_headers())
+            response.raise_for_status()
+            text = response.text
+    except Exception:
+        return ""
+    # Reader metadata (title/URL) alone isn't page content either.
+    body = text.partition('Markdown Content:')[2].strip() if 'Markdown Content:' in text else text
+    if not is_readable_page_text(body) or not is_readable_page_text(text):
+        return ""
+    return (
+        f"已通过阅读代理读取网页：{url}\n"
+        "以下是提取到的正文，只能依据这些内容回答；缺失的信息不要补造：\n"
+        f"{_shorten(text, max_chars)}"
+    )

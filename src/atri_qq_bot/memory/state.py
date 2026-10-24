@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from .support import MemoryMixin
+from ..knowledge import KnowledgeStore as _KnowledgeStore
 
 
 class MemoryStateMixin(MemoryMixin):
     def __init__(self, path: Path, config: Any | None = None) -> None:
         self.path = path
+        self.knowledge = _KnowledgeStore.for_memory(path)
+        self._knowledge_config = config
         # WebUI 通过“临时文件 + os.replace”保存。仅比较 mtime/size 时，两个等长
         # 内容在部分 Windows 文件系统的同一时间粒度内可能被误判成未变化；加入
         # 文件标识与 ctime 后，消息进程能可靠接住 WebUI 的最新人工编辑。

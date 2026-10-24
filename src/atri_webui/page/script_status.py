@@ -1,6 +1,26 @@
 from __future__ import annotations
 
-PART = r"""  const s = await api('/api/status');
+PART = r"""async function loadStatus() {
+  const s = await api('/api/status');
+  // 三个后台服务的状态统一在这里显示：语音服务、歌曲工作台、QQ 空间 Bridge。
+  // 开关卡片里不再重复写状态，避免同一个事实出现在两处。
+  const [voiceSwitch, workbench, qzoneBridge] = await Promise.all([
+    api('/api/voice/service').catch(()=>null),
+    api('/api/music/entry-status').catch(()=>null),
+    api('/api/qzone/bridge').catch(()=>null)
+  ]);
+  window._voiceServiceSwitch = voiceSwitch;
+  window._musicWorkbench = workbench;
+  window._qzoneBridge = qzoneBridge;
+  const voiceButton = $('voiceServiceStartButton');
+  if(voiceButton && voiceSwitch) {
+    updateVoiceServiceButton();
+  }
+  const qzoneStart = $('qzoneBridgeStartButton'), qzoneStop = $('qzoneBridgeStopButton');
+  if(qzoneBridge) {
+    if(qzoneStart) qzoneStart.disabled = !!qzoneBridge.running;
+    if(qzoneStop) qzoneStop.disabled = !qzoneBridge.running;
+  }
   const cards = [
     ['Atri 服务', s.atri, s.atri ? '正常' : '未连接'],
     ['NapCat 连接', s.napcat, s.napcat ? '正常' : '未连接'],
@@ -11,6 +31,31 @@ PART = r"""  const s = await api('/api/status');
     ],
     ['语音服务', s.voice, s.voice ? '正常' : '未连接'],
     ['WebUI', s.webui, s.webui ? '正常' : '未连接'],
+    [
+      '语音服务 8790',
+      Boolean(voiceSwitch?.running),
+      voiceSwitch
+        ? (voiceSwitch.running ? (voiceSwitch.ready ? '运行中 · 模型已就绪' : '运行中 · 模型预热中') : '未运行 · 可在「高级」页启动')
+        : '状态读取失败'
+    ],
+    [
+      '歌曲工作台',
+      Boolean(workbench?.web?.running),
+      workbench
+        ? (workbench.web?.running
+            ? (workbench.bridge?.running ? '界面与桥接在线' : '界面在线 · 桥接未启动')
+            : '未运行 · 可在「高级」页启动')
+        : '状态读取失败'
+    ],
+    [
+      'QQ 空间 Bridge',
+      Boolean(qzoneBridge?.running),
+      qzoneBridge
+        ? (qzoneBridge.running
+            ? `运行中 · 端口 ${qzoneBridge.port}`
+            : `未运行 · 端口 ${qzoneBridge.port}${qzoneBridge.autostart_in_env ? ' · 会随桌宠启动' : ' · 只能在「高级」页手动启动'}`)
+        : '状态读取失败'
+    ],
     ['聊天模型', Boolean(s.model), s.model || '未配置'],
     [
       '视觉模型',
@@ -30,7 +75,10 @@ PART = r"""  const s = await api('/api/status');
   if(s.napcat_webui && s.napcat_webui.url) {
     cards.push(['NapCat WebUI', Boolean(s.napcat_webui.reachable), s.napcat_webui.reachable ? '可访问（开发页可打开链接）' : '端口未响应']);
   }
-  $('status').innerHTML = cards.map(([k,v,text])=>`<div class="pill"><span>${k}</span><span class="${v?'ok':'bad'}">${escapeHtml(text)}</span></div>`).join('')
+  // 状态值：正常用绿色（.ok），异常用 .bad。但状态条的异常值只做「淡灰」提示——
+  // 这些服务本来就是手动启动、平时不运行，红色太抢眼。用一个组合类 .soft 覆盖颜色，
+  // 不动全局 .bad，其它页面的错误提示仍然是红的。
+  $('status').innerHTML = cards.map(([k,v,text])=>`<div class="pill"><span>${k}</span><span class="${v?'ok':'bad soft'}">${escapeHtml(text)}</span></div>`).join('')
   + `<p class="note">机器人 QQ：${escapeHtml(s.bot_qq)}<br>接口：${escapeHtml(s.base_url)}<br>回复模式：${escapeHtml(s.reply_mode)}${s.napcat_detail ? '<br>NapCat：' + escapeHtml(s.napcat_detail) : ''}</p>`;
 }
 async function loadDeveloper(force=false) {

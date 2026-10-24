@@ -1,9 +1,8 @@
-"""一次性 SenseVoice 工作进程。
+"""ASR child protocol: one model, serial requests, exit on parent EOF.
 
-该模块只处理一条音频后退出。退出是 Windows 上可靠释放 PyTorch/ONNX
-提交内存的边界，不能改成长驻服务。
+Only job paths pass through stdin. Results are atomically published and removed
+by the owner; recording contents and transcripts never enter service logs.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -13,16 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import VoiceServiceConfig
-from .providers import ProviderError, SenseVoiceProvider
+from .providers import SenseVoiceProvider
 
 
-async def _transcribe(request_path: Path) -> dict[str, Any]:
-    payload = json.loads(request_path.read_text(encoding="utf-8"))
+def _provider() -> SenseVoiceProvider:
     config = VoiceServiceConfig.from_env()
-    provider = SenseVoiceProvider(
-        config.asr_model,
-        config.asr_device,
-        config.modelscope_cache,
+    return SenseVoiceProvider(
+        config.asr_model, config.asr_device, config.modelscope_cache,
         vad_model=config.asr_vad_model,
         vad_max_segment_ms=config.asr_vad_max_segment_ms,
         audio_cache_dir=config.cache_dir / "asr-normalized",
@@ -30,34 +26,51 @@ async def _transcribe(request_path: Path) -> dict[str, Any]:
         preprocess_enabled=config.asr_preprocess_enabled,
         max_duration_seconds=config.asr_max_duration_seconds,
     )
+
+
+async def _transcribe(provider: SenseVoiceProvider, request_path: Path) -> dict[str, Any]:
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    if payload.get("action") == "load":
+        await provider.warmup()
+        return {"ok": True, "timings": {}}
     result = await provider.transcribe(
         Path(str(payload.get("audio_path") or "")),
         str(payload.get("language") or "auto"),
     )
     return {
-        "ok": True,
-        "text": result.text,
-        "language": result.language,
-        "emotion": result.emotion,
-        "confidence": result.confidence,
+        "ok": True, "text": result.text, "language": result.language,
+        "emotion": result.emotion, "confidence": result.confidence,
+        "timings": provider.last_timings,
     }
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
-        return 2
-    request_path = Path(sys.argv[1]).resolve()
-    result_path = Path(sys.argv[2]).resolve()
+async def _job(provider: SenseVoiceProvider, request_path: Path, result_path: Path) -> bool:
     try:
-        payload = asyncio.run(_transcribe(request_path))
-    except (ProviderError, OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        payload = await _transcribe(provider, request_path)
+    except Exception as exc:
         payload = {"ok": False, "error": str(exc)}
     result_path.parent.mkdir(parents=True, exist_ok=True)
-    result_path.write_text(
-        json.dumps(payload, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    return 0 if payload.get("ok") else 1
+    temporary = result_path.with_suffix(result_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(result_path)
+    return bool(payload.get("ok"))
+
+
+async def _serve() -> int:
+    provider = _provider()
+    while line := await asyncio.to_thread(sys.stdin.readline):
+        request_path, result_path = json.loads(line)
+        await _job(provider, Path(request_path), Path(result_path))
+    return 0
+
+
+def main() -> int:
+    if sys.argv[1:] == ["--serve"]:
+        return asyncio.run(_serve())
+    if len(sys.argv) == 3:
+        success = asyncio.run(_job(_provider(), Path(sys.argv[1]), Path(sys.argv[2])))
+        return 0 if success else 1
+    return 2
 
 
 if __name__ == "__main__":

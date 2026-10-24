@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_ROOT = Path(os.environ.get("ATRI_CANDIDATES_ROOT", r"D:\本地大模型\models\AI_ATRI\voice\candidates"))
+DEFAULT_ROOT = Path(os.environ.get("ATRI_CANDIDATES_ROOT", str(Path(__file__).resolve().parents[2] / "models" / "voice" / "candidates")))
 
 
 @dataclass(frozen=True)

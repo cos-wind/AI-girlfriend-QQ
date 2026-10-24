@@ -1,6 +1,6 @@
 [project]
 name = "atri-qq-bot"
-version = "0.1.0"
+version = "0.5.0"
 description = "A minimal OneBot/NapCat QQ companion bot with an Atri persona."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,21 +22,13 @@ dependencies = [
 dev = [
   "pytest>=8.0.0",
 ]
-music = [
-  "numpy>=1.26.0,<3.0",
-  "pedalboard>=0.9.24,<1.0",
-  "scipy>=1.11.0,<2.0",
-  "soundfile>=0.12.0,<1.0",
-]
 insights = [
   "jieba>=0.42.1,<1.0",
   "sentence-transformers>=3.0.0,<6.0.0",
 ]
 
-[project.gui-scripts]
-atri-desktop-pet = "atri_desktop.app:main"
-
 [project.scripts]
+atri-qq-bot = "atri_qq_bot.__main__:main"
 atri-voice-service = "atri_voice_service.server:main"
 
 [build-system]
@@ -45,6 +37,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["atri_qq_bot*", "atri_webui*", "atri_shared*", "atri_voice_service*"]
 
-[tool.setuptools.package-data]
-atri_desktop = ["assets/*.ico", "assets/*.png", "assets/expressions/*.png"]
+[tool.setuptools]
+py-modules = ["atri_runtime"]
+

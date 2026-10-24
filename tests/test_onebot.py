@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +104,49 @@ def test_send_group_summary_uses_its_own_delivery_context(tmp_path) -> None:
             }
         ],
     }
+
+
+def test_group_history_uses_message_id_as_pagination_cursor() -> None:
+    """部分 NapCat 版本不返回 message_seq，不能因此只读取第一页。"""
+    server = object.__new__(OneBotServer)
+    websocket = object()
+    server._active_websockets = {websocket}
+    calls: list[dict[str, object]] = []
+    now = datetime.now().astimezone()
+
+    def item(message_id: int, at: datetime) -> dict[str, object]:
+        return {
+            "group_id": "20001",
+            "message_seq": "0",
+            "message_id": message_id,
+            "time": int(at.timestamp()),
+            "user_id": "10001",
+            "raw_message": f"m-{message_id}",
+        }
+
+    async def fake_call_action_and_wait(target, action, params, timeout):
+        assert target is websocket
+        assert action == "get_group_msg_history"
+        calls.append(dict(params))
+        if len(calls) == 1:
+            return {"status": "ok", "data": {"messages": [item(200, now), item(199, now - timedelta(minutes=1))]}}
+        if len(calls) == 2:
+            assert params["message_seq"] == "199"
+            assert params["reverse_order"] is True
+            assert params["disable_get_url"] is True
+            assert params["parse_mult_msg"] is False
+            return {"status": "ok", "data": {"messages": [item(198, now - timedelta(hours=2))]}}
+        return {"status": "ok", "data": {"messages": []}}
+
+    server.call_action_and_wait = fake_call_action_and_wait  # type: ignore[method-assign]
+    result = asyncio.run(
+        server.fetch_group_history(
+            "20001", now - timedelta(hours=1), now + timedelta(minutes=1), 100
+        )
+    )
+
+    assert [item["message_id"] for item in result] == [199, 200]
+    assert len(calls) == 2
 
 
 def test_text_delivery_waits_for_onebot_result_and_marks_qq_offline(monkeypatch) -> None:

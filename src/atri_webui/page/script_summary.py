@@ -20,7 +20,7 @@ function summaryPlanCell(groupId, kind, row) {
     '<label class="switch-line"><input id="summary_' + key + '_enabled" type="checkbox" ' + (enabled ? 'checked' : '') + '><span>' + label + '</span></label>' +
     '<input id="summary_' + key + '_next_at" type="datetime-local" value="' + escapeHtml(nextAt) + '" title="下一次自动生成并发送时间">' +
     (lastSent ? '<span class="summary-last-sent">上次成功发送：' + escapeHtml(String(lastSent).replace('T',' ')) + '</span>' : '<span class="summary-last-sent">尚未自动发送</span>') +
-    '<button class="ghost mini" data-group="' + escapeHtml(groupId) + '" data-kind="' + kind + '" onclick="generateGroupSummary(this.dataset.group,this.dataset.kind,true)">立即生成并发送</button></div>';
+    '<button class="ghost mini" data-group="' + escapeHtml(groupId) + '" data-kind="' + kind + '" onclick="generateGroupSummary(this.dataset.group,this.dataset.kind,true,false,this)">立即生成并发送</button><button class="ghost mini" title="生成图文报告并下载，不发送到 QQ" data-group="' + escapeHtml(encodeURIComponent(groupId)) + '" data-kind="' + kind + '" onclick="generateAndDownloadSavedGroupSummary(this)">立即生成并保存</button></div>';
 }
 function renderSummarySchedules(rows) {
   const target = $('summaryScheduleRows');
@@ -65,11 +65,89 @@ async function saveGroupSummarySchedule(encodedGroupId) {
     await loadGroupSummaryWorkspace();
   } catch(error) { toast('计划保存失败：' + error.message); }
 }
-async function generateGroupSummary(groupId, periodType, sendNow=true) {
+function summaryProgressHost(button) {
+  const context=button?.closest?.('.summary-context') || document.querySelector('.summary-context') || $('summaryScheduleRows')?.closest?.('.surface');
+  if(!context) return null;
+  let host=context.querySelector('.summary-task-progress');
+  if(!host) { host=document.createElement('div'); host.className='summary-task-progress'; context.prepend(host); }
+  return host;
+}
+function renderSummaryProgress(host, detail, label) {
+  if(!host) return;
+  const percent=Math.max(0,Math.min(100,Number(detail?.progress_percent||0)));
+  const status=String(detail?.status||'queued');
+  const stage=detail?.progress_stage || (status==='queued'?'已排队':status);
+  const extra=detail?.progress_detail || '';
+  host.innerHTML='<div class="entry-head"><strong>'+escapeHtml(label)+'</strong><span class="badge '+(status==='completed'?'active':(status==='failed'?'red':'warn'))+'">'+escapeHtml(stage)+'</span></div><div class="summary-progress-track"><span style="width:'+percent+'%"></span></div><div class="note">'+percent+'% · '+escapeHtml(extra || '正在等待任务状态…')+'</div>';
+}
+async function watchSummaryTask(summaryId, label, options={}) {
+  const host=options.host || null;
+  for(;;) {
+    try {
+      const data=await api('/api/group-summaries/detail?id='+encodeURIComponent(summaryId));
+      const detail=data.summary||{};
+      renderSummaryProgress(host,detail,label);
+      const status=String(detail.status||'');
+      if(status==='completed') {
+        if(options.download) downloadGroupSummaryImage(summaryId);
+        toast(label+(options.download?'已生成并开始下载':(options.send?'已生成并发送到群':'已生成')));
+        return detail;
+      }
+      if(status==='failed') {
+        const message=detail.error||detail.progress_detail||'生成失败';
+        if(host) host.innerHTML='<div class="bad">'+escapeHtml(label+'失败：'+message)+'</div>';
+        toast(label+'失败：'+message); return null;
+      }
+    } catch(error) {
+      // WebUI 短暂刷新或网络波动不能把仍在后台运行的任务误报为失败。
+      if(host) host.innerHTML='<div class="note">'+escapeHtml(label+'仍在后台运行，正在重新连接状态…')+'</div>';
+    }
+    await new Promise(resolve=>setTimeout(resolve,1200));
+  }
+}
+async function generateGroupSummary(groupId, periodType, sendNow=true, saveImage=false, button=null) {
   try {
-    await api('/api/group-summaries/generate', {method:'POST', body:JSON.stringify({group_id:groupId,period_type:periodType,send:Boolean(sendNow)})});
-    toast((periodType === 'daily' ? '日报' : (periodType === 'weekly' ? '周报' : '月报')) + (sendNow ? '已进入生成并发送队列' : '已进入生成队列'));
+    const result=await api('/api/group-summaries/generate', {method:'POST', body:JSON.stringify({group_id:groupId,period_type:periodType,send:Boolean(sendNow),save_image:Boolean(saveImage)})});
+    const periodLabel = periodType === 'daily' ? '日报' : (periodType === 'weekly' ? '周报' : '月报');
+    const label=periodLabel+(sendNow?'生成并发送':(saveImage?'生成并保存':'生成'));
+    toast(label+'已开始，正在读取 QQ 客户端历史');
+    void watchSummaryTask(String(result.id||''),label,{send:sendNow,download:false,host:summaryProgressHost(button)});
   } catch(error) { toast('生成失败：' + error.message); }
+}
+function groupSummaryPeriodLabel(periodType) {
+  return periodType === 'daily' ? '日报' : (periodType === 'weekly' ? '周报' : '月报');
+}
+function downloadGroupSummaryImage(summaryId) {
+  const link = document.createElement('a');
+  link.href = '/api/group-summaries/export?id=' + encodeURIComponent(summaryId) + '&format=image&download=1';
+  link.download = 'group-summary.png';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+async function generateAndDownloadSavedGroupSummary(button) {
+  const groupId = decodeURIComponent(button?.dataset?.group || '');
+  const periodType = button?.dataset?.kind || 'daily';
+  const label = groupSummaryPeriodLabel(periodType);
+  try {
+    const result = await api('/api/group-summaries/generate', {
+      method:'POST', body:JSON.stringify({group_id:groupId,period_type:periodType,send:false,save_image:true})
+    });
+    const summaryId = String(result.id || '');
+    if(!summaryId) throw new Error('未返回总结任务编号');
+    toast(label + '正在生成图文报告，完成后会自动下载');
+    await watchSummaryTask(summaryId,label+'生成并保存',{download:true,host:summaryProgressHost(button)});
+  } catch(error) { toast('生成并保存失败：' + error.message); }
+}
+function summaryTimeCoordinate(item) {
+  return String(item?.period_end || item?.created_at || '').replace('T',' ').slice(0,16) || '未记录时间';
+}
+function summaryTimelineMarkup(items, detailId, groupId, groupName) {
+  const ordered=[...items].sort((a,b)=>String(b.period_end||b.created_at||'').localeCompare(String(a.period_end||a.created_at||'')));
+  const groups=new Map();
+  ordered.forEach(item=>{ const date=summaryTimeCoordinate(item).slice(0,10)||'未记录日期'; if(!groups.has(date)) groups.set(date,[]); groups.get(date).push(item); });
+  return '<div class="summary-timeline">'+[...groups.entries()].map(([date,rows])=>'<section class="summary-timeline-day"><h4>'+escapeHtml(date)+'</h4>'+rows.map(item=>'<article class="summary-timeline-item"><div><strong>'+escapeHtml(({daily:'日报',weekly:'周报',monthly:'月报'}[item.period_type] || '群聊总结'))+'</strong><span class="note"> · '+escapeHtml(summaryTimeCoordinate(item))+' · '+Number(item.message_count||0)+' 条消息</span></div><div class="summary-actions"><span class="badge '+(item.status==='completed'?'active':(item.status==='failed'?'red':'warn'))+'">'+escapeHtml(item.progress_stage||item.status||'')+'</span><button class="ghost mini" data-id="'+escapeHtml(encodeURIComponent(item.id||''))+'" data-detail="'+escapeHtml(detailId||'')+'" onclick="viewSummaryDetail(this.dataset.id,this.dataset.detail)">展开</button><button class="ghost mini" data-id="'+escapeHtml(encodeURIComponent(item.id||''))+'" onclick="openSummaryImage(this.dataset.id)">图文</button></div></article>').join('')+'</section>').join('')+'</div>';
 }
 function toggleSummaryGroupDetails(detailId, encodedGroupId, encodedName) {
   const row = $(detailId);
@@ -88,7 +166,7 @@ async function loadSummaryGroupDetails(encodedGroupId, encodedName, detailId) {
   try {
     const data = await api('/api/group-summaries?group_id=' + encodeURIComponent(groupId) + '&limit=30');
     const items = data.items || [];
-    const content = items.length ? '<div class="summary-detail-list">' + items.map(item => '<div class="summary-detail-item"><div class="entry-head"><strong>' + escapeHtml(item.title || ({daily:'每日总结',weekly:'周报',monthly:'月度总结'}[item.period_type] || '群聊总结')) + '</strong><span class="badge ' + (item.status === 'completed' ? 'active' : (item.status === 'failed' ? 'red' : 'warn')) + '">' + escapeHtml(item.status || '') + '</span></div><div class="note">' + escapeHtml(item.period_label || '') + ' · ' + escapeHtml(String(item.created_at || '').replace('T',' ')) + ' · ' + Number(item.message_count || 0) + ' 条消息 · ' + (item.trigger_type === 'scheduled' ? '自动发送' : (item.trigger_type === 'manual_send' ? '手动生成并发送' : '仅生成')) + '</div><div class="summary-detail-content">' + escapeHtml(item.content || item.error || '报告正在生成…') + '</div><div class="summary-actions"><button class="ghost mini" data-id="' + escapeHtml(encodeURIComponent(item.id || '')) + '" data-detail="' + escapeHtml(detailId || summaryDetailRowId(groupId)) + '" onclick="viewSummaryDetail(this.dataset.id,this.dataset.detail)">查看完整内容</button><button class="ghost mini" data-id="' + escapeHtml(encodeURIComponent(item.id || '')) + '" onclick="openSummaryImage(this.dataset.id)">查看图文</button></div></div>').join('') + '</div>' : '<div class="empty">本群还没有生成总结。</div>';
+    const content = items.length ? summaryTimelineMarkup(items,detailId || summaryDetailRowId(groupId),groupId,groupName) : '<div class="empty">本群还没有生成总结。</div>';
     target.innerHTML = '<div class="section-head"><div><h3>' + escapeHtml(groupName) + ' · 总结详情</h3><p class="note">显示本群最近生成的日报、周报和月报；发送状态以记录状态为准。</p></div><button class="ghost" data-detail="' + escapeHtml(detailId || summaryDetailRowId(groupId)) + '" onclick="hideSummaryGroupDetails(this.dataset.detail)">收起</button></div>' + content;
   } catch(error) { target.innerHTML = '<div class="bad">详情读取失败：' + escapeHtml(error.message) + '</div>'; }
 }
@@ -109,5 +187,4 @@ function openSummaryImage(encodedId) {
   const id = decodeURIComponent(encodedId || '');
   window.open('/api/group-summaries/export?id=' + encodeURIComponent(id) + '&format=image', '_blank', 'noopener');
 }
-function showVoiceModule(module) {
 """

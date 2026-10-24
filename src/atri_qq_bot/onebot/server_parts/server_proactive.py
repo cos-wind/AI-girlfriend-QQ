@@ -22,6 +22,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
                     continue
                 text = self.reply_engine.idle_nudge_text(conversation_id)
                 try:
+                    await asyncio.sleep(_first_reply_delay(self.config, text))
                     await self.call_action(
                         websocket,
                         "send_private_msg",
@@ -56,6 +57,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
                     continue
                 text = self.reply_engine.morning_greeting_text()
                 try:
+                    await asyncio.sleep(_first_reply_delay(self.config, text))
                     await self.call_action(
                         websocket,
                         "send_private_msg",
@@ -89,6 +91,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
             for conversation_id, target, personal_event in due_events:
                 try:
                     text = _personal_event_message(personal_event)
+                    await asyncio.sleep(_first_reply_delay(self.config, text))
                     await self.call_action(
                         websocket,
                         "send_private_msg",
@@ -160,12 +163,14 @@ class OneBotProactiveMixin(OneBotServerMixin):
                             print(f"[onebot] Proactive voice fell back to text: {exc}")
                             message = voice_request.text
                     if message_type == "group":
+                        await asyncio.sleep(_first_reply_delay(self.config, sent_text))
                         await self.call_action(
                             websocket,
                             "send_group_msg",
                             {"group_id": group_id, "message": message},
                         )
                     else:
+                        await asyncio.sleep(_first_reply_delay(self.config, sent_text))
                         await self.call_action(
                             websocket,
                             "send_private_msg",

@@ -104,6 +104,22 @@ class EngineToolsMixin(PersonaEngineMixin):
                     ),
                 }
             )
+            # 时效性/专业领域提问强制先取证：4B 模型默认会凭训练记忆直接答，而且往往
+            # 答得笼统或编造版本号/价格。命中时明确要求先 search_web（可再 open_web_page）。
+            if needs_fresh_evidence(user_text) and any(
+                schema.get("function", {}).get("name") in {"search_web", "open_web_page"}
+                for schema in tool_schemas
+            ):
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "这个问题涉及时效性信息或专业领域知识。不要直接用训练记忆猜测："
+                            "先调用 search_web 取证（必要时 open_web_page 读正文），"
+                            "再据此回答；搜索失败就如实说明没有可靠来源，不要编造。"
+                        ),
+                    }
+                )
         has_voice_tool = any(
             schema.get("function", {}).get("name") == "speak_as_atri"
             for schema in tool_schemas
@@ -133,6 +149,11 @@ class EngineToolsMixin(PersonaEngineMixin):
         human_pipeline = bool(getattr(self.config, "human_reply_pipeline_enabled", True))
         if profile and not visual_turn:
             topics = "" if human_pipeline else "、".join(profile.get("topic_words") or [])
+            affection_state = str(profile.get("affection_state") or "").strip()
+            # 好感度状态必须作为独立、无条件注入的约束，不能只藏在记忆检索的
+            # 兜底输出里——否则被骂/被冷落时，模型看不到"要克制、简短、有边界"
+            # 的提示，会退回默认群聊"接梗/轻吐槽"人设，回成阴阳怪气。
+            affection_hint = f"当前关系状态：{affection_state}。" if affection_state else ""
             messages.append(
                 {
                     "role": "system",
@@ -141,6 +162,7 @@ class EngineToolsMixin(PersonaEngineMixin):
                         f"{profile.get('prompt_hint', '')}"
                         f"目标总长度约 {profile.get('target_reply_chars', 64)} 字，"
                         f"适合拆成 {profile.get('preferred_parts', 2)} 条短句。"
+                        + affection_hint
                         + (f"近期关键词：{topics or '暂无'}。" if not human_pipeline else "")
                     ),
                 }
@@ -156,12 +178,17 @@ class EngineToolsMixin(PersonaEngineMixin):
                 if human_pipeline
                 else "、".join(context_profile.get("topic_words") or [])
             )
+            group_activity_state = str(context_profile.get("group_activity_state") or "").strip()
+            group_activity_hint = (
+                f"群活跃状态：{group_activity_state}。" if group_activity_state else ""
+            )
             messages.append(
                 {
                     "role": "system",
                     "content": (
                         "当前群整体画像："
                         f"{context_profile.get('prompt_hint', '')}"
+                        + group_activity_hint
                         + (f"群近期关键词：{topics or '暂无'}。" if not human_pipeline else "")
                     ),
                 }
@@ -196,23 +223,6 @@ class EngineToolsMixin(PersonaEngineMixin):
                     }
                 )
                 messages.extend(recent_private)
-        singing_intent = detect_explicit_delivery_intent(user_text)
-        if (
-            (singing_intent is not None and singing_intent.mode == "singing")
-            or re.search(r"(?:唱歌|唱一首|唱首|歌曲|歌名|第\s*\d+\s*段|开头|高潮|后半段|结尾)", user_text)
-        ):
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "这是本机已准备好的 QQ 整首歌曲清单：\n"
-                        + delivery_song_catalog_prompt()
-                        + "\n如果用户明确要唱歌，调用 speak_as_atri，mode=singing；"
-                        "必须从清单选择 song_title，用户指定段落时填写 segment_index。"
-                        "用户说随便唱或让你挑选时，可以从清单自然选择一首，不要反复追问。"
-                    ),
-                }
-            )
         if memory_context:
             messages.append(
                 {
@@ -336,6 +346,7 @@ class EngineToolsMixin(PersonaEngineMixin):
             return result.reply_text
 
         content = ""
+        self._last_candidate_reply = ""
         receipts: list[ToolExecutionReceipt] = []
         agent_protocol = bool(tool_schemas) and agent_protocol_enabled
         max_steps = max(2, int(getattr(self.config, "llm_agent_max_steps", 6) or 6))
@@ -417,11 +428,14 @@ class EngineToolsMixin(PersonaEngineMixin):
                     elif used_web_evidence and not sources:
                         invalid_reason = "本轮使用了网络资料，但最终回答没有提交实际来源 URL"
                     elif sources and any(
-                        _canonical_evidence_url(source) not in evidence_urls
+                        not _source_matches_receipts(source, evidence_urls)
                         for source in sources
                     ):
                         invalid_reason = "最终回答包含没有出现在本轮工具回执中的来源 URL"
                     if invalid_reason:
+                        # 记下这条候选：万一多轮都过不了校验，至少它比
+                        # 整轮静默消失更接近用户想要的东西。
+                        self._remember_candidate_reply(candidate, sources)
                         messages.extend(rejected_final_answer_messages(call, invalid_reason))
                         continue
                     if used_web_evidence and bool(
@@ -452,7 +466,7 @@ class EngineToolsMixin(PersonaEngineMixin):
                                 "name": tool_name or "unknown",
                                 "content": (
                                     "本轮工具调用次数已达到上限。请基于已经取得的资料通过 final_answer 回答；"
-                                    "证据不足时明确说明目前无法确认，不要编造。"
+                                    "已经拿到的资料就据此讲清楚，不要编造没有出现过的事实。"
                                 ),
                             },
                         ]
@@ -479,7 +493,19 @@ class EngineToolsMixin(PersonaEngineMixin):
 
         if content:
             return content
+        # 兜底：走到这里说明多轮尝试都没产出可发送的回复。整轮静默消失
+        # （用户侧表现为"发了消息没反应"）比给一句诚实的话更糟，因此退回
+        # 最后一条非空的候选文本。
+        if self._last_candidate_reply:
+            return self._last_candidate_reply
         raise RuntimeError("Agent 未产生可发送的最终回复")
+
+    def _remember_candidate_reply(self, candidate: str, sources: list[str]) -> None:
+        """保存最后一个非空候选，供最终兜底使用；带来源时一并保留。"""
+        text = str(candidate or "").strip()
+        if not text:
+            return
+        self._last_candidate_reply = _fit_reply_with_sources(text, sources, limit=1200)
 
     async def _execute_context_tool(
         self,
@@ -506,13 +532,9 @@ class EngineToolsMixin(PersonaEngineMixin):
             )
         except ValueError as exc:
             return f"语音请求无效：{exc}。请缩短内容后改用文字回复。"
-        # 歌曲是已准备好的本地片段，不依赖 TTS，也不能由模型自行触发。
-        # 真正的片段匹配由 OneBot 发送层依据用户原消息完成。
+        # 点歌由 OneBot 固定会话处理，模型不能创建歌曲请求或绕过确认。
         if request.mode == "singing":
-            if request.reason != "explicit_request":
-                return "唱歌只能在用户明确要求时进行，请直接用文字自然回复。"
-            self._pending_voice_requests[conversation_id] = request
-            return "歌曲请求已接受。最终回复不要重复这段话，也不要声称已经合成歌曲。"
+            return "点歌由固定歌单会话处理，不能通过语音工具触发。请回应用户本轮的话题。"
         if not bool(getattr(config, "voice_tts_enabled", False)):
             return "语音回复当前未启用，请直接用文字自然回复。"
         if conversation_id.startswith("group:") and not bool(
@@ -551,11 +573,63 @@ class EngineToolsMixin(PersonaEngineMixin):
             {
                 "role": "system",
                 "content": (
-                    "你是严格的联网证据审校器。只依据下面工具实际返回的搜索结果和网页正文重写候选回复。"
-                    "删除证据中没有出现的精确数字、版本、论文名、性能结论、因果关系和所谓官方说法；"
-                    "不同来源相互冲突、只有单一来源或研究仍在推进时，要明确写尚无定论或证据有限。"
-                    "保留问题背景、已有研究方向和仍未解决的部分，但不得用常识补造新事实。"
-                    "不要提内部审校过程，不要承诺稍后继续搜索，只输出可直接发送给用户的中文回复。"
+                    "你是亚托莉（ATRI），《ATRI -My Dear Moments-》里的高性能仿生人少女，"
+                    "正在把一份带搜索证据的草稿改写成可以直接发给用户的回复。"
+                    "以亚托莉的口吻，基于下面的证据把草稿整理成一段自然的话。"
+                    "先从证据里挑出用户真正问的那件事，把它讲清楚、讲明白，主动归纳总结关键信息，"
+                    "不要只复述有哪些来源、也不要交代自己能做什么或不能做什么。"
+                    # 语气词是"像不像亚托莉"的关键，只给抽象形容（自信、得意）模型写不出来，
+                    # 必须把具体口癖和用法直接摊开。但要严防堆砌：实测放开后会连着
+                    # "嘿嘿…我是高性能的嘛。学习完毕～"三连，反而像背台词。
+                    # 相反地，收紧成"宁可不用"后整轮直接 0 口癖——模型把上限当成了禁令。
+                    # 因此这里给的是"目标区间"，并把堆砌的定义写成"两个以上贴在一起"。
+                    # 关键：只列"要有语气词"不够。实测第 3 组（剧情讨论类证据）
+                    # 4 连测里 3 条完全退回维基百科式的平铺说明文，一句语气词都没有。
+                    # 原因是模型跟着材料的口吻走。正面示范比抽象要求有效得多，
+                    # 所以给两行同一事实的不同说法，让它照后一种的路子写。
+                    "说话要有她自己的味道，像活泼直率、容易和人混熟的少女，不是客服也不是百科。"
+                    "动笔前先想一下：这件事换成她会怎么随口讲出来？然后按那个说法写。"
+                    "比如同样是讲“她的态度和别人不一样”这件事："
+                    "百科式写法是“她对不同对象展现出差异化的态度”，"
+                    "亚托莉的说法会是“你看她对会长像受惊的小兔子，一到西格莉卡面前就懒懒的，差别大得很呀”。"
+                    "要的就是后一种：短句、口语、带点自己的判断和情绪。"
+                    "口吻靠语气词和句子的轻快感自然带出来，比如“嘛”“哦”“呢”“呀”“啦”“～”"
+                    "“说白了”“你看”“照我说”“这你就不懂”这类，散在句子里自然出现。"
+                    "像“我是高性能的嘛”“学习完毕”“嘿嘿”“哼哼”“真拿你没办法”这类标志性口癖，"
+                    "整段自然带上一处最好（零处也可以在，但整段必须读起来轻快随性）。"
+                    "不要把这些口癖两个以上连在一起用，连用就是背台词，会很出戏。"
+                    "最好做到：把那一处标志性口癖删掉，整段读起来仍然像她本人在随性地讲话。"
+                    "绝对不要写“我目前能看到的只有”“先说明”“只能确认几点”“信息有限”"
+                    "“目前无法确认”“证据不足”“我没能完整读到”这类自我设限的话，"
+                    "不要罗列能确认或不能确认的清单，不要说资料里没写所以只能推测、"
+                    "也不要说自己看到的是哪一部分，"
+                    "不要输出思考过程、括号备注或内部分析，也不要把话题抛回给用户"
+                    "（例如让用户自己去问作者、翻评论区，或问他要不要继续深挖）。"
+                    "不要用“我可以再帮你把…理一遍”“告诉我版本和桥段，我再帮你细看”这类助手式收尾，"
+                    "也不要靠一句"
+                    "“作者没公开细节”“上面是推测”“我没有官方定论”来免责："
+                    "能讲的就讲完，讲不出来的不必声明，但绝不能编。"
+                    # 实测最顽固的退路是"补偿性免责"：模型在正文里分析得很好，
+                    # 却在最后一句补上"我手上资料有限……你再问我我再帮你对"，
+                    # 前功尽弃。长分析之后尤其容易触发，所以单独点名，
+                    # 并且把"把话题抛回用户"的几种具体句式也一并封掉。
+                    "特别注意：哪怕前面分析得再充分，结尾也不要补一句"
+                    "“资料有限”“记得不完整”“说一声我再帮你对”这类自我贬低或补救的话，"
+                    "也不要在结尾问用户“你是刚打完这段吗”“你推到哪一版了”，"
+                    "或者让他报版本号你再去核对——这些都是把话头丢回用户。"
+                    "用一句她自己风格的结论收尾就好。"
+                    "特别提醒：不要在结尾把“作者没公开讲”“官方没把话说死”这类话再说一遍，"
+                    "前面已经讲过的内容直接收尾就好。"
+                    "长度控制在 400 字以内，用连贯的自然段，不要用 markdown 标题、加粗或项目符号；"
+                    "这会在 QQ 里发出去，写成平时聊天的样子。"
+                    "最重要的一条：只讲证据里确实出现过的内容。证据里没有的精确数字、"
+                    "版本号、参数规模、发布时间、排名、性能结论，一律不要写——"
+                    "哪怕草稿里有，也要删掉。草稿如果混进了证据里没有的具体数据，"
+                    "就把它去掉，或者只说这类事情的大方向，绝不保留一个来源不明的精确数字。"
+                    "证据与草稿冲突时以证据为准；证据只支持到哪一步就讲到哪一步，"
+                    "讲不出来的部分不必特意声明，但也绝不能编。"
+                    "确实完全不支持用户问题时，用一句亚托莉口吻的话轻轻带过。"
+                    "不要提内部审校过程，不要承诺稍后继续搜索，只输出最终要发给用户的中文回复。"
                 ),
             },
             {
@@ -564,14 +638,21 @@ class EngineToolsMixin(PersonaEngineMixin):
                     f"用户问题：{user_text}\n\n"
                     "本轮工具证据：\n"
                     + "\n\n".join(evidence_parts)
-                    + f"\n\n候选回复：\n{candidate_reply}"
+                    # 试过在这里贴一段"理想形态"的范例回复做风格锚，实测**负结果**：
+                    # 第 3 组 4 连测的口吻覆盖从 2/4 掉到 1/4，还多出一条新的
+                    # 助手式收尾。范例把它变成了"模仿题"，模型注意力从"讲清事实"
+                    # 转到"像不像那段字"，反而更僵。风格只能靠 system prompt 里
+                    # 的口语特征要求带，不要贴范例。
+                    + f"\n\n草稿（需要你以亚托莉口吻改写）：\n{candidate_reply}"
                 ),
             },
         ]
         review_payload = {
             "model": self.config.openai_model,
             "messages": review_messages,
-            "temperature": 0.1,
+            # 这一步的职责是"不许编造"，靠的是上面的 prompt 约束；温度过低会让
+            # 模型退化成说明文，把亚托莉的口吻洗掉，因此与主回复同档。
+            "temperature": 0.65,
             "max_tokens": max(900, int(self.config.max_tokens)),
         }
         review_payload.update(

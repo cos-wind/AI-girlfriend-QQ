@@ -47,8 +47,14 @@ def publish_onebot_probe_result(
     *,
     detail: str = "",
     self_id: int | None = None,
+    peer_uin: int | None = None,
 ) -> None:
-    """发布 QQ 内核主动探测结果，区别于仅代表插件存活的 OneBot 心跳。"""
+    """发布 QQ 内核主动探测结果，区别于仅代表插件存活的 OneBot 心跳。
+
+    ``peer_uin`` 是 NapCat 实际登录的 QQ 号（来自 ``get_login_info``）。它和
+    ``BOT_QQ`` 不一致时，机器人会忽略所有事件（事件里的 ``self_id`` 不匹配），
+    所以这里把它写进状态文件，供 WebUI 与日志把"没回复"的原因显示出来。
+    """
     now = time.time()
     payload = _read_napcat_state_file()
     payload.update(
@@ -65,6 +71,8 @@ def publish_onebot_probe_result(
             "probe_self_id": int(self_id) if self_id else None,
         }
     )
+    if peer_uin is not None:
+        payload["peer_uin"] = int(peer_uin)
     _write_napcat_state_file(payload)
 
 
@@ -331,6 +339,14 @@ def runtime_status(config: BotConfig) -> dict[str, Any]:
         napcat_state = str(napcat_runtime.get("state") or "disconnected")
         napcat_detail = str(napcat_runtime.get("detail") or "")
     napcat_webui = napcat_webui_access()
+    # NapCat 登录号与 BOT_QQ 不一致时机器人不回复任何消息，这里暴露给 WebUI，
+    # 让"发了消息没反应"在状态面板上就能看出原因。
+    peer_uin = napcat_runtime.get("peer_uin")
+    try:
+        peer_uin = int(peer_uin) if peer_uin else None
+    except (TypeError, ValueError):
+        peer_uin = None
+    account_mismatch = bool(peer_uin) and peer_uin != int(getattr(config, "bot_qq", 0) or 0)
     cognition_status = _cognition_status(config)
     ollama_running = _is_port_listening(rows, 11434)
     ollama_on_demand = bool(
@@ -365,6 +381,8 @@ def runtime_status(config: BotConfig) -> dict[str, Any]:
         "napcat_transport": napcat_transport_connected,
         "napcat_state": napcat_state,
         "napcat_detail": napcat_detail,
+        "napcat_peer_uin": peer_uin,
+        "napcat_account_mismatch": account_mismatch,
         "napcat_last_event_at": last_event_at or None,
         "napcat_event_age_seconds": round(event_age_seconds, 1) if event_age_seconds is not None else None,
         "napcat_probe_ok": probe_ok if probe_known else None,

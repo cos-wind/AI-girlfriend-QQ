@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,7 @@ class SenseVoiceProvider:
         self._loading = False
         self._load_error = ""
         self._last_preprocess_error = ""
+        self.last_timings: dict[str, float] = {}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -76,6 +78,9 @@ class SenseVoiceProvider:
             "preprocess_enabled": self.preprocess_enabled,
             "audio_format": "16kHz mono PCM",
             "hotwords": self.lexicon.terms(),
+            "hotwords_supported": False,
+            "lexicon_mode": "postprocess_aliases",
+            "last_timings": dict(self.last_timings),
             "loaded": self._model is not None,
             "loading": self._loading,
             "load_error": self._load_error,
@@ -96,7 +101,9 @@ class SenseVoiceProvider:
         await asyncio.to_thread(gc.collect)
 
     async def transcribe(self, audio_path: Path, language: str) -> TranscriptionResult:
+        started = time.perf_counter()
         model = await self._get_model()
+        loaded = time.perf_counter()
         prepared = PreparedAudio(Path(audio_path).resolve())
         self._last_preprocess_error = ""
         try:
@@ -111,6 +118,7 @@ class SenseVoiceProvider:
             raise ProviderError(str(exc)) from exc
         except AudioPreprocessError as exc:
             self._last_preprocess_error = str(exc)
+        preprocessed = time.perf_counter()
         try:
             result = await asyncio.to_thread(
                 model.generate,
@@ -125,11 +133,18 @@ class SenseVoiceProvider:
             raise ProviderError(f"SenseVoice 识别失败：{exc}") from exc
         finally:
             prepared.cleanup()
+        inferred = time.perf_counter()
         raw_text = _sensevoice_result_text(result)
         text, detected_language, emotion = parse_sensevoice_output(raw_text)
         text = self.lexicon.correct(text)
         if not text:
             raise ProviderError("SenseVoice 没有识别出文本")
+        self.last_timings = {
+            "load_seconds": round(loaded - started, 4),
+            "preprocess_seconds": round(preprocessed - loaded, 4),
+            "inference_seconds": round(inferred - preprocessed, 4),
+            "provider_seconds": round(time.perf_counter() - started, 4),
+        }
         return TranscriptionResult(text, detected_language or language or "auto", emotion)
 
     async def _get_model(self) -> Any:
@@ -188,11 +203,10 @@ class SenseVoiceProvider:
 
 
 class IsolatedSenseVoiceProvider:
-    """在一次性子进程里执行 SenseVoice，确保 PyTorch 内存真正释放。
+    """Reuse one owned CPU worker until idle; GPU workers exit after each request.
 
-    Windows 下删除模型对象和 ``gc.collect`` 不能保证 PyTorch/ONNX 的提交内存
-    立即归还系统。让工作进程在一次识别后退出，可由操作系统完整回收资源，
-    而 8790 控制服务仍保持在线。
+    Process exit still guarantees Windows reclaims PyTorch commit memory. CPU
+    reuse is bounded and retains no VRAM alongside TTS or other GPU models.
     """
 
     def __init__(self, config: VoiceServiceConfig) -> None:
@@ -200,6 +214,16 @@ class IsolatedSenseVoiceProvider:
         self.lexicon = AsrLexicon(config.asr_lexicon_path)
         self._loading = False
         self._load_error = ""
+        self.last_timings: dict[str, float] = {}
+        self._worker: subprocess.Popen[str] | None = None
+        self._worker_loaded = False
+        self._request_lock = asyncio.Lock()
+        self._idle_task: asyncio.Task | None = None
+        self._keep_loaded = False
+
+    @property
+    def idle_seconds(self) -> float:
+        return self.config.asr_worker_idle_seconds if self.config.asr_device.lower() == "cpu" else 0.0
 
     def status(self) -> dict[str, Any]:
         return {
@@ -211,98 +235,182 @@ class IsolatedSenseVoiceProvider:
             "preprocess_enabled": self.config.asr_preprocess_enabled,
             "audio_format": "16kHz mono PCM",
             "hotwords": self.lexicon.terms(),
-            "loaded": False,
+            "loaded": self._worker_loaded and self._worker_alive(),
             "loading": self._loading,
             "isolated_worker": True,
+            "worker_pid": self._worker.pid if self._worker_alive() else None,
+            "worker_idle_seconds": self.idle_seconds,
+            "keep_loaded": self._keep_loaded,
+            "manual_residency_supported": self.config.asr_device.lower() == "cpu",
+            "model_control": True,
+            "hotwords_supported": False,
+            "lexicon_mode": "postprocess_aliases",
+            "last_timings": dict(self.last_timings),
             "load_error": self._load_error,
             "last_preprocess_error": "",
         }
 
     async def warmup(self) -> None:
-        # 预热会让数 GB 模型常驻，违背隔离进程的资源边界。
+        # Keep service startup lazy; do not compete with TTS model loading.
         return None
+
+    async def load_resident(self) -> None:
+        """Explicit user opt-in; ordinary service startup remains lazy."""
+        if self.config.asr_device.lower() != "cpu":
+            raise ProviderError("常驻识别目前仅支持 CPU，请将 ASR 设备设为 cpu 后重启语音服务")
+        async with self._request_lock:
+            self._cancel_idle()
+            try:
+                await self._transcribe(None, "auto")
+                self._keep_loaded = True
+            except BaseException:
+                self._keep_loaded = False
+                await asyncio.shield(self._stop_worker())
+                raise
+
+    def _worker_alive(self) -> bool:
+        return self._worker is not None and self._worker.poll() is None
+
+    def _start_worker(self) -> subprocess.Popen[str]:
+        from .process_utils import hidden_subprocess_options
+
+        env = os.environ.copy()
+        env.update({
+            "ATRI_ASR_MODEL": self.config.asr_model,
+            "ATRI_ASR_DEVICE": self.config.asr_device,
+            "MODELSCOPE_CACHE": str(self.config.modelscope_cache),
+            "ATRI_ASR_VAD_MODEL": self.config.asr_vad_model,
+            "ATRI_ASR_VAD_MAX_SEGMENT_MS": str(self.config.asr_vad_max_segment_ms),
+            "ATRI_ASR_PREPROCESS_ENABLED": str(self.config.asr_preprocess_enabled).lower(),
+            "ATRI_ASR_MAX_DURATION_SECONDS": str(self.config.asr_max_duration_seconds),
+            "ATRI_ASR_LEXICON_PATH": str(self.config.asr_lexicon_path),
+            "ATRI_VOICE_CACHE_DIR": str(self.config.cache_dir),
+        })
+        return subprocess.Popen(
+            [sys.executable, "-m", "atri_voice_service.asr_worker", "--serve"],
+            cwd=str(PROJECT_ROOT), stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", env=env, **hidden_subprocess_options(),
+        )
+
+    def _cancel_idle(self) -> None:
+        task, self._idle_task = self._idle_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _stop_worker(self) -> None:
+        child, self._worker = self._worker, None
+        self._worker_loaded = False
+        if child is None:
+            return
+
+        def stop() -> None:
+            if child.stdin:
+                try:
+                    child.stdin.close()
+                except OSError:
+                    pass
+            try:
+                child.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                child.terminate()
+                try:
+                    child.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=3)
+
+        await asyncio.to_thread(stop)
 
     async def unload(self) -> None:
-        # 子进程在每次调用结束后已经退出，没有父进程模型需要卸载。
-        return None
+        async with self._request_lock:
+            self._keep_loaded = False
+            self._cancel_idle()
+            await self._stop_worker()
+
+    async def release_after_request(self) -> None:
+        if not self._keep_loaded and self.idle_seconds <= 0:
+            await self.unload()
+
+    async def _stop_after_idle(self) -> None:
+        try:
+            await asyncio.sleep(self.idle_seconds)
+            async with self._request_lock:
+                if not self._keep_loaded:
+                    await self._stop_worker()
+        except asyncio.CancelledError:
+            return
 
     async def transcribe(self, audio_path: Path, language: str) -> TranscriptionResult:
+        async with self._request_lock:
+            self._cancel_idle()
+            try:
+                result = await self._transcribe(audio_path, language)
+            except BaseException:
+                await asyncio.shield(self._stop_worker())
+                raise
+            if self._keep_loaded:
+                pass
+            elif self.idle_seconds > 0:
+                self._idle_task = asyncio.create_task(self._stop_after_idle())
+            else:
+                await self._stop_worker()
+            return result
+
+    async def _transcribe(self, audio_path: Path | None, language: str) -> TranscriptionResult:
+        started = time.perf_counter()
         job_dir = self.config.cache_dir / "asr-jobs"
         job_dir.mkdir(parents=True, exist_ok=True)
         job_id = uuid.uuid4().hex
         request_path = job_dir / f"{job_id}.request.json"
         result_path = job_dir / f"{job_id}.result.json"
-        request_path.write_text(
-            json.dumps(
-                {
-                    "audio_path": str(Path(audio_path).expanduser().resolve()),
-                    "language": str(language or "auto"),
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        self._loading = True
+        request_path.write_text(json.dumps({
+            "action": "load" if audio_path is None else "transcribe",
+            "audio_path": str(Path(audio_path).expanduser().resolve()) if audio_path is not None else "",
+            "language": str(language or "auto"),
+        }, ensure_ascii=False), encoding="utf-8")
+        self._loading = not (self._worker_loaded and self._worker_alive())
         self._load_error = ""
+        self.last_timings = {}
+        succeeded = False
         try:
-            return_code = await asyncio.to_thread(
-                _run_asr_worker,
-                request_path,
-                result_path,
-                max(90, self.config.asr_max_duration_seconds + 90),
-            )
-            if not result_path.is_file():
-                raise ProviderError(
-                    f"SenseVoice 隔离进程异常退出（代码 {return_code}）"
-                )
+            if not self._worker_alive():
+                await self._stop_worker()
+                self._worker = self._start_worker()
+            assert self._worker is not None and self._worker.stdin is not None
+            self._worker.stdin.write(json.dumps([str(request_path), str(result_path)]) + "\n")
+            self._worker.stdin.flush()
+            deadline = started + max(90, self.config.asr_max_duration_seconds + 90)
+            while not result_path.is_file():
+                if not self._worker_alive():
+                    raise ProviderError("SenseVoice worker exited; the next request will restart it")
+                if time.perf_counter() >= deadline:
+                    raise ProviderError("SenseVoice worker timed out")
+                await asyncio.sleep(0.02)
             payload = json.loads(result_path.read_text(encoding="utf-8"))
+            self.last_timings = dict(payload.get("timings") or {})
+            self.last_timings["worker_seconds"] = round(time.perf_counter() - started, 4)
             if not payload.get("ok"):
-                raise ProviderError(str(payload.get("error") or "SenseVoice 识别失败"))
+                raise ProviderError(str(payload.get("error") or "SenseVoice transcription failed"))
             text = str(payload.get("text") or "").strip()
-            if not text:
-                raise ProviderError("SenseVoice 没有识别出文本")
+            if not text and audio_path is not None:
+                raise ProviderError("SenseVoice returned no text")
+            self._worker_loaded = True
+            succeeded = True
             return TranscriptionResult(
-                text,
-                str(payload.get("language") or language or "auto"),
-                str(payload.get("emotion") or "neutral"),
-                payload.get("confidence"),
+                text, str(payload.get("language") or language or "auto"),
+                str(payload.get("emotion") or "neutral"), payload.get("confidence"),
             )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        except (ProviderError, OSError, ValueError, TypeError) as exc:
             self._load_error = str(exc)
-            raise ProviderError(f"SenseVoice 隔离识别失败：{exc}") from exc
+            raise ProviderError(f"SenseVoice worker failed: {exc}") from exc
         finally:
             self._loading = False
+            if not succeeded:
+                await asyncio.shield(self._stop_worker())
             request_path.unlink(missing_ok=True)
             result_path.unlink(missing_ok=True)
-
-
-def _run_asr_worker(request_path: Path, result_path: Path, timeout_seconds: int) -> int:
-    options: dict[str, Any] = {
-        "cwd": str(PROJECT_ROOT),
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "timeout": max(30, int(timeout_seconds)),
-        "check": False,
-    }
-    if os.name == "nt":
-        options["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if hasattr(subprocess, "STARTUPINFO"):
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
-            startupinfo.wShowWindow = 0
-            options["startupinfo"] = startupinfo
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "atri_voice_service.asr_worker",
-            str(request_path),
-            str(result_path),
-        ],
-        **options,
-    )
-    return int(completed.returncode)
+            result_path.with_suffix(result_path.suffix + ".tmp").unlink(missing_ok=True)
 
 
 class GptSovitsProvider:
@@ -328,6 +436,7 @@ class GptSovitsProvider:
         self._last_inference_preset = ""
         self._last_postprocess: dict[str, float] | None = None
         self._last_postprocess_error = ""
+        self._last_split_fallback: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
         return {
@@ -339,6 +448,7 @@ class GptSovitsProvider:
             "postprocess_enabled": self.postprocess_enabled,
             "last_postprocess": self._last_postprocess,
             "last_postprocess_error": self._last_postprocess_error,
+            "last_split_fallback": self._last_split_fallback,
         }
 
     async def synthesize(
@@ -348,7 +458,88 @@ class GptSovitsProvider:
         *,
         variation: int = 0,
     ) -> SynthesisResult:
+        """一次语音会话；内置 ``cut0`` ↔ ``cut5`` 自动降级。
+
+        为什么需要降级
+        --------------
+        本地 v2Pro 模型没有哪一种切分方式**永远**安全（2026-10-05 实测）：
+
+        * ``cut0``（按标点整句送）在长句上会把已生成的前段当成参考继续续写，
+          产出「异常拖长 / 超长静音」的废音频 —— 例：25 个发音单位吐出 38 秒；
+        * ``cut5``（标点 + 长度二次切）在长句上稳定，但在短句上偶尔切得太碎、
+          韵律发飘。
+
+        于是：单次生成被自家质量检查判废（``AudioPreprocessError``）时，
+        **换另一种切分方式再试一次**，而不是只改随机种子重掷 ——
+        ``synthesize_with_quality`` 的 ``variation`` 重试只换种子，
+        对这种确定性退化无效。
+        """
         text_language = _tts_language(request.language, profile.text_language, request.text)
+        preset = _tts_inference_preset(profile, request.emotion, text_language)
+        spoken_text = self.prepare_spoken_text(request, profile)
+        if not spoken_text:
+            raise ProviderError("语音文本清理后为空")
+        split_method = _tts_split_method(spoken_text, text_language, preset=preset)
+        self._last_split_fallback = None
+        try:
+            return await self._synthesize_once(
+                request,
+                profile,
+                spoken_text=spoken_text,
+                text_language=text_language,
+                preset=preset,
+                split_method=split_method,
+                variation=variation,
+            )
+        except ProviderError as exc:
+            fallback = (
+                _alternate_split_method(split_method)
+                if _candidate_was_rejected(exc)
+                else None
+            )
+            if not fallback:
+                raise
+            # `exc` 在 except 块结束时会被 Python 解绑，先取出文本备用。
+            rejected_reason = str(exc)[:200]
+        try:
+            result = await self._synthesize_once(
+                request,
+                profile,
+                spoken_text=spoken_text,
+                text_language=text_language,
+                preset=preset,
+                split_method=fallback,
+                variation=variation,
+            )
+        except ProviderError as retry_exc:
+            self._last_split_fallback = {
+                "from": split_method,
+                "to": fallback,
+                "reason": rejected_reason,
+                "retry_error": str(retry_exc)[:200],
+            }
+            raise ProviderError(
+                f"{retry_exc}（已从 {split_method} 自动切换到 {fallback} 重试，仍未通过）",
+                retryable=retry_exc.retryable,
+            ) from retry_exc
+        self._last_split_fallback = {
+            "from": split_method,
+            "to": fallback,
+            "reason": rejected_reason,
+        }
+        return result
+
+    async def _synthesize_once(
+        self,
+        request: VoiceRequest,
+        profile: VoiceProfile,
+        *,
+        spoken_text: str,
+        text_language: str,
+        preset: str,
+        split_method: str,
+        variation: int,
+    ) -> SynthesisResult:
         reference, prompt_text, prompt_language = _reference_context(
             profile,
             request.emotion,
@@ -356,11 +547,7 @@ class GptSovitsProvider:
         )
         if not reference or not Path(reference).is_file():
             raise ProviderError("角色语音档案还没有有效的参考音频")
-        preset = _tts_inference_preset(profile, request.emotion, text_language)
         style = _tts_style(request.emotion, request.intensity, preset=preset)
-        spoken_text = self.prepare_spoken_text(request, profile)
-        if not spoken_text:
-            raise ProviderError("语音文本清理后为空")
         payload = {
             "text": spoken_text,
             "text_lang": text_language,
@@ -375,11 +562,7 @@ class GptSovitsProvider:
             "prompt_lang": prompt_language,
             "media_type": "wav",
             "streaming_mode": False,
-            "text_split_method": _tts_split_method(
-                spoken_text,
-                text_language,
-                preset=preset,
-            ),
+            "text_split_method": split_method,
             "top_k": style["top_k"],
             "top_p": style["top_p"],
             "temperature": style["temperature"],
@@ -699,14 +882,37 @@ def _tts_style(
     }
 
 
+_CUT0_UNITS_LIMIT = 42
+
+# 单次生成被判废时换用的切分方式。两种切分各有失效场景（见 synthesize 注释），
+# 所以这里做成对称映射：谁出的废音频就换另一个。
+_SPLIT_FALLBACK = {"cut0": "cut5", "cut5": "cut0"}
+
+
 def _tts_split_method(text: str, language: str, *, preset: str = "stable") -> str:
     if preset == "fidelity":
         return "cut5"
     if language == "en":
         units = len(re.findall(r"[A-Za-z0-9]+", text))
-        return "cut0" if units <= 18 else "cut5"
-    units = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fffA-Za-z0-9]", text))
-    return "cut0" if units <= 42 else "cut5"
+    else:
+        units = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fffA-Za-z0-9]", text))
+    return "cut0" if units <= _CUT0_UNITS_LIMIT else "cut5"
+
+
+def _alternate_split_method(split_method: str) -> str:
+    """另一种切分方式；未知输入退化为 cut5（长句上更稳的一档）。"""
+    return _SPLIT_FALLBACK.get(str(split_method or "").strip().lower(), "cut5")
+
+
+def _candidate_was_rejected(error: ProviderError) -> bool:
+    """这次生成的音频是否被**自家质量检查**判废（而非网络 / 引擎故障）。
+
+    ``postprocess_synthesized_audio`` 与 ``validate_synthesized_speech_timing``
+    抛的都是 ``AudioPreprocessError``，调用处又用 ``raise ... from exc`` 包成
+    ``ProviderError``，所以看 ``__cause__`` 就能区分「生成的候选不合格」（值得换
+    切分方式重试）与「GPT-SoVITS 不可用 / 返回空音频」（换切分方式没有意义）。
+    """
+    return isinstance(getattr(error, "__cause__", None), AudioPreprocessError)
 
 
 def _http_response_detail(response: httpx.Response) -> str:

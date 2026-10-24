@@ -139,9 +139,12 @@ def napcat_webui_access() -> dict[str, Any]:
 
 
 def _find_napcat_webui_config() -> Path | None:
+    from atri_runtime import user_root
     configured = str(dotenv_values(ENV_PATH).get("NAPCAT_DIR") or os.getenv("NAPCAT_DIR") or "").strip()
     roots = [Path(configured)] if configured else []
-    roots += [Path(r"D:\Tools\NapCat\OneKey"), Path(os.getenv("LOCALAPPDATA", "")) / "NapCat"]
+    roots.append(user_root() / "components" / "napcat")
+    if not False and os.getenv("LOCALAPPDATA"):
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "NapCat")
     for root in roots:
         direct = root / "config" / "webui.json"
         if direct.is_file():

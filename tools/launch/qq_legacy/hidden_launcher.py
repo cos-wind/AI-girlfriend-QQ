@@ -11,14 +11,22 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+from atri_runtime import user_root, resource_root, instance_suffix
 
 
-PROJECT_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_QQ_EXE = Path(r"C:\Program Files\Tencent\QQNT\QQ.exe")
+PROJECT_DIR = user_root()
+# 只是"最常见位置"的快速路径，不是唯一答案：系统盘可能不是 C，QQ 也可能被
+# 装到任何目录。真正的定位见 qq_executable() 的多源探测。
+DEFAULT_QQ_EXE = (
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tencent" / "QQNT" / "QQ.exe"
+)
 DEFAULT_NAPCAT_SEARCH_ROOTS = (
-    Path(r"D:\Tools\NapCat\OneKey"),
+    PROJECT_DIR.parent / "NapCat",
     Path(os.environ.get("LOCALAPPDATA", "")) / "NapCat",
 )
+pass
 NAPCAT_REQUIRED_FILES = (
     "NapCatWinBootMain.exe",
     "NapCatWinBootHook.dll",
@@ -36,12 +44,21 @@ NAPCAT_CONNECTION_POLL_SECONDS = 0.75
 OPTIONAL_SERVICES_WAIT_SECONDS = 30
 OPTIONAL_SERVICES_STAGGER_SECONDS = 2.0
 DEFAULT_OLLAMA_MODELS = Path.home() / ".ollama" / "models"
-DEFAULT_VOICE_ASCII_MODELS = Path(r"D:\AtriModels")
+DEFAULT_VOICE_ASCII_MODELS = PROJECT_DIR / "models"
 WEBUI_STATUS_URL = "http://127.0.0.1:8787/api/status"
 VOICE_HEALTH_URL = f"http://127.0.0.1:{VOICE_PORT}/health"
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "hidden-launcher.log"
+# 主体进程（python -m atri_qq_bot）自己的 stdout/stderr 落盘处。
+# 以前这里走 DEVNULL，主体崩在 import 阶段时一句报错都看不到。
+ATRI_SERVICE_LOG = LOG_DIR / "atri-service.log"
+ATRI_SERVICE_LOG_MAX_BYTES = 2 * 1024 * 1024
 NAPCAT_STATE_FILE = PROJECT_DIR / "data" / "runtime" / "napcat-state.json"
+# 快速登录账号覆盖：WebUI 切换账号时写这里，避免每次启动都用 BOT_QQ 自动登录旧号。
+#   * 文件不存在          → 沿用 BOT_QQ（历史行为）
+#   * off / manual / -    → 明确要求手动登录（不传 -q、不设 NAPCAT_QUICK_ACCOUNT）
+#   * 纯数字              → 用这个号快速登录
+NAPCAT_QUICK_ACCOUNT_FILE = PROJECT_DIR / "data" / "runtime" / "napcat-quick-account.txt"
 NAPCAT_WEBUI_PORT = 6099
 DEFAULT_QQ_PROFILE_DIR = PROJECT_DIR / "data" / "runtime" / "qq-profile"
 _LAUNCHER_MUTEX_HANDLE: int | None = None
@@ -93,7 +110,9 @@ def acquire_single_instance_mutex(name: str) -> bool:
         return True
     global _LAUNCHER_MUTEX_HANDLE
     kernel32 = ctypes.windll.kernel32
-    handle = kernel32.CreateMutexW(None, False, name)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.CreateMutexW(None, False, name + instance_suffix())
     if not handle:
         return True
     already_exists = kernel32.GetLastError() == 183
@@ -131,6 +150,37 @@ def popen_hidden(
     )
 
 
+def popen_logged(
+    args: list[str] | tuple[str, ...],
+    *,
+    cwd: Path | str | None = None,
+    env: dict[str, str] | None = None,
+    log_path: Path,
+) -> subprocess.Popen:
+    """同 ``popen_hidden``，但把子进程输出追加到 ``log_path``。
+
+    ⚠️ 为什么必须有这一个（2026-10-01 排障学到的）：主体崩在 import 阶段时
+    （典型是 venv 缺 ``dotenv`` / ``httpx`` 这类包），``DEVNULL`` 会让失败
+    **完全无声** —— launcher 只会报「did not report ready within timeout」，
+    界面上还显示「启动命令已发出」，看着就像点了没反应。
+    留一份子进程输出，下次直接 tail 就能看到真正的 ImportError。
+    """
+    try:
+        handle = open(str(log_path), "ab")
+    except OSError:
+        return popen_hidden(args, cwd=cwd, env=env)
+    return subprocess.Popen(
+        [str(arg) for arg in args],
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=handle,
+        stderr=handle,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        startupinfo=startupinfo(),
+    )
+
+
 def start_launcher_mode_in_background(mode: str) -> bool:
     """Run a launcher slice in its own hidden process.
 
@@ -138,12 +188,12 @@ def start_launcher_mode_in_background(mode: str) -> bool:
     up the core launcher or delay the local ATRI service.
     """
     python_exe = PROJECT_PYTHONW if PROJECT_PYTHONW.exists() else PROJECT_PYTHON
-    if not python_exe.exists():
+    if not False and not python_exe.exists():
         log(f"Cannot start launcher mode {mode}: project Python was not found.")
         return False
     try:
         popen_hidden(
-            [str(python_exe), str(Path(__file__).resolve()), mode],
+            ([str(python_exe), str(Path(__file__).resolve()), mode]),
             cwd=PROJECT_DIR,
         )
     except OSError as exc:
@@ -207,12 +257,208 @@ def bot_qq_uin() -> str:
     return value if value.isdigit() else ""
 
 
+QQ_EXE_FILE_NAME = "QQ.exe"
+# QQ 的安装器允许自定义目录和盘符，所以下面只把官方默认布局当快速路径，
+# 真正定位依靠注册表、运行中进程和常见盘符扫描，绝不把单一路径当唯一答案。
+QQ_INSTALL_LAYOUTS = (
+    Path("Tencent") / "QQNT" / "QQ.exe",
+    Path("Tencent") / "QQ" / "Bin" / "QQ.exe",
+)
+QQ_UNINSTALL_DISPLAY_NAMES = ("qq", "qqnt")
+
+
+def _as_qq_executable(raw: object) -> Path | None:
+    """把配置或注册表里的各种写法收敛成一个确实存在的 QQ.exe。"""
+    text = str(raw or "").strip().strip('"')
+    if not text:
+        return None
+    # DisplayIcon 形如 "C:\...\QQ.exe,0"，InstallLocation 则是目录。
+    if "," in text:
+        text = text.split(",", 1)[0].strip().strip('"')
+    try:
+        path = Path(text).expanduser()
+    except (OSError, ValueError):
+        return None
+    candidates = [path]
+    if path.suffix.casefold() != ".exe":
+        candidates.insert(0, path / QQ_EXE_FILE_NAME)
+    for candidate in candidates:
+        if candidate.name.casefold() != QQ_EXE_FILE_NAME.casefold():
+            continue
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _qq_from_app_paths() -> Path | None:
+    if os.name != "nt":
+        return None
+    import winreg
+
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for key_name in (
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\QQ.exe",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\QQ.exe",
+        ):
+            try:
+                with winreg.OpenKey(hive, key_name) as key:
+                    hit = _as_qq_executable(winreg.QueryValue(key, None))
+            except OSError:
+                continue
+            if hit:
+                return hit
+    return None
+
+
+def _qq_from_uninstall_entries() -> Path | None:
+    """卸载登记项里的 DisplayIcon 是当前 QQ 安装器唯一稳定留下的路径线索。"""
+    if os.name != "nt":
+        return None
+    import winreg
+
+    roots = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+    for hive, root in roots:
+        try:
+            with winreg.OpenKey(hive, root) as parent:
+                subkey_count = winreg.QueryInfoKey(parent)[0]
+                for index in range(subkey_count):
+                    try:
+                        with winreg.OpenKey(parent, winreg.EnumKey(parent, index)) as entry:
+                            display = str(
+                                winreg.QueryValueEx(entry, "DisplayName")[0] or ""
+                            ).strip().casefold()
+                            # 精确匹配，避免 QQ音乐 / QQ浏览器 / QQ输入法 误命中。
+                            if display not in QQ_UNINSTALL_DISPLAY_NAMES:
+                                continue
+                            for value_name in ("DisplayIcon", "InstallLocation"):
+                                try:
+                                    raw = winreg.QueryValueEx(entry, value_name)[0]
+                                except OSError:
+                                    continue
+                                hit = _as_qq_executable(raw)
+                                if hit:
+                                    return hit
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return None
+
+
+def _qq_from_running_process() -> Path | None:
+    """QQ 正在运行时直接读进程映像路径，对无注册表登记的安装最可靠。"""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return None
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        has_entry = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while has_entry:
+            if str(entry.szExeFile).casefold() == QQ_EXE_FILE_NAME.casefold():
+                # PROCESS_QUERY_LIMITED_INFORMATION 才能读高权限进程的映像路径。
+                handle = kernel32.OpenProcess(0x1000, False, entry.th32ProcessID)
+                if handle:
+                    try:
+                        size = wintypes.DWORD(1024)
+                        buffer = ctypes.create_unicode_buffer(1024)
+                        if kernel32.QueryFullProcessImageNameW(
+                            handle, 0, buffer, ctypes.byref(size)
+                        ):
+                            image = buffer.value
+                            # NapCat 自己的目录下也放了一份 QQ.exe 副本，别把副本
+                            # 当成用户安装的 QQ，否则会指向一个随时会被清理的目录。
+                            if "napcat" not in image.casefold():
+                                hit = _as_qq_executable(image)
+                                if hit:
+                                    return hit
+                    finally:
+                        kernel32.CloseHandle(handle)
+            has_entry = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return None
+
+
+def _qq_from_common_install_dirs() -> Path | None:
+    for letter in "CDEFG":
+        drive = Path(f"{letter}:/")
+        try:
+            if not drive.exists():
+                continue
+        except OSError:
+            continue
+        for base in ("Program Files", "Program Files (x86)"):
+            for layout in QQ_INSTALL_LAYOUTS:
+                hit = _as_qq_executable(drive / base / layout)
+                if hit:
+                    return hit
+    return None
+
+
 def qq_executable() -> Path:
-    configured = (
-        project_env_value("QQ_EXE")
-        or os.environ.get("QQ_EXE", "")
-    ).strip()
-    return Path(configured).expanduser() if configured else DEFAULT_QQ_EXE
+    """按可靠性从高到低定位 QQ.exe，任何一环失败都继续往下找。"""
+    # 1) 用户显式配置优先，但必须是真实存在的 QQ.exe，写错就继续探测。
+    for raw in (project_env_value("QQ_EXE"), os.environ.get("QQ_EXE", "")):
+        hit = _as_qq_executable(raw)
+        if hit:
+            return hit
+    # 2) 官方默认位置，命中即返回，省掉后面的探测开销。
+    hit = _as_qq_executable(DEFAULT_QQ_EXE)
+    if hit:
+        return hit
+    # 3) 自定义目录 / 自定义盘符 / 运行中实例。
+    for probe in (
+        _qq_from_app_paths,
+        _qq_from_uninstall_entries,
+        _qq_from_running_process,
+        _qq_from_common_install_dirs,
+    ):
+        hit = probe()
+        if hit:
+            return hit
+    return DEFAULT_QQ_EXE
 
 
 def qq_profile_dir() -> Path:
@@ -227,6 +473,67 @@ def qq_profile_dir() -> Path:
         or os.environ.get("QQ_PROFILE_DIR", "")
     ).strip()
     return Path(configured).expanduser() if configured else DEFAULT_QQ_PROFILE_DIR
+
+
+def napcat_quick_account() -> str | None:
+    r"""本次启动使用的快速登录账号；``None`` 表示"按 BOT_QQ"。
+
+    返回 ``""`` 表示**明确要求手动登录**（WebUI 的"切换账号"会写这个），此时既不
+    传 ``-q`` 也不设 ``NAPCAT_QUICK_ACCOUNT``，否则 QQ 会用保存的会话把用户拉回
+    刚退出的旧账号——这正是"退出了又登回原号"的成因。
+    """
+
+    try:
+        raw = NAPCAT_QUICK_ACCOUNT_FILE.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    if raw.casefold() in {"off", "manual", "none", "-"}:
+        return ""
+    return raw if raw.isdigit() else None
+
+
+def set_napcat_quick_account(value: str | None) -> None:
+    """写快速登录账号覆盖文件；``None`` 删除（回到按 BOT_QQ 的历史行为）。"""
+
+    try:
+        if value is None:
+            NAPCAT_QUICK_ACCOUNT_FILE.unlink(missing_ok=True)
+            return
+        NAPCAT_QUICK_ACCOUNT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        NAPCAT_QUICK_ACCOUNT_FILE.write_text(f"{value}\n", encoding="utf-8")
+    except OSError as exc:
+        log(f"Unable to update NapCat quick-login override: {exc}")
+
+
+def project_napcat_root() -> Path | None:
+    """项目专用 NapCat 的 shell 根目录（``.../NapCat.<build>.Shell``）。"""
+
+    napcat_dir = find_napcat_dir()
+    if napcat_dir is None:
+        return None
+    for parent in napcat_dir.parents:
+        if parent.name.casefold().endswith(".shell"):
+            return parent
+    return napcat_dir
+
+
+def project_napcat_boot_pids() -> list[int]:
+    """项目专用 NapCat 引导进程（只认自己的目录，不碰桌面 QQ 的进程）。"""
+
+    root = project_napcat_root()
+    if root is None:
+        return []
+    prefix = str(root).casefold()
+    matches: list[int] = []
+    for pid in pids_by_name("NapCatWinBootMain.exe"):
+        path = process_executable_path(pid)
+        if path is None:
+            continue
+        if str(path).casefold().startswith(prefix):
+            matches.append(pid)
+    return matches
 
 
 def validate_qq_isolation(qq_exe: Path, profile_dir: Path) -> tuple[Path, Path]:
@@ -252,14 +559,17 @@ def isolated_qq_arguments(
     qq_uin: str,
     profile_dir: Path,
 ) -> list[str]:
-    """构造已验证可用的专用 QQ 启动参数。"""
-    return [
-        str(qq_exe),
-        "--enable-logging",
-        "-q",
-        qq_uin,
-        f"--user-data-dir={profile_dir}",
-    ]
+    """构造已验证可用的专用 QQ 启动参数。
+
+    ``qq_uin`` 为空时**不传 ``-q``**：那表示"这次要手动登录"（WebUI 切换账号时
+    不能让 QQ 拿旧会话自动登回原账号）。传了 ``-q`` QQ 会尝试免扫码快速登录。
+    """
+    arguments = [str(qq_exe), "--enable-logging"]
+    uin = str(qq_uin or "").strip()
+    if uin:
+        arguments.extend(["-q", uin])
+    arguments.append(f"--user-data-dir={profile_dir}")
+    return arguments
 
 
 class _STARTUPINFOW(ctypes.Structure):
@@ -674,6 +984,21 @@ def voice_enabled() -> bool:
     )
 
 
+def voice_force_start_requested() -> bool:
+    """WebUI 的"启动语音服务"开关用它绕过语音开关。
+
+    歌曲合成链路依赖 8790 托管 Seed-VC 推理，与 QQ 语音开关是两件事；用户显式
+    点击启动时不应被 VOICE_ASR_ENABLED/VOICE_TTS_ENABLED 静默拦住。
+    """
+
+    return os.getenv("ATRI_VOICE_FORCE_START", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def voice_tts_enabled() -> bool:
     return project_env_value("VOICE_TTS_ENABLED").strip().lower() in {
         "1",
@@ -710,8 +1035,16 @@ def start_gpt_sovits_if_needed() -> None:
 
 
 def start_voice_if_needed(*, wait_for_ready: bool = True) -> None:
-    if not voice_enabled():
+    if not voice_enabled() and not voice_force_start_requested():
         return
+    global VOICE_PORT, VOICE_HEALTH_URL
+    src_dir = str(PROJECT_DIR / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    from atri_shared.voice_endpoint import local_voice_port
+
+    VOICE_PORT = local_voice_port()
+    VOICE_HEALTH_URL = f"http://127.0.0.1:{VOICE_PORT}/health"
     already_listening = port_open(VOICE_PORT)
     if already_listening and not wait_for_ready:
         log(f"Voice service already listening on {VOICE_PORT}.")
@@ -719,6 +1052,7 @@ def start_voice_if_needed(*, wait_for_ready: bool = True) -> None:
     if already_listening and voice_ready():
         log(f"Voice service already ready on {VOICE_PORT}.")
         return
+    pass
     runtime_candidates = voice_runtime_candidates()
     runtime_root = next(
         (
@@ -730,11 +1064,13 @@ def start_voice_if_needed(*, wait_for_ready: bool = True) -> None:
     )
     pythonw = runtime_root / ".venv" / "Scripts" / "pythonw.exe"
     python = runtime_root / ".venv" / "Scripts" / "python.exe"
-    executable = pythonw if pythonw.exists() else python
+    executable = (pythonw if pythonw.exists() else python)
     if not executable.exists():
         log("Voice feature is enabled but its isolated runtime is not installed.")
         return
     env = os.environ.copy()
+    env["ATRI_VOICE_HOST"] = "127.0.0.1"
+    env["ATRI_VOICE_PORT"] = str(VOICE_PORT)
     compat_path = str(PROJECT_DIR / "tools" / "voice" / "compat")
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(
@@ -764,10 +1100,11 @@ def start_voice_if_needed(*, wait_for_ready: bool = True) -> None:
     env.setdefault("ATRI_TTS_IDLE_SHUTDOWN_SECONDS", "0")
     if not already_listening:
         log("Starting isolated voice service in background.")
-        popen_hidden(
+        popen_logged(
             [str(executable), "-m", "atri_voice_service"],
             cwd=PROJECT_DIR,
             env=env,
+            log_path=LOG_DIR / "voice-service.log",
         )
     else:
         log("Voice service is listening; waiting for model warmup.")
@@ -801,6 +1138,13 @@ def start_music_bridge_if_needed() -> None:
     env.setdefault("ATRI_BRIDGE_HOST", "127.0.0.1")
     env.setdefault("ATRI_BRIDGE_PORT", str(MUSIC_BRIDGE_PORT))
     env.setdefault("ATRI_VOICE_SERVICE_URL", f"http://127.0.0.1:{VOICE_PORT}")
+    # AI_music 自带的 config/singing-pipeline.json 只是 external-api 占位（separator /
+    # converter / mixer 全为 null），用它启动会让 WebUI 的三阶段工程报
+    # "歌曲管线未配置人声分离命令"。本机真正可用的三阶段命令在 ATRI 的
+    # data/voice/singing-pipeline.json，按 AI_music README 的要求显式指定。
+    local_manifest = PROJECT_DIR / "data" / "voice" / "singing-pipeline.json"
+    if local_manifest.is_file():
+        env.setdefault("ATRI_MUSIC_PIPELINE_MANIFEST", str(local_manifest))
     log("Starting AI_music bridge in background.")
     popen_hidden([str(executable), str(bridge)], cwd=music_root, env=env)
 
@@ -855,7 +1199,25 @@ def onebot_connection_established() -> bool:
 
 
 def start_qzone_bridge_if_needed(*, wait_for_ready: bool = True) -> None:
-    """Start the local QQ-space Bridge together with the core ATRI runtime."""
+    """Start the local QQ-space Bridge on explicit opt-in only.
+
+    The Bridge keeps polling QZone posts/comments/likes and silently refreshes the
+    web login, so auto-starting it next to NapCat means the chat account keeps
+    doing QZone web automation in the background.  It is therefore disabled by
+    default and must be started manually from the WebUI (高级配置 → QQ 空间
+    Bridge); only ``QZONE_BRIDGE_AUTOSTART=true`` restores the old behaviour.
+    """
+    if project_env_value("QZONE_BRIDGE_AUTOSTART").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        log(
+            "QZone Bridge autostart is disabled (QZONE_BRIDGE_AUTOSTART!=true); "
+            "start it manually from the WebUI when needed."
+        )
+        return
     enabled = project_env_value("QZONE_BRIDGE_ENABLED").strip().lower()
     if enabled not in {"1", "true", "yes", "on"}:
         log("QZone Bridge is disabled in .env; skipping startup.")
@@ -893,7 +1255,7 @@ def start_qzone_bridge_if_needed(*, wait_for_ready: bool = True) -> None:
 def maibot_root() -> Path | None:
     configured = project_env_value("MAIBOT_ROOT") or os.environ.get("MAIBOT_ROOT", "")
     candidates = [Path(configured)] if configured else []
-    candidates.extend((Path(r"D:\MaiBot-install"), PROJECT_DIR.parent / "MaiBot-install"))
+    candidates.extend((Path.home() / "MaiBot-install", PROJECT_DIR.parent / "MaiBot-install"))
     for candidate in candidates:
         if (candidate / "bot.py").exists():
             return candidate
@@ -932,7 +1294,7 @@ def start_maibot_if_needed(*, wait_for_ready: bool = False) -> None:
         if port_open(MAIBOT_PORT):
             log(f"MaiBot is ready on {MAIBOT_PORT}.")
             return
-    log("MaiBot did not report ready within timeout; check D:\\MaiBot-install\\logs\\startup.log.")
+    log("MaiBot did not report ready within timeout; check MaiBot logs/startup.log.")
 
 
 class _PROCESSENTRY32W(ctypes.Structure):
@@ -1066,7 +1428,7 @@ def start_ollama_if_needed(*, wait_for_ready: bool = True) -> None:
     configured_models = ollama_models_path()
     if port_open(OLLAMA_PORT):
         # 端口在监听不等于当前进程加载了项目模型目录。旧版 Ollama
-        # 桌面进程可能先占用 11434，却使用 C:\Users\...\.ollama\models，
+        # 桌面进程可能先占用 11434，却使用 ~/.ollama/models，
         # 这会让项目看到空模型列表并持续返回 404。
         if ollama_api_has_models() and ollama_has_project_models(configured_models):
             log(f"Ollama already listening on {OLLAMA_PORT} with project models.")
@@ -1145,13 +1507,18 @@ def start_atri_if_needed(*, wait_for_ready: bool = True) -> bool:
         return True
 
     python_exe = PROJECT_PYTHONW if PROJECT_PYTHONW.exists() else PROJECT_PYTHON
-    if not python_exe.exists():
+    if not False and not python_exe.exists():
         log(r"Python venv not found. Run tools\launch\atri\start-atri.bat once to repair dependencies.")
         return False
 
     log("Starting Atri service in background.")
     try:
-        popen_hidden([str(python_exe), "-m", "atri_qq_bot"], cwd=PROJECT_DIR)
+        service_log = roll_service_log(ATRI_SERVICE_LOG)
+        popen_logged(
+            ([str(python_exe), "-m", "atri_qq_bot"]),
+            cwd=PROJECT_DIR,
+            log_path=service_log,
+        )
     except OSError as exc:
         log(f"Atri process could not be started: {exc}")
         return False
@@ -1163,8 +1530,33 @@ def start_atri_if_needed(*, wait_for_ready: bool = True) -> bool:
         if port_open(BOT_PORT):
             log("Atri service is ready.")
             return True
-    log("Atri service did not report ready within timeout.")
+    log(
+        "Atri service did not report ready within timeout. "
+        f"See {ATRI_SERVICE_LOG} for the process output."
+    )
     return False
+
+
+def roll_service_log(log_path: Path) -> Path:
+    """给本次启动准备一份服务日志：过大就轮转，并写下分隔标记。"""
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_path.exists() and log_path.stat().st_size > ATRI_SERVICE_LOG_MAX_BYTES:
+            rotated = log_path.with_suffix(".old.log")
+            try:
+                if rotated.exists():
+                    rotated.unlink()
+                log_path.replace(rotated)
+            except OSError:
+                log_path.unlink(missing_ok=True)
+        with open(str(log_path), "ab") as handle:
+            handle.write(
+                f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"atri_qq_bot start =====\n".encode("utf-8", errors="replace")
+            )
+    except OSError as exc:
+        log(f"Could not prepare service log: {exc}")
+    return log_path
 
 
 def required_napcat_files() -> tuple[Path, Path, Path, Path, Path] | None:
@@ -1375,10 +1767,15 @@ def launch_napcat(
     if required is None:
         return False
     launcher, hook, napcat_main, load_path, patch_package = required
-    qq_uin = bot_qq_uin()
-    if not qq_uin:
-        log("BOT_QQ is missing or invalid in .env.")
-        return False
+    quick_override = napcat_quick_account()
+    if quick_override == "":
+        qq_uin = ""
+        log("NapCat quick login disabled by data/runtime/napcat-quick-account.txt; manual login required.")
+    else:
+        qq_uin = quick_override or bot_qq_uin()
+        if not qq_uin:
+            log("BOT_QQ is missing or invalid in .env.")
+            return False
     qq_exe = qq_executable()
     profile_dir = qq_profile_dir()
     napcat_dir = launcher.parent
@@ -1393,11 +1790,14 @@ def launch_napcat(
             "NAPCAT_INJECT_PATH": str(hook),
             "NAPCAT_LAUNCHER_PATH": str(launcher),
             "NAPCAT_MAIN_PATH": str(napcat_main),
-            "NAPCAT_QUICK_ACCOUNT": qq_uin,
         }
     )
+    if qq_uin:
+        env["NAPCAT_QUICK_ACCOUNT"] = qq_uin
+    else:
+        env.pop("NAPCAT_QUICK_ACCOUNT", None)
     log(
-        f"Starting isolated NapCat QQ for {qq_uin}. "
+        f"Starting isolated NapCat QQ for {qq_uin or 'manual login'}. "
         f"qq={qq_exe}; profile={profile_dir}"
     )
     publish_napcat_state("starting", detail="正在启动专用 NapCat/QQ")
@@ -1485,10 +1885,35 @@ def start_napcat_if_needed() -> None:
     launch_napcat(required)
 
 
+def restart_napcat_for_login() -> bool:
+    """停掉项目专用 QQ/NapCat 再重新拉起，用于 WebUI 的"切换账号"。
+
+    只停自己安装目录下的进程（桌面 QQ 不受影响），启动时是否快速登录由
+    :func:`napcat_quick_account` 决定——切换流程会写到"手动登录"，所以重启后
+    会停在二维码页面，让用户扫码或输密码登另一个号。
+    """
+
+    publish_napcat_state("recovering", detail="正在重启 NapCat 以便切换账号")
+    if not stop_project_napcat():
+        log("NapCat/QQ could not be stopped; aborting account switch restart.")
+        publish_napcat_state("failed", detail="NapCat/QQ 未能停止，账号切换已中止")
+        return False
+    for pid in project_napcat_boot_pids():
+        taskkill_process_tree(pid)
+    time.sleep(1.0)
+    required = required_napcat_files()
+    if required is None:
+        publish_napcat_state("failed", detail="NapCat 运行文件不完整，无法重启")
+        return False
+    # launch_napcat 返回 False 表示"已启动但未登录"——这正是切换账号时的预期状态。
+    launch_napcat(required)
+    return True
+
+
 def main(mode: str = "core") -> int:
     """Start one bounded runtime slice instead of every model at once.
 
-    ``core`` is the desktop-pet default. It brings up ATRI first, then delegates
+    ``core`` is the source launcher default. It brings up ATRI first, then delegates
     NapCat recovery and optional integrations to isolated modes. Heavy inference
     services are launched by their first real request, so normal QQ text chat
     cannot exhaust Windows virtual memory or destabilise system audio.
@@ -1498,6 +1923,7 @@ def main(mode: str = "core") -> int:
         "core",
         "recover",
         "napcat",
+        "napcat-restart",
         "optional",
         "voice-asr",
         "voice-tts",
@@ -1555,6 +1981,8 @@ def main(mode: str = "core") -> int:
     if normalized_mode == "music":
         start_music_bridge_if_needed()
         return 0
+    if normalized_mode == "napcat-restart":
+        return 0 if restart_napcat_for_login() else 1
 
     return 2
 

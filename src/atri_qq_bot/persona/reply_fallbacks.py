@@ -198,6 +198,70 @@ def _truncate_reply_at_boundary(text: str, limit: int) -> str:
     return prefix.rstrip() + "…"
 
 
+# 常见的追踪参数：搜索引擎和站外分享会往 URL 上挂这些，同一个页面的
+# URL 因此千变万化。来源校验只能按"资源身份"比对，不能按整串比对。
+_TRACKING_QUERY_KEYS = frozenset(
+    {
+        "buvid",
+        "buvid3",
+        "buvid4",
+        "from",
+        "from_source",
+        "from_spmid",
+        "is_story_h5",
+        "mid",
+        "plat_id",
+        "refer",
+        "referer",
+        "share_from",
+        "share_medium",
+        "share_plat",
+        "share_session_id",
+        "share_source",
+        "share_tag",
+        "spm",
+        "spm_id_from",
+        "timestamp",
+        "unique_k",
+        "up_id",
+        "vd_source",
+        "utm_campaign",
+        "utm_content",
+        "utm_medium",
+        "utm_source",
+        "utm_term",
+        "fbclid",
+        "gclid",
+        "ref",
+        "ref_src",
+        "si",
+        "source",
+    }
+)
+
+# 这些查询参数承载资源身份（视频分P、条目 id 等），剥掉会让不同资源撞在一起。
+_IDENTITY_QUERY_KEYS = frozenset({"p", "v", "id", "aid", "bvid", "cid", "t", "pkg", "mdocid"})
+
+
+def _strip_tracking_query(query: str) -> str:
+    if not query:
+        return ""
+    kept: list[str] = []
+    for part in query.split("&"):
+        if not part:
+            continue
+        key = part.split("=", 1)[0].strip().casefold()
+        if key in _IDENTITY_QUERY_KEYS:
+            kept.append(part)
+        elif key in _TRACKING_QUERY_KEYS:
+            continue
+        else:
+            # 未知参数按追踪参数处理：来源校验不该因为一个没见过的
+            # 分享参数就断定模型编造了链接。
+            continue
+    return "&".join(kept)
+
+
 def _tool_receipt_urls(receipts: list[ToolExecutionReceipt]) -> set[str]:
     urls: set[str] = set()
     for receipt in receipts:
@@ -223,7 +287,53 @@ def _canonical_evidence_url(value: str) -> str:
     path = parsed.path.rstrip("/") or "/"
     if (parsed.hostname or "").casefold().endswith("arxiv.org"):
         path = re.sub(r"(/abs/\d+\.\d+)v\d+$", r"\1", path)
-    return urlunsplit(("https", parsed.netloc.casefold(), path, parsed.query, ""))
+    host = _normalized_evidence_host(parsed)
+    identity_query = _strip_tracking_query(parsed.query)
+    return urlunsplit(("https", host, path, identity_query, ""))
+
+
+def _normalized_evidence_host(parsed: Any) -> str:
+    """统一 host：去掉 www./m. 这类子域差异，让移动版和桌面版视为同一来源。"""
+    host = str(parsed.hostname or "").casefold()
+    for prefix in ("www.", "m.", "mobile.", "amp."):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
+    port = parsed.port
+    if port and port not in {80, 443}:
+        return f"{host}:{port}"
+    return host
+
+
+def _evidence_resource_key(value: str) -> str:
+    """把 URL 归约成"资源身份"：host + 路径。
+
+    来源校验的目的是拦住模型编造的链接，而不是要求它逐字复刻工具回执里
+    那串带分P、带追踪参数的原始 URL。因此只要 host 和路径在回执中出现过，
+    就认定这是同一份资料。查询参数不参与比对。
+    """
+    canonical = _canonical_evidence_url(value)
+    if not canonical:
+        return ""
+    try:
+        parsed = urlsplit(canonical)
+    except ValueError:
+        return ""
+    path = parsed.path.rstrip("/") or "/"
+    return f"{_normalized_evidence_host(parsed)}{path}"
+
+
+def _source_matches_receipts(source: str, evidence_urls: set[str]) -> bool:
+    """宽松来源校验：先精确比，再按资源身份比。"""
+    canonical = _canonical_evidence_url(source)
+    if not canonical:
+        return False
+    if canonical in evidence_urls:
+        return True
+    key = _evidence_resource_key(canonical)
+    if not key:
+        return False
+    return any(_evidence_resource_key(url) == key for url in evidence_urls)
 
 
 def _looks_like_tool_schema_error(exc: Any) -> bool:

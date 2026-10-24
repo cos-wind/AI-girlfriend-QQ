@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -41,10 +43,31 @@ class InsightsRuntime:
             self.config.database_path,
         )
 
-    async def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self, *, database_path: Path | str | None = None) -> dict[str, Any]:
+        """重新读取评测配置。
+
+        ``database_path`` 是给账号系统用的**显式声明**：调用方说明"本运行时的库
+        就是这一个"，从而避免 ``.env`` 里的全局 ``INSIGHTS_DB_PATH`` 在重载时
+        把账号作用域的库路径覆盖掉。
+
+        它不能用来真的**切换**库——``InsightsStore`` 在 ``__init__`` 里就已经绑定
+        了路径，重载配置不会重建它。所以只要传入值与当前不一致，仍然按原来的
+        守卫报错，避免出现"配置指向新库、实际写旧库"这种静默不一致。
+        """
         load_dotenv(ENV_PATH, override=True)
         config = InsightsConfig.from_env()
-        if config.database_path != self.config.database_path:
+        # 两侧都归一化后再比较：InsightsConfig.from_env 会 resolve()，而调用方
+        # 传入的路径未必已经归一化，直接比 Path 会误报。
+        current = Path(self.config.database_path).expanduser().resolve()
+        if database_path is not None:
+            declared = Path(database_path).expanduser().resolve()
+            if declared != current:
+                raise ValueError(
+                    "运行中不能切换 INSIGHTS_DB_PATH，请重启 ATRI："
+                    f"当前 {current}，声明 {declared}"
+                )
+            config = replace(config, database_path=declared)
+        if Path(config.database_path).expanduser().resolve() != current:
             raise ValueError("运行中不能切换 INSIGHTS_DB_PATH，请重启 ATRI")
         self.config = config
         self.evaluations.config = config

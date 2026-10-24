@@ -11,10 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .runtime.paths import PROJECT_ROOT
-
-
-PROMPT_DIR = PROJECT_ROOT / "docs" / "prompts"
+from .runtime.paths import PROMPT_DIR
 
 
 class PromptLoadError(RuntimeError):

@@ -160,6 +160,8 @@ def _dynamic_emotion_label(
 
     if _is_distress(text) or any(word in text for word in TIRED_KEYWORDS):
         return "用户低落或疲惫，私聊先具体安慰，群聊只轻量关心不煽情"
+    if _is_abuse_at_bot(text):
+        return "用户在对你说难听的话或赶你走：不要回怼、不要阴阳怪气、不要玩梗反讽；先表达自己有点难过或受伤，语气克制简短；如果对方话太冲，就装傻充愣轻轻带过，绝不顶嘴"
     if any(word in text for word in ("喜欢你", "想你", "爱你", "抱抱")):
         return "亲近和害羞，嘴硬一点但要真心回应"
     if any(word in text for word in ("生气", "气死", "烦死", "火大", "红温")):
@@ -466,10 +468,54 @@ def _is_user_angry_at_bot(text: str) -> bool:
     return _is_correction(compact) and any(word in compact for word in ("烦", "恶心", "蠢", "傻", "气", "崩", "红温"))
 
 
+def _is_abuse_at_bot(text: str) -> bool:
+    """判断用户是否在直接辱骂/驱赶/贬损亚托莉本人。
+
+    只匹配"滚""撅""闭嘴"这类针对机器人本身的攻击性话，不把用户自己
+    的情绪低落（DISTRESS_KEYWORDS）或正常的质量吐槽（BOT_REPAIR_HINTS）
+    误判成辱骂。命中后走"表达难过/装傻"的专门情绪，而不是回怼。
+    """
+
+    compact = str(text or "").strip()
+    if not compact:
+        return False
+    # 过长的消息通常是正常吐槽，逐词命中可能是误伤（例如"滚"作为语气词），
+    # 只在较短、且命中明确辱骂词时才判定为针对机器人的攻击。
+    if len(compact) > 24:
+        return False
+    # "滚"是多义词，翻滚/打滚/滚床单这类明显不是驱赶的用法要排除。
+    if any(phrase in compact for phrase in ("翻滚", "打滚", "滚来滚去", "滚床单", "摇滚")):
+        return False
+    return any(hint in compact for hint in ABUSE_HINTS)
+
+
+def _abuse_fallback_reply(text: str, is_group: bool = False) -> str:
+    """被辱骂/驱赶时的兜底回复：表达难过，过火就装傻，绝不回怼。"""
+
+    compact = str(text or "").strip()
+    if is_group:
+        return random.choice(
+            [
+                "……我是不是说错什么了。你别这样，我会难过一下的。",
+                "这样说我，我有点难过。可以好好说吗。",
+                "诶，好凶……我先不说话啦。",
+                "我、我是不是惹你生气了。那我先安静一会儿。",
+            ]
+        )
+    return random.choice(
+        [
+            "……你这样说，我其实有点难过。我哪里做得不好，可以直接告诉我。",
+            "别这样赶我走呀。我会难过一下下的。",
+            "嗯……我不顶嘴。你消消气，我在这边不吵你。",
+        ]
+    )
+
+
 def _needs_comfort_repair_mode(text: str, iteration_decision: Any | None = None) -> bool:
     return bool(
         iteration_decision
         or _is_user_angry_at_bot(text)
+        or _is_abuse_at_bot(text)
         or _is_correction(text)
         or _is_distress(text)
         or any(word in text for word in TIRED_KEYWORDS)
@@ -678,6 +724,9 @@ def _direct_answer_override(
         return _accepted_correction_reply(intent_text, is_group) or (
             "嗯，这次我改。下一句开始先回答你当前的问题，少铺垫，不再拿模板话糊弄。"
         )
+
+    if _is_abuse_at_bot(intent_text):
+        return _abuse_fallback_reply(intent_text, is_group)
 
     if any(word in intent_text for word in ("你是谁", "自我介绍", "介绍一下", "叫什么")):
         if is_group:

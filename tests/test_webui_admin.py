@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -21,6 +22,7 @@ from atri_webui.model_profiles import (
     upsert_model_profile,
 )
 from atri_webui.page import render_index
+from atri_webui.server_parts.handler_insights import HandlerInsightsMixin
 from atri_webui.sticker_admin import resolve_under, sticker_file_payload, sticker_summary
 from atri_webui import voice_admin
 from atri_webui.voice_admin import resolve_voice_audio, save_reference_audio, save_test_audio
@@ -66,6 +68,138 @@ def test_user_directory_exposes_bot_and_group_activity_from_memory() -> None:
     assert group["relationship"]["activity_label"] == "活跃"
     assert group["relationship"]["summary"] == "群里最近在讨论测试。"
     assert group["relationship"]["memory_counts"]["total"] == 6
+
+
+def test_user_directory_group_cards_expose_the_memory_editor_entry() -> None:
+    """群聊卡片也必须能打开记忆编辑器。
+
+    历史 bug：``userDirectoryDetailMarkup`` 对 ``entity_type === 'group'`` 直接 return，
+    只渲染群聊摘要——于是用户中心里**群聊没有「编辑记忆」入口**（用户报的"入口怎么没了"）。
+    同时 ``userDirectoryMemory`` 只按 ``user_id`` 找记忆，而群聊记忆的 id 是
+    ``group:<群号>``、target 里是 ``group_id``，根本没有 ``user_id``，所以即使渲染出来
+    也永远匹配不到。
+    """
+
+    from atri_webui.page import script_directory
+
+    part = script_directory.PART
+
+    # 1) 匹配逻辑要认群聊：按 group:<群号> 或 target.group_id。
+    memory_fn = part[
+        part.index("function userDirectoryMemory") : part.index(
+            "function userDirectoryMemoryCardMarkup"
+        )
+    ]
+    assert "group_id" in memory_fn
+    assert "`group:${groupId}`" in memory_fn
+    assert "row.target?.group_id" in memory_fn
+
+    # 2) 入口必须在群聊分支**之前**算好，否则群聊拿不到它。
+    detail_fn = part[
+        part.index("function userDirectoryDetailMarkup") : part.index(
+            "function renderUserDirectory"
+        )
+    ]
+    assert "const memoryAction" in detail_fn
+    assert detail_fn.index("const memoryAction") < detail_fn.index(
+        "item.entity_type === 'group'"
+    )
+    # 3) 入口不能依赖 /api/memory：用户目录自己就带 relationship.memory_counts，
+    #    计数非 0 就说明这个对象有记忆、编辑器打得开。记忆接口慢/挂时入口必须仍在
+    #    （真实事故：/api/memory 一直卡着 → 所有「编辑记忆」入口集体消失）。
+    assert "function userDirectoryMemoryId" in part
+    assert "relationship?.memory_counts" in part
+    assert "from_directory: true" in part
+    # 群聊摘要本身不能丢。
+    assert "userDirectoryGroupSummaryMarkup(item)" in detail_fn
+    # 也不能因为改这里把用户侧的能力弄丢。
+    assert "user-directory-vision" in detail_fn
+    assert "userDirectoryInlineFeedMarkup(item)" in detail_fn
+
+
+def test_user_directory_group_cards_expose_vision_and_voice_permissions() -> None:
+    """群聊卡片也要有「视觉模型 / 语音模型」权限开关。
+
+    权限策略有独立的 groups 桶，`is_modality_allowed` 在用户未授权时会**再看群授权**
+    （``server_events.py`` 的视觉/语音门控走的就是这条路）。但群聊详情以前直接 return，
+    开关一并消失——于是群聊根本没法被授权。这与"群聊没有编辑记忆入口"是同一个 bug。
+    """
+
+    from atri_webui.page import script_directory
+
+    part = script_directory.PART
+    detail_fn = part[
+        part.index("function userDirectoryDetailMarkup") : part.index(
+            "function renderUserDirectory"
+        )
+    ]
+
+    # 权限桶按对象类型选：群聊读 groups、用户读 users。
+    assert "const scope = isGroup ? 'groups' : 'users';" in detail_fn
+    assert "window._modalityAccess?.policy?.[scope]?.[entityId]" in detail_fn
+    # 保存键同样带类型前缀，saveUserDirectoryModalityCore 靠它分辨群聊。
+    assert "saveUserDirectoryModality(this,'${isGroup?'group':'user'}:${escapeHtml(entityId)}')" in detail_fn
+    # 群聊分支必须包含权限开关（此前只有群摘要）。
+    group_branch = detail_fn[detail_fn.index("if(isGroup)") : detail_fn.index("const atriMarkup")]
+    assert "${modalityMarkup}" in group_branch
+    # 亚托莉自己仍然不给开关。
+    assert "(!isGroup && roles.includes('bot')) ? '' :" in detail_fn
+
+
+def test_user_directory_cards_expose_memory_entry_without_expanding() -> None:
+    """折叠状态的卡片也要直接给「编辑记忆」入口。
+
+    用户报的"群聊还是没有入口"就是这个：入口原先只存在于**展开详情**里，折叠状态下
+    页面里一个按钮都没有——用户不会去猜"要先点一下卡片"。现在折叠时挂一个快捷按钮，
+    展开时由详情渲染同一个按钮，不重复。
+    """
+
+    from atri_webui.page import script_directory
+
+    part = script_directory.PART
+    card_fn = part[
+        part.index("const card = item =>") : part.index("const target = $('userDirectoryRows')")
+    ]
+
+    assert "user-directory-quick-actions" in card_fn
+    assert "const collapsedMemory = selected ? null : userDirectoryMemory(item);" in card_fn
+    # 快捷按钮必须真的插进卡片 DOM，且在详情之前。
+    assert "${quickActions}${selected ? userDirectoryDetailMarkup(item) : ''}" in card_fn
+    # 没有记忆时要给出说明，而不是留一块空白（否则又像"入口没了"）。
+    assert "暂无记忆记录" in part
+
+
+def test_user_directory_memory_self_heals_when_the_first_load_fails() -> None:
+    """记忆接口失败过的那一次不能变成永久状态。
+
+    真实事故：用户打开页面时正好赶上服务重启，`loadMemory()` 失败了一次，而页面**从不
+    重试**——于是所有「编辑记忆」入口一直缺席（卡片上的"记忆 L1/L2/L3"来自用户目录接口，
+    照常显示，看起来自相矛盾）。现在：失败要写明原因与已载入条目数、给一个「重新载入记忆」
+    按钮，并在重绘时自动补载一次（带冷却，避免失败时打成请求风暴）。
+    """
+
+    from atri_webui.page import script_directory
+
+    part = script_directory.PART
+    render_fn = part[
+        part.index("function renderUserDirectory") : part.index("function userDirectoryOpenTab")
+    ]
+
+    assert "function ensureMemoryLoadedForDirectory" in part
+    assert "function reloadDirectoryMemory" in part
+    # 重绘时补载（这是修复的关键：不需要用户手动刷新就能恢复）
+    assert "ensureMemoryLoadedForDirectory();" in render_fn
+    # 请求"卡住"（既不返回也不报错）必须有超时，否则重试按钮永久停在"载入中…"、
+    # 自愈也被 pending 永久挡住。真实事故就是这样。
+    assert "function loadMemoryWithTimeout" in part
+    assert "Promise.race([" in part
+    assert "秒没有响应" in part
+    # 空记忆时必须给出原因、条目数和手动出口
+    assert "已载入记忆条目" in part
+    assert "重新载入记忆" in part
+    assert "window._memoryLoadError" in part
+    # 冷却：失败时不要被每次重绘打成请求风暴
+    assert "window._memoryLoadLastAt" in part
 
 
 def test_user_directory_page_loads_memory_immediately_and_does_not_rerender_per_selection() -> None:
@@ -394,14 +528,14 @@ def test_memory_admin_updates_group_activity_without_creating_affection(tmp_path
     memory_path = tmp_path / "users.json"
     backup_dir = tmp_path / "backups"
     group_item = {
-        "target": {"message_type": "group", "group_id": 1054646184},
+        "target": {"message_type": "group", "group_id": 900001000},
         "message_count": 120,
         "group_activity_score": 12,
         "history": [{"role": "user", "text": "群消息"}],
     }
     memory_path.write_text(
         json.dumps(
-            {"version": 2, "conversations": {"group:1054646184": group_item}},
+            {"version": 2, "conversations": {"group:900001000": group_item}},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -409,12 +543,12 @@ def test_memory_admin_updates_group_activity_without_creating_affection(tmp_path
     admin = MemoryAdmin(memory_path, backup_dir)
 
     _, relationship = admin.update_relationship(
-        "group:1054646184",
+        "group:900001000",
         None,
         "allow",
         76.5,
     )
-    saved = json.loads(memory_path.read_text(encoding="utf-8"))["conversations"]["group:1054646184"]
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))["conversations"]["group:900001000"]
 
     assert relationship == {
         "affection_score": None,
@@ -732,6 +866,58 @@ def test_activate_vision_profile_does_not_replace_chat_model(
     assert env["TOOLBOX_VISION_MODEL"] == "qwen2.5vl:7b"
 
 
+def test_activate_vision_profile_clears_stale_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """切换视觉主模型时，旧的兜底模型必须被清空。
+
+    历史 bug：activate 只写主模型字段，残留旧 fallback（如 8b），主模型
+    失败时回退加载旧模型导致显存溢出、卡顿。
+    """
+    profile_path = tmp_path / "model_profiles.json"
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(model_profiles_module, "MODEL_PROFILE_PATH", profile_path)
+    monkeypatch.setattr(model_profiles_module, "WEBUI_DIR", tmp_path)
+    monkeypatch.setattr(config_admin, "ENV_PATH", env_path)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "id": "vision-qwen",
+                        "name": "视觉 Qwen",
+                        "model_type": "vision",
+                        "provider": "Ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "qwen3-vl:4b-instruct",
+                        "api_key": "ollama",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    env_path.write_text(
+        "\n".join(
+            [
+                "TOOLBOX_VISION_MODEL=qwen3-vl:4b-instruct",
+                "TOOLBOX_VISION_FALLBACK_MODEL=qwen3-vl:8b-instruct",
+                "TOOLBOX_VISION_FALLBACK_BASE_URL=http://127.0.0.1:11434/v1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    activate_model_profile("vision-qwen")
+    env = config_admin.read_env()
+
+    assert env["TOOLBOX_VISION_MODEL"] == "qwen3-vl:4b-instruct"
+    assert env["TOOLBOX_VISION_FALLBACK_MODEL"] == ""
+    assert env["TOOLBOX_VISION_FALLBACK_BASE_URL"] == ""
+
+
 def test_upsert_vision_profile_prefers_existing_vision_api_key(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -870,11 +1056,54 @@ def test_evaluation_layout_contains_long_record_width_guards() -> None:
     assert "#evaluationDashboardPanel th,#evaluationDashboardPanel td { overflow-wrap:anywhere; word-break:break-word; }" in html
 
 
+def test_top_level_webui_panels_do_not_nest_inside_each_other() -> None:
+    """``body_*`` 片段是跨文件的半个 HTML：每个片段必须自己闭合。
+
+    原来的锚点是「语音」面板，它已随语音/音乐解耦删除，所以这里改为按当前面板链
+    逐个检查：每个面板必须在下一个面板开始前标签配平，否则后面的面板会被吞进前一个。
+    只比较相邻面板起点之间的纯 HTML 区段——面板之后的 ``<script>`` 里也有 ``<div``
+    字样，计入会得出假失败。
+    """
+
+    html = render_index()
+    panels = ["model", "users", "test", "evaluation", "advanced"]
+    starts = []
+    for name in panels:
+        found = re.search(rf'<div id="{name}" class="panel[^"]*">', html)
+        assert found is not None, f"缺少面板 {name}"
+        starts.append(found.start())
+    assert starts == sorted(starts), "面板顺序被打乱"
+
+    for index, name in enumerate(panels[:-1]):
+        segment = html[starts[index] : starts[index + 1]]
+        assert segment.count("<div") == segment.count("</div>"), (
+            f"{name} 面板没有在下一个面板开始前闭合"
+        )
+
+
 def test_group_summary_schedule_button_avoids_broken_inline_quote_escape() -> None:
     html = render_index()
 
     assert 'onclick="saveGroupSummarySchedule(this.dataset.group)"' in html
+    assert 'onclick="generateAndDownloadSavedGroupSummary(this)"' in html
+    assert "立即生成并保存" in html
+    assert 'save_image:Boolean(saveImage)' in html
     assert "saveGroupSummarySchedule('' +" not in html
+
+
+def test_group_name_cache_returns_cached_names_without_waiting_for_onebot() -> None:
+    refresh_calls: list[bool] = []
+    store = SimpleNamespace(group_name_map=lambda: {"20001": "测试群"})
+    state = SimpleNamespace(
+        server=SimpleNamespace(insights=SimpleNamespace(store=store)),
+        refresh_group_names_soon=lambda: refresh_calls.append(True),
+    )
+    handler = SimpleNamespace(webui_state=state)
+
+    names = HandlerInsightsMixin._group_name_cache(handler)
+
+    assert names == {"20001": "测试群"}
+    assert refresh_calls == [True]
 
 
 def test_rendered_webui_inline_script_has_valid_javascript_syntax() -> None:
@@ -895,22 +1124,27 @@ def test_rendered_webui_inline_script_has_valid_javascript_syntax() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_voice_page_has_separate_policy_profile_and_preview_controls() -> None:
+def test_voice_configuration_ui_is_gone_but_service_switch_remains() -> None:
+    """语音页签与语音详细配置都已撤下；只保留「高级」页里的服务开关。"""
+
     html = render_index()
 
-    assert "onclick=\"showTab(event,'voice')\"" in html
-    assert 'id="voiceAsrEnabled"' in html
-    assert 'id="voiceTtsEnabled"' in html
-    assert '<select id="voiceProfileId"' in html
-    assert 'id="voiceReferenceFile"' in html
-    assert 'id="voicePreviewLanguage"' in html
-    assert 'id="voicePreviewAudio"' in html
-    assert "async function previewVoice()" in html
-    assert "language:$(\'voicePreviewLanguage\').value" in html
-    assert 'id="voiceAsrLexicon"' in html
-    assert "asr_lexicon_text:$('voiceAsrLexicon').value" in html
-    assert 'id="voiceTtsPronunciations"' in html
-    assert "tts_pronunciation_text:$('voiceTtsPronunciations').value" in html
+    assert "onclick=\"showTab(event,'voice')\"" not in html
+    assert "本地服务（手动启动）" in html
+    assert 'id="voiceServiceStartButton"' in html
+    assert "async function toggleVoiceService(button)" in html
+    for gone in (
+        'id="voiceAsrEnabled"',
+        'id="voiceTtsEnabled"',
+        '<select id="voiceProfileId"',
+        'id="voiceReferenceFile"',
+        'id="voicePreviewLanguage"',
+        'id="voicePreviewAudio"',
+        "async function previewVoice()",
+        'id="voiceAsrLexicon"',
+        'id="voiceTtsPronunciations"',
+    ):
+        assert gone not in html, gone
 
 
 def test_advanced_reply_settings_include_voice_probability_control() -> None:

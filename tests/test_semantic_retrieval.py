@@ -46,6 +46,41 @@ def test_planner_uses_relevant_profile_memory_and_stays_compact(tmp_path) -> Non
     assert len(context) < 900
 
 
+def test_planner_injects_persistent_group_rules_and_topics(tmp_path) -> None:
+    """人工写进记忆的"规范"与"话题"要常驻注入，不靠关键词碰运气。
+
+    历史问题：一条"不要有攻击性"只有在这句话恰好聊到"攻击"时才会被 FTS 召回，
+    日常聊天根本碰不到它，于是"写了规范却不起效"。
+    """
+
+    planner = ContextRetrievalPlanner(
+        RetrievalSettings(enabled=True, database_path=tmp_path / "semantic.sqlite3")
+    )
+    profile = {
+        "conversation_id": "group:20001",
+        "personal_question_interval": "五到八轮",
+        "structured_memory": {
+            "l1": [
+                {"key": "profile_fact:新记忆", "value": "温柔可爱不要有攻击性", "confidence": 0.9, "updated_at": 1},
+                {"key": "兴趣", "value": "原神", "confidence": 0.9, "updated_at": 2},
+                {"key": "群体讨厌", "value": "ntr", "confidence": 0.9, "updated_at": 3},
+            ],
+            "l2": [{"key": "major:negative", "value": "蠢货", "confidence": 0.7, "updated_at": 4}],
+            "l3": [], "candidates": [],
+        },
+    }
+
+    context = planner.build(profile, "今天天气不错")  # 与规范/话题关键词都无关
+
+    assert "本群约定" in context
+    assert "温柔可爱不要有攻击性" in context
+    assert "本群偏好与话题" in context
+    assert "原神" in context
+    # 负面类目与 L2 事件不进入常驻注入
+    assert "ntr" not in context
+    assert "蠢货" not in context
+
+
 def test_planner_retrieves_lore_only_for_lore_questions(tmp_path, monkeypatch) -> None:
     prompt_dir = tmp_path / "prompts"
     prompt_dir.mkdir()

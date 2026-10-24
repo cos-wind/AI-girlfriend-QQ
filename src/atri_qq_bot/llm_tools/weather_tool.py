@@ -148,6 +148,24 @@ async def get_weather(
                 places = geocoding.get("results") if isinstance(geocoding, dict) else None
                 if isinstance(places, list) and places:
                     break
+            # Open-Meteo 的中文地名索引只覆盖地级市及以上，县级地名（如邳州、灌阳）
+            # 中文查不到，需转拼音回退（英文索引覆盖到县级）。
+            if not (isinstance(places, list) and places):
+                for candidate in _pinyin_candidates(location):
+                    geocoding_response = await client.get(
+                        GEOCODING_URL,
+                        params={
+                            "name": candidate,
+                            "count": 3,
+                            "language": "en",
+                            "format": "json",
+                        },
+                    )
+                    geocoding_response.raise_for_status()
+                    geocoding = geocoding_response.json()
+                    places = geocoding.get("results") if isinstance(geocoding, dict) else None
+                    if isinstance(places, list) and places:
+                        break
             if not isinstance(places, list) or not places:
                 return f"天气查询失败：没有找到“{location}”对应的地点，请补充城市或地区。"
 
@@ -277,6 +295,44 @@ def _location_candidates(location: str) -> list[str]:
         cleaned = candidate.strip()
         if len(cleaned) >= 2 and cleaned not in unique:
             unique.append(cleaned)
+    return unique
+
+
+def _pinyin_candidates(location: str) -> list[str]:
+    """把中文地名转成拼音候选，用于 Open-Meteo 英文索引回退（覆盖县级地名）。
+
+    例如“广西灌阳县” -> ["guangxiguanyangxian", "guanyangxian", "guanyang"]。
+    去除省级/市级前缀后，用县级核心词单独查，命中率最高。
+    """
+    try:
+        from pypinyin import lazy_pinyin
+    except ImportError:
+        return []
+
+    normalized = re.sub(r"\s+", "", location).removeprefix("中国")
+    for prefix in CHINA_PROVINCE_PREFIXES:
+        if normalized.startswith(prefix) and len(normalized) > len(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    normalized = re.sub(r"(省|市|区|县|自治州|地区|盟|旗)$", "", normalized)
+    if len(normalized) < 2:
+        return []
+
+    candidates: list[str] = []
+    full = "".join(lazy_pinyin(normalized))
+    if full:
+        candidates.append(full)
+    # 县级核心词：取最后 2-3 个汉字转拼音，去掉常见行政区划后缀。
+    core = re.sub(r"(省|市|区|县|自治州|地区|盟|旗)$", "", normalized)
+    if core != normalized or len(core) >= 2:
+        core_pinyin = "".join(lazy_pinyin(core))
+        if core_pinyin and core_pinyin != full:
+            candidates.append(core_pinyin)
+
+    unique: list[str] = []
+    for candidate in candidates:
+        if len(candidate) >= 4 and candidate not in unique:
+            unique.append(candidate)
     return unique
 
 

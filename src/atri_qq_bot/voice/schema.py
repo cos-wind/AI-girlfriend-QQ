@@ -36,9 +36,6 @@ class VoiceRequest:
     language: str = "auto"
     reason: str = "autonomous"
     mode: str = "speech"
-    song_title: str = ""
-    segment_index: int | None = None
-    segment_hint: str = ""
 
     @classmethod
     def from_tool_arguments(cls, arguments: dict[str, Any], max_chars: int) -> "VoiceRequest":
@@ -61,14 +58,6 @@ class VoiceRequest:
         mode = str(arguments.get("mode") or "speech").strip().lower()
         if mode not in VOICE_MODES:
             mode = "speech"
-        song_title = re.sub(r"\s+", " ", str(arguments.get("song_title") or "")).strip()[:120]
-        try:
-            segment_index = int(arguments["segment_index"]) if arguments.get("segment_index") is not None else None
-        except (TypeError, ValueError):
-            segment_index = None
-        if segment_index is not None and not 1 <= segment_index <= 99:
-            segment_index = None
-        segment_hint = re.sub(r"\s+", " ", str(arguments.get("segment_hint") or "")).strip()[:80]
         return cls(
             text=text,
             emotion=emotion,
@@ -76,9 +65,6 @@ class VoiceRequest:
             language=language,
             reason=reason,
             mode=mode,
-            song_title=song_title,
-            segment_index=segment_index,
-            segment_hint=segment_hint,
         )
 
 

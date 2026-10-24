@@ -33,6 +33,8 @@ class ToolAnalysisResult:
     # 视频降级链路提供了可引用的 OCR 或标题时，允许交给对话模型继续回答。
     # 图片视觉失败不设置此标记，继续保持原有的防幻觉静默保护。
     visual_fallback_available: bool = False
+    # Archival evidence is deliberately excluded from prompt_context and repr.
+    knowledge_materials: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
 
     # visual_data/visual_source 保存原始证据，status/limitations 描述证据边界；
     # 回复层据此区分“看到了画面”和“只识别到文字”，避免视觉失败后产生幻觉。

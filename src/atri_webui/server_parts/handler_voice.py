@@ -4,104 +4,33 @@ from .handler_support import WebUIHandlerMixin, _sync_webui_globals
 
 
 class HandlerVoiceMixin(WebUIHandlerMixin):
-    def _handle_singing_job(self, query: str) -> None:
-        try:
-            job_id = _valid_singing_job_id(
-                parse_qs(query).get("id", [""])[0]
-            )
-            payload = _music_bridge_request(f"/api/jobs/{job_id}")
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(payload)
+    def _handle_voice_service_status(self) -> None:
+        """只读状态：atri_voice_service 是否在跑、模型是否已预热。"""
 
-    def _handle_singing_source_upload(self) -> None:
-        content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_SINGING_UPLOAD_BYTES + 200_000:
-            return self._send_error(HTTPStatus.BAD_REQUEST, "导唱音频最大 100MB")
-        try:
-            form = parse_multipart_form(
-                self.headers.get("Content-Type", ""),
-                self.rfile.read(content_length),
+        config = self.webui_state.config
+        self._send_json(
+            voice_service_status(
+                enabled=bool(
+                    getattr(config, "voice_asr_enabled", False)
+                    or getattr(config, "voice_tts_enabled", False)
+                )
             )
-            file_item = multipart_file(form, "file")
-            if file_item is None or not file_item.filename:
-                raise ValueError("请选择导唱或歌曲音频")
-            if len(file_item.data) > MAX_SINGING_UPLOAD_BYTES:
-                raise ValueError("导唱音频最大 100MB")
-            path = save_singing_source_audio(
-                str(file_item.filename),
-                file_item.data,
-            )
-            MUSIC_SOURCE_ROOT.mkdir(parents=True, exist_ok=True)
-            target = unique_path(MUSIC_SOURCE_ROOT / safe_filename(path.name))
-            shutil.copy2(path, target)
-            path = target.resolve()
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "path": str(path), "name": path.name})
+        )
 
-    def _handle_singing_create(self) -> None:
+    def _handle_voice_service_action(self) -> None:
+        """手动启动 / 停止 atri_voice_service。"""
+
         payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            text = " ".join(str(payload.get("text") or "").split())
-            if not text:
-                raise ValueError("请输入歌曲名称")
-            source_path = _singing_audio_path(
-                payload.get("source_audio_path"),
-                "导唱音频",
-            )
-            reference_path = _singing_audio_path(
-                payload.get("reference_audio_path"),
-                "亚托莉歌声参考",
-            )
-            profile = str(payload.get("profile") or "atri").strip()
-            preview_seconds = max(
-                5,
-                min(60, int(payload.get("preview_seconds", 15))),
-            )
-            pitch_shift = float(payload.get("pitch_shift", 0.0))
-            if not math.isfinite(pitch_shift):
-                raise ValueError("移调参数必须是有限数字")
-            pitch_shift = max(-12.0, min(12.0, pitch_shift))
-            result = _music_bridge_request(
-                "/api/jobs",
-                "POST",
-                {
-                    "text": text[:200],
-                    "source_audio_path": str(source_path),
-                    "reference_audio_path": str(reference_path),
-                    "profile": profile,
-                    "preview_seconds": preview_seconds,
-                    "pitch_shift": pitch_shift,
-                    "prefer_original": False,
-                },
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result)
-
-    def _handle_singing_cancel(self) -> None:
-        payload = self._read_json()
-        try:
-            job_id = _valid_singing_job_id(
-                str((payload or {}).get("id") or "")
-            )
-            result = _music_bridge_request(
-                f"/api/jobs/{job_id}/cancel",
-                "POST",
-                {},
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result)
+        action = str((payload or {}).get("action") or "").strip().lower()
+        if action == "start":
+            try:
+                result = start_voice_service()
+            except OSError as exc:
+                return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+            return self._send_json(result)
+        if action == "stop":
+            return self._send_json(stop_voice_service())
+        return self._send_error(HTTPStatus.BAD_REQUEST, "action 必须是 start 或 stop")
 
     def _handle_voice_save(self) -> None:
         payload = self._read_json()

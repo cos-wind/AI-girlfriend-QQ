@@ -18,7 +18,17 @@ class MemoryObservationMixin(MemoryMixin):
         addressed_to_bot: bool = False,
         visibility: str = "private",
         source_context: str | None = None,
+        event_id: str | None = None,
     ) -> None:
+        raw_text = str(text or "")
+        if (conversation_id.startswith("private:") and visibility == "private"
+                and not source_context and not is_memory_pollution_text(raw_text)):
+            try:
+                self.knowledge.create(conversation_id, raw_text, kind="message", title=nickname or "用户消息",
+                                      occurred_at=now, metadata={"actor_id": actor_id},
+                                      external_id=f"message:{event_id}" if event_id else None)
+            except Exception as exc:
+                LOGGER.warning("knowledge message archive failed: %s", exc)
         # 记忆只需要保存可检索的摘要文本；超长媒体描述、转发内容或异常 payload
         # 不应原样进入持久化树，避免单条消息放大整个快照。
         text = _shorten(str(text or ""), MAX_MEMORY_TEXT_CHARS)
@@ -103,6 +113,12 @@ class MemoryObservationMixin(MemoryMixin):
         sent_sticker: bool = False,
         now: float | None = None,
     ) -> None:
+        if conversation_id.startswith("private:") and not is_memory_pollution_text(reply_text):
+            try:
+                self.knowledge.create(conversation_id, str(reply_text or ""), kind="assistant",
+                                      title="亚托莉回复", occurred_at=now, coverage="assistant_output")
+            except Exception as exc:
+                LOGGER.warning("knowledge reply archive failed: %s", exc)
         reply_text = _shorten(str(reply_text or ""), MAX_MEMORY_TEXT_CHARS)
         if is_memory_pollution_text(reply_text):
             return
@@ -468,13 +484,18 @@ class MemoryObservationMixin(MemoryMixin):
         now: float | None = None,
     ) -> str:
         profile = self.profile(conversation_id, now=now)
+        context = ""
         try:
             context = self._retrieval.build(profile, user_text)
-            if context:
-                return context
         except Exception as exc:  # 检索索引是增强项，绝不能让它阻断 QQ 回复。
             LOGGER.warning("semantic retrieval fallback: %s", exc)
-        return _format_recall_context(profile, user_text)
+        context = context or _format_recall_context(profile, user_text)
+        try:
+            evidence = self.knowledge.recall(conversation_id, user_text, config=self._knowledge_config) if self.knowledge.path.exists() else ""
+            return "\n\n".join(part for part in (context, evidence) if part)
+        except Exception as exc:
+            LOGGER.warning("knowledge recall failed: %s", exc)
+            return context
 
     def retrieval_status(self) -> dict[str, Any]:
         """为 WebUI/诊断提供索引状态，不暴露任何跨会话的记忆内容。"""

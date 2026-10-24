@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-PART = r"""  if(window._evaluationLoading) return;
+PART = r"""async function loadEvaluation(force=false) {
+  if(window._evaluationLoading) return;
   window._evaluationLoading = true;
   try {
     const selectedModelType = $('evaluationModelType')?.value || '';

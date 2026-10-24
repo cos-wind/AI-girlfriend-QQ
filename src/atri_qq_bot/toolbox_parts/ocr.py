@@ -115,7 +115,11 @@ def _ocr_engine() -> tuple[Any | None, str]:
     try:
         from rapidocr import RapidOCR
 
-        _ENGINE = RapidOCR()
+        from atri_runtime import user_root
+
+        params = None
+        pass
+        _ENGINE = RapidOCR(params=params)
     except Exception as exc:
         _ENGINE_ERROR = f"{type(exc).__name__}: {exc}"
     return _ENGINE, _ENGINE_ERROR

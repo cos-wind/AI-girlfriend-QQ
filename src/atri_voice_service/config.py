@@ -5,11 +5,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from atri_qq_bot.runtime.paths import PROJECT_ROOT
+from atri_shared.voice_endpoint import local_voice_port
+from atri_runtime import user_root
 
 
-LOCAL_MODELS_ROOT = Path(os.environ.get("LOCAL_MODELS_ROOT", r"D:\本地大模型\models"))
+LOCAL_MODELS_ROOT = Path(os.environ.get("LOCAL_MODELS_ROOT") or Path.home() / ".ollama" / "models")
 ATRI_MODELS_ROOT = LOCAL_MODELS_ROOT / "AI_ATRI"
-ASCII_ATRI_MODELS_ROOT = Path(os.environ.get("ASCII_ATRI_MODELS_ROOT", r"D:\AtriModels"))
+ASCII_ATRI_MODELS_ROOT = Path(os.environ.get("ASCII_ATRI_MODELS_ROOT") or user_root() / "models")
 
 
 def default_voice_models_root() -> Path:
@@ -57,6 +59,8 @@ class VoiceServiceConfig:
     asr_vad_max_segment_ms: int = 30_000
     asr_preprocess_enabled: bool = True
     asr_max_duration_seconds: int = 300
+    # Zero disables CPU worker reuse; GPU workers always exit after inference.
+    asr_worker_idle_seconds: float = 60.0
     modelscope_cache: Path = field(default_factory=default_modelscope_cache)
     asr_lexicon_path: Path = field(
         default_factory=lambda: PROJECT_ROOT / "data" / "voice" / "asr-hotwords.json"
@@ -113,7 +117,7 @@ class VoiceServiceConfig:
         )
         return cls(
             host=os.getenv("ATRI_VOICE_HOST", "127.0.0.1").strip() or "127.0.0.1",
-            port=_env_int("ATRI_VOICE_PORT", 8790),
+            port=_env_int("ATRI_VOICE_PORT", local_voice_port()),
             asr_provider=os.getenv("ATRI_ASR_PROVIDER", "sensevoice").strip().lower(),
             asr_model=os.getenv("ATRI_ASR_MODEL", default_asr_model).strip(),
             asr_device=os.getenv("ATRI_ASR_DEVICE", "cpu").strip() or "cpu",
@@ -124,6 +128,9 @@ class VoiceServiceConfig:
             asr_preprocess_enabled=_env_bool("ATRI_ASR_PREPROCESS_ENABLED", True),
             asr_max_duration_seconds=max(
                 10, min(1_800, _env_int("ATRI_ASR_MAX_DURATION_SECONDS", 300))
+            ),
+            asr_worker_idle_seconds=max(
+                0.0, min(300.0, _env_float("ATRI_ASR_WORKER_IDLE_SECONDS", 60.0))
             ),
             modelscope_cache=modelscope_cache,
             asr_lexicon_path=_env_path(

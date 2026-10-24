@@ -78,6 +78,10 @@ def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest
     request = _MaterialRequest()
     request.urls.extend(_extract_urls(plain_text))
     request.paths.extend(_extract_paths(plain_text))
+    for url in request.urls:
+        title = _plain_share_title(plain_text, url)
+        if title:
+            request.share_hints.append(f"用户分享标题：{title}")
 
     message = event.get("message")
     if isinstance(message, list):
@@ -119,6 +123,26 @@ def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest
     request.share_hints = _dedupe(request.share_hints)
     request.segment_limitations = _dedupe(request.segment_limitations)
     return request
+
+
+def _plain_share_title(text: str, url: str) -> str:
+    """Recognise platform-generated copy text, never an arbitrary user request.
+
+    Keep the evidence next to this particular URL; another link or file in the
+    message must not be imported by a worker processing just one source.
+    """
+    hostname = (urlparse(url).hostname or '').lower()
+    platform = ('douyin' if hostname in {'douyin.com', 'www.douyin.com', 'v.douyin.com', 'www.iesdouyin.com'}
+                else 'bilibili' if hostname in {'b23.tv', 'www.b23.tv', 'bilibili.com', 'www.bilibili.com'} else '')
+    if not platform or url not in text:
+        return ''
+    prefix = text[:text.index(url)].rstrip()[-1000:]
+    if platform == 'douyin':
+        match = re.search(r'复制打开抖音[，,]\s*看看(【[^\r\n】]+的作品】[^\r\n]+)$', prefix)
+    else:
+        match = re.search(r'【([^\r\n】]+)-哔哩哔哩】$', prefix)
+    return match[1].strip()[:500] if match else ''
+
 
 def _segment_ref(kind: str, data: dict[str, Any], event: dict[str, Any]) -> _SegmentRef:
     name = _first_text(data, "name", "file_name", "filename", "title")

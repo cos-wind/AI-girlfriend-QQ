@@ -9,12 +9,12 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $DefaultLocalModelsRoot = $env:LOCAL_MODELS_ROOT
 if ([string]::IsNullOrWhiteSpace($DefaultLocalModelsRoot)) {
-    $DefaultLocalModelsRoot = Join-Path ("D:\" + [char]0x672C + [char]0x5730 + [char]0x5927 + [char]0x6A21 + [char]0x578B) "models"
+    $DefaultLocalModelsRoot = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".ollama\models"
 }
 $DefaultProjectModelRoot = Join-Path $DefaultLocalModelsRoot "AI_ATRI"
 $AsciiModelRoot = $env:ASCII_ATRI_MODELS_ROOT
 if ([string]::IsNullOrWhiteSpace($AsciiModelRoot)) {
-    $AsciiModelRoot = "D:\AtriModels"
+    $AsciiModelRoot = Join-Path $ProjectDir "models"
 }
 if ([string]::IsNullOrWhiteSpace($ModelRoot)) {
     $ModelRoot = $DefaultProjectModelRoot

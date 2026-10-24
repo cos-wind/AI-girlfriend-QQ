@@ -144,14 +144,6 @@ def _conversation_id(event: dict[str, Any]) -> str:
     return f"private:{event.get('user_id')}"
 
 
-def _singing_context_id(event: dict[str, Any]) -> str:
-    """唱歌状态按实际点歌人隔离，避免同一群里的不同用户互相串歌。"""
-
-    if event.get("message_type") == "group":
-        return f"group:{event.get('group_id')}:user:{event.get('user_id')}"
-    return f"private:{event.get('user_id')}"
-
-
 def _profile_id(event: dict[str, Any]) -> str:
     if event.get("message_type") == "group":
         return f"group:{event.get('group_id')}:user:{event.get('user_id')}"
@@ -169,6 +161,40 @@ def _send_delay(config: Any) -> float:
     delay_min = max(0.0, float(config.message_send_delay_min))
     delay_max = max(delay_min, float(config.message_send_delay_max))
     return random.uniform(delay_min, delay_max)
+
+
+def _visible_char_count(text: Any) -> int:
+    """估算打字耗时用的可见字数（不计空白，兼容任何可 str 化的输入）。"""
+    return sum(1 for char in str(text or "") if not char.isspace())
+
+
+def _typing_delay(config: Any, text: Any) -> float:
+    """段间间隔：模拟"把上一条消息打完"所需的时间。
+
+    ``MESSAGE_SEND_DELAY_MIN/MAX`` 在这里表示**停手后的停顿**区间，真正的打字耗时
+    按 ``TYPING_CHARS_PER_SECOND`` 估算后叠加，整体由 ``TYPING_MAX_DELAY_SECONDS``
+    封顶。这样长消息天然等得更久，短句仍然干脆，避免"毫秒级连发"的机器特征。
+    """
+    speed = max(0.5, float(getattr(config, "typing_chars_per_second", 5.5) or 5.5))
+    typing_seconds = _visible_char_count(text) / speed * random.uniform(0.85, 1.25)
+    pause_min = max(0.0, float(getattr(config, "message_send_delay_min", 0.55) or 0.0))
+    pause_max = max(
+        pause_min, float(getattr(config, "message_send_delay_max", 1.35) or 0.0)
+    )
+    ceiling = max(
+        pause_min, float(getattr(config, "typing_max_delay_seconds", 12.0) or 12.0)
+    )
+    pause = random.uniform(pause_min, pause_max)
+    return min(ceiling, max(pause_min, typing_seconds + pause))
+
+
+def _first_reply_delay(config: Any, text: Any) -> float:
+    """首条回复前的停顿：看到消息 → 起手打字 → 发出，比段间间隔更长也更随机。"""
+    speed = max(0.5, float(getattr(config, "typing_chars_per_second", 5.5) or 5.5))
+    floor = max(0.0, float(getattr(config, "reply_first_delay_min", 0.8) or 0.0))
+    top = max(floor, float(getattr(config, "reply_first_delay_max", 2.5) or 0.0))
+    estimate = floor + _visible_char_count(text) / speed * 0.4 * random.uniform(0.85, 1.3)
+    return max(floor, min(top, estimate))
 
 
 def _require_onebot_action_success(result: dict[str, Any] | None) -> None:

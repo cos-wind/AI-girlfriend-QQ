@@ -4,11 +4,13 @@ import asyncio
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from atri_qq_bot.insights.config import ALL_DIMENSIONS, InsightsConfig
 import atri_qq_bot.insights.config as insights_config_module
 from atri_qq_bot.insights.evaluation import EvaluationSample, EvaluationService
 from atri_qq_bot.insights.evaluation import calculate_overall_score
+from atri_qq_bot.insights.history_import import import_group_history, normalize_group_history
 from atri_qq_bot.insights.store import InsightsStore
 from atri_qq_bot.insights.report import group_summary_html
 from atri_qq_bot.insights.summary import (
@@ -16,6 +18,9 @@ from atri_qq_bot.insights.summary import (
     _fallback_clusters,
     _fallback_report,
     _message_chunks,
+    _normalize_topics,
+    _topic_payload,
+    _topic_signal,
     _activity_profile,
     _summary_prompt,
     _statistics,
@@ -214,6 +219,113 @@ def test_group_archive_and_summary_records_share_one_database(tmp_path) -> None:
     assert store.group_ids()[0]["group_name"] == "评测交流群"
     assert len(store.group_messages("100", (now - timedelta(minutes=1)).isoformat(), (now + timedelta(minutes=1)).isoformat(), 100)) == 3
     assert store.summary_detail(summary_id)["topics"][0]["title"] == "评测系统"  # type: ignore[index]
+
+
+def test_qq_client_history_import_keeps_media_and_is_idempotent(tmp_path) -> None:
+    store = InsightsStore(tmp_path / "history.sqlite3")
+    now = int(datetime.now(timezone.utc).timestamp())
+    event = {
+        "group_id": "300",
+        "message_id": 42,
+        "user_id": 10001,
+        "time": now,
+        "sender": {"card": "群友甲"},
+        "message": [{"type": "image", "data": {"file": "photo.jpg", "url": "https://example.test/photo.jpg"}}],
+    }
+    first = import_group_history(store, "300", [event])
+    second = import_group_history(store, "300", [event])
+    rows = store.group_messages(
+        "300", (datetime.fromtimestamp(now - 60, timezone.utc)).isoformat(),
+        (datetime.fromtimestamp(now + 60, timezone.utc)).isoformat(), 10,
+    )
+    assert first["imported"] == 1
+    assert second["duplicate"] == 1
+    assert rows[0]["content"] == "[图片]"
+    assert rows[0]["media"][0]["url"] == "https://example.test/photo.jpg"
+    assert store.add_group_message(
+        message_key="300:43", group_id="300", user_id="10002", nickname="实时群友",
+        content="实时归档消息", message_type="text", created_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+    )
+    live_duplicate = import_group_history(store, "300", [{**event, "message_id": 43}])
+    assert live_duplicate["duplicate"] == 1
+
+
+def test_qq_client_history_snapshot_does_not_mix_realtime_archive(tmp_path) -> None:
+    store = InsightsStore(tmp_path / "history.sqlite3")
+    now = int(datetime.now(timezone.utc).timestamp())
+    store.add_group_message(
+        message_key="302:realtime", group_id="302", user_id="old", nickname="旧缓存",
+        content="不应混入手动历史快照", message_type="text",
+        created_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+    )
+    messages, meta = normalize_group_history("302", [{
+        "group_id": "302", "message_id": 99, "user_id": 7, "time": now,
+        "sender": {"nickname": "QQ历史"},
+        "message": [{"type": "text", "data": {"text": "本次读取的准确消息"}}],
+    }])
+    assert meta["accepted"] == 1
+    assert len(messages) == 1
+    assert messages[0]["content"] == "本次读取的准确消息"
+
+
+def test_group_summary_progress_and_restart_recovery_are_persisted(tmp_path) -> None:
+    store = InsightsStore(tmp_path / "progress.sqlite3")
+    summary_id = store.create_summary(
+        "303", "2026-08-28T00:00:00+00:00", "2026-08-29T00:00:00+00:00", "manual_save"
+    )
+    store.mark_summary_running(summary_id)
+    store.update_summary_progress(summary_id, 42, "读取 QQ 历史", "已读取第 12 页")
+    running = store.summary_detail(summary_id)
+    assert running["status"] == "running"
+    assert running["progress_percent"] == 42
+    assert running["progress_stage"] == "读取 QQ 历史"
+    assert store.recover_interrupted_summaries() == 1
+    recovered = store.summary_detail(summary_id)
+    assert recovered["status"] == "failed"
+    assert recovered["progress_stage"] == "已中断"
+
+
+def test_manual_summary_reads_qq_client_history_before_analysis(tmp_path) -> None:
+    async def scenario() -> None:
+        config = replace(
+            InsightsConfig.from_env(),
+            database_path=tmp_path / "manual-history.sqlite3",
+            judge_api_key="",
+            summary_enabled=True,
+            summary_min_messages=1,
+            embedding_model="missing/local-model",
+            embedding_local_only=True,
+        )
+        store = InsightsStore(config.database_path)
+        service = GroupSummaryService(store, config)
+        now = int(datetime.now(timezone.utc).timestamp()) - 90
+
+        async def fetcher(group_id, start, end, limit, progress=None):
+            assert group_id == "301"
+            assert start < end
+            assert limit >= 100
+            if progress is not None:
+                await progress(1, 1)
+            return [{
+                "group_id": group_id,
+                "message_id": 99,
+                "user_id": 7,
+                "time": now,
+                "sender": {"nickname": "历史群友"},
+                "message": [{"type": "text", "data": {"text": "这条来自 QQ 客户端已同步的历史记录"}}],
+            }]
+
+        service.set_group_history_fetcher(fetcher)
+        summary_id = await service.submit("301", trigger_type="manual_save", period_type="daily")
+        await asyncio.gather(*tuple(service._jobs))
+        detail = store.summary_detail(summary_id)
+        assert detail is not None
+        assert detail["status"] == "completed"
+        assert detail["message_count"] == 1
+        assert detail["statistics"]["history_import"]["source"] == "qq_client_history"
+        assert detail["statistics"]["history_import"]["accepted"] == 1
+
+    asyncio.run(scenario())
 
 
 def test_evaluation_worker_completes_without_blocking_caller(tmp_path, monkeypatch) -> None:
@@ -417,6 +529,63 @@ def test_keyword_topic_fallback_and_statistics() -> None:
     assert len(stats["hour_distribution"]) == 24
 
 
+def test_topic_payload_uses_semantic_clusters_and_merges_repeated_theme() -> None:
+    """同一主题跨多个时间段时，日报只应保留一条合并后的主题。"""
+    base = datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc)
+    messages = [
+        {"user_id": "1", "nickname": "甲", "content": "Python API 部署报错，建议检查鉴权配置和日志。", "created_at": base.isoformat()},
+        {"user_id": "2", "nickname": "乙", "content": "这个 Python API 的鉴权问题已经定位，下午继续修复。", "created_at": (base + timedelta(minutes=40)).isoformat()},
+        {"user_id": "3", "nickname": "丙", "content": "周末副本开荒怎么配队？我想分享一个游戏攻略。", "created_at": (base + timedelta(minutes=80)).isoformat()},
+        {"user_id": "4", "nickname": "丁", "content": "游戏副本的配队方案确定了，建议晚上按攻略开荒，怎么分工？", "created_at": (base + timedelta(minutes=120)).isoformat()},
+    ]
+    chunks = _message_chunks(messages, size=1)
+    # 这就是向量聚类已经识别出的两组语义主题；旧实现完全忽略这个参数，
+    # 反而按 30 分钟窗口把它们拆成四条重复话题。
+    topics = _topic_payload(chunks, [[0, 1], [2, 3]], max_topics=4)
+
+    assert len(topics) == 2
+    assert sorted(item["message_count"] for item in topics) == [2, 2]
+    assert all(len(item["samples"]) >= 1 for item in topics)
+
+
+def test_large_semantic_cluster_still_splits_into_bounded_bursts() -> None:
+    from atri_qq_bot.insights.summary.topics import _split_topic_bursts
+
+    base = datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc)
+    messages = [
+        {"created_at": (base + timedelta(seconds=index)).isoformat(), "content": str(index)}
+        for index in range(41)
+    ]
+    bursts = _split_topic_bursts(messages)
+    assert [len(burst) for burst in bursts] == [40, 1]
+    assert [message for burst in bursts for message in burst] == messages
+    assert _split_topic_bursts([]) == []
+
+
+def test_topic_signal_excludes_mixed_case_atri_template_reply() -> None:
+    message = {
+        "nickname": "Atri",
+        "content": "（呆毛一翘，红瞳发亮）哼哼，我是高性能的仿生人，今天也要摸摸头。",
+    }
+    assert _topic_signal(message) == 0
+
+
+def test_model_cannot_duplicate_or_rename_local_topic_boundaries() -> None:
+    fallback = [
+        {"title": "Python API 鉴权排查", "message_count": 12, "keywords": [{"word": "Python"}], "samples": ["甲：检查 API 鉴权"]},
+        {"title": "游戏副本配队讨论", "message_count": 8, "keywords": [{"word": "副本"}], "samples": ["乙：晚上开荒"]},
+    ]
+    model = [
+        {"title": "泛泛的聊天互动", "summary": "补充说明", "atri_view": "用更自然的语气描述 Python API 鉴权问题。"},
+        {"title": "泛泛的聊天互动", "summary": "另一个补充", "atri_view": "用更自然的语气描述游戏副本配队。"},
+    ]
+
+    topics = _normalize_topics(model, fallback)
+
+    assert [item["title"] for item in topics] == ["Python API 鉴权排查", "游戏副本配队讨论"]
+    assert [item["message_count"] for item in topics] == [12, 8]
+
+
 def test_group_summary_depth_scales_with_activity() -> None:
     quiet = _activity_profile({"message_count": 8, "member_count": 2, "messages_per_hour": 4})
     busy = _activity_profile({"message_count": 420, "member_count": 28, "messages_per_hour": 120})
@@ -469,7 +638,8 @@ def test_group_summary_html_report_contains_infographic_sections() -> None:
     assert "群聊总览和基本信息" in html
     assert "24H 活跃轨迹" in html
     assert "版本发布" in html
-    assert "亚托莉的看法" in html
+    # 分节标签由「亚托莉的看法」改名为「亚托莉锐评」(insights/report.py:137)。
+    assert "亚托莉锐评" in html
     assert "群友画像 · 活跃成员" in html
     assert "打印 / 保存 PDF" in html
 
@@ -511,6 +681,52 @@ def test_group_summary_service_generates_deterministic_fallback(tmp_path) -> Non
         assert detail["message_count"] == 3
         assert detail["statistics"]["clustering"] == "keyword-fallback"
         assert detail["content"].startswith("# 群 200")
+
+    asyncio.run(scenario())
+
+
+def test_group_summary_manual_save_renders_png_without_onebot(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        config = replace(
+            InsightsConfig.from_env(),
+            database_path=tmp_path / "manual-save.sqlite3",
+            judge_api_key="",
+            summary_enabled=True,
+            summary_min_messages=1,
+            embedding_model="missing/local-model",
+            embedding_local_only=True,
+        )
+        store = InsightsStore(config.database_path)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        store.add_group_message(
+            message_key="manual-save:1", group_id="manual-save", user_id="member-a", nickname="甲",
+            content="讨论群聊总结图片保存", message_type="text", created_at=now.isoformat(),
+        )
+        rendered: list[Path] = []
+
+        def render_image(detail, output_path):
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"png")
+            rendered.append(path)
+            return path
+
+        monkeypatch.setattr("atri_qq_bot.insights.summary.service.render_group_summary_image", render_image)
+        service = GroupSummaryService(store, config)
+        summary_id = await service.submit(
+            "manual-save",
+            (now - timedelta(minutes=1)).isoformat(),
+            (now + timedelta(minutes=1)).isoformat(),
+            trigger_type="manual_save",
+        )
+        await asyncio.gather(*tuple(service._jobs))
+
+        assert store.summary_detail(summary_id)["status"] == "completed"
+        assert len(rendered) == 1
+        assert rendered[0].parent == tmp_path / "summary_reports"
+        assert "manual-save" in rendered[0].name
+        assert rendered[0].suffix == ".png"
+        assert rendered[0].read_bytes() == b"png"
 
     asyncio.run(scenario())
 
@@ -561,7 +777,10 @@ def test_webui_replaces_developer_tab_with_insights_panels() -> None:
     assert 'id="evaluationTrend"' in html
     assert 'id="evaluationTrendDetails"' in html
     assert 'id="evaluationModelProfile"' in html
-    assert 'id="summaryGenerateButton"' in html
+    # 单个 summaryGenerateButton 已由按「群 × 周期」的成套控制取代：
+    # 每个组合各有「立即生成并发送」与「立即生成并保存」两个按钮。
+    assert "generateGroupSummary" in html
+    assert "generateAndDownloadSavedGroupSummary" in html
     assert "/api/evaluations/dashboard" in html
     assert "/api/group-summaries/generate" in html
     assert "/api/evaluations/retry-failed" in html

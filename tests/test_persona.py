@@ -1146,6 +1146,7 @@ def test_normal_private_turn_injects_actual_assistant_history_without_singing(
 
     messages = captured["messages"]
     assert reply == "这组数是随机生成的，没有唯一规律。"
+    assert not any("QQ 整首歌曲清单" in str(message.get("content")) for message in messages)
     assert {
         "role": "assistant",
         "content": "12、47、3、88、25、61、9、73、34、56、18、92、41、7、65、29、80、14、52、36",
@@ -1340,3 +1341,80 @@ def test_group_abstract_meme_bank_is_preserved_when_allowed() -> None:
         word in reply
         for word in ("恢复出厂设置", "meaning", "谜语人", "调戏ai", "原神是一款")
     )
+
+
+
+class _Receipt:
+    def __init__(self, name, content, ok=True):
+        self.name = name
+        self.content = content
+        self.ok = ok
+
+
+def test_canonical_evidence_url_strips_tracking_query_and_normalizes_host() -> None:
+    from atri_qq_bot.persona import _canonical_evidence_url
+
+    messy = (
+        "https://www.bilibili.com/video/BV1QhHi6VErR?buvid=XX7B&from_spmid=main.0.0"
+        "&share_source=COPY&share_session_id=abc&timestamp=123&unique_k=VYHE4ca&up_id=99&p=3"
+    )
+    assert (
+        _canonical_evidence_url(messy)
+        == "https://bilibili.com/video/BV1QhHi6VErR?p=3"
+    )
+    # 分P 这类承载资源身份的查询参数必须保留
+    assert _canonical_evidence_url("https://www.bilibili.com/video/BV1a?p=2").endswith("?p=2")
+
+
+def test_source_matches_receipts_accepts_clean_url_for_tracked_receipt() -> None:
+    """真实来源：模型提交干净链接、回执里是带分P和追踪参数的同一页，必须判为匹配。
+
+    这是线上真实事故的回归测试：以前按整串精确比对，导致 B 站一类带分享参数的
+    链接被判成“编造来源”，final_answer 被反复打回，最终整轮回复丢失。
+    """
+    from atri_qq_bot.persona import _canonical_evidence_url, _source_matches_receipts
+
+    receipts = {
+        _canonical_evidence_url(
+            "https://www.bilibili.com/video/BV1QhHi6VErR?buvid=XX&share_source=COPY&up_id=1&p=3"
+        ),
+        _canonical_evidence_url("https://pgrfm.miraheze.org/wiki/Phigros"),
+    }
+    assert _source_matches_receipts(
+        "https://www.bilibili.com/video/BV1QhHi6VErR", receipts
+    )
+    assert _source_matches_receipts("https://pgrfm.miraheze.org/wiki/Phigros", receipts)
+    # 移动版与桌面版视为同一来源
+    assert _source_matches_receipts("https://m.bilibili.com/video/BV1QhHi6VErR", receipts)
+
+
+def test_source_matches_receipts_still_rejects_fabricated_urls() -> None:
+    from atri_qq_bot.persona import _canonical_evidence_url, _source_matches_receipts
+
+    receipts = {
+        _canonical_evidence_url("https://www.bilibili.com/video/BV1QhHi6VErR?p=3"),
+        _canonical_evidence_url("https://pgrfm.miraheze.org/wiki/Phigros"),
+    }
+    # 同站但不同的视频 -> 不匹配
+    assert not _source_matches_receipts("https://www.bilibili.com/video/BV999", receipts)
+    # 同站但不同的页面 -> 不匹配
+    assert not _source_matches_receipts(
+        "https://pgrfm.miraheze.org/wiki/NotARealPage", receipts
+    )
+    # 完全没出现过的域名 -> 不匹配
+    assert not _source_matches_receipts("https://evil.example.com/Phigros", receipts)
+    # 非 http(s) 一律不匹配
+    assert not _source_matches_receipts("ftp://www.bilibili.com/video/BV1QhHi6VErR", receipts)
+
+
+def test_tool_receipt_urls_ignores_failed_and_irrelevant_receipts() -> None:
+    from atri_qq_bot.persona import _tool_receipt_urls
+
+    receipts = [
+        _Receipt("search_web", "见 https://a.example.com/page?utm_source=x"),
+        _Receipt("open_web_page", "https://b.example.com/doc"),
+        _Receipt("search_web", "https://c.example.com/fail", ok=False),
+        _Receipt("get_current_time", "https://d.example.com/nope"),
+    ]
+    urls = _tool_receipt_urls(receipts)
+    assert urls == {"https://a.example.com/page", "https://b.example.com/doc"}

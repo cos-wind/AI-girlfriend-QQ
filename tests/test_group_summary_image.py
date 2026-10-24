@@ -5,7 +5,7 @@ from pathlib import Path
 from PIL import Image
 
 import atri_qq_bot.insights.image_report as image_report
-from atri_qq_bot.insights.image_report import render_group_summary_image
+from atri_qq_bot.insights.image_report import group_summary_image_path, render_group_summary_image
 from atri_qq_bot.insights.summary import _statistics
 
 
@@ -59,6 +59,23 @@ def test_group_summary_image_wraps_opinion_and_numbers_topics(tmp_path: Path, mo
     with Image.open(short) as short_image, Image.open(long) as long_image:
         assert short_image.width == long_image.width == 1200
         assert long_image.height > short_image.height
+
+
+def test_group_summary_image_path_uses_safe_timestamp_group_and_period(tmp_path: Path) -> None:
+    path = group_summary_image_path(
+        {
+            "id": "abc12345ef",
+            "group_id": "20001",
+            "group_name": '测试/群:*?',
+            "period_type": "weekly",
+            "created_at": "2026-08-27T09:00:01+00:00",
+        },
+        tmp_path,
+    )
+
+    assert path.parent == tmp_path.resolve()
+    assert "测试群_周报_abc12345.png" in path.name
+    assert "/" not in path.name and ":" not in path.name
 
 
 def test_statistics_calculates_member_share_percent() -> None:

@@ -18,11 +18,44 @@ function userDirectoryBadge(text, kind='') {
   return `<span class="badge ${kind ? escapeHtml(kind) : ''}">${escapeHtml(text)}</span>`;
 }
 function userDirectoryEntityKey(item) { return item.entity_type === 'group' ? `group:${item.group_id}` : String(item.user_id || ''); }
+// 对象在记忆里的 id：群聊是 group:<群号>、用户是 person:<QQ>。
+// 由用户目录本身就能推出来，**不需要**等 /api/memory。
+function userDirectoryMemoryId(item) {
+  const isGroup = item?.entity_type === 'group';
+  const raw = String((isGroup ? item?.group_id : item?.user_id) ?? '').trim();
+  if(!/^\d+$/.test(raw)) return '';
+  return (isGroup ? 'group:' : 'person:') + raw;
+}
 function userDirectoryMemory(item) {
-  const userId = String(item?.user_id || '');
-  return (window._memoryItems || []).find(row=>String(row.target?.user_id || '')===userId)
-    || (window._memoryItems || []).find(row=>String(row.id || '')===`person:${userId}` || String(row.id || '')===`private:${userId}`)
-    || null;
+  // 群聊记忆的 id 是 group:<群号>、target 里放的是 group_id；它**没有** user_id。
+  // 以前这里只按 user_id 找，于是群聊卡片永远匹配不到记忆，连"编辑记忆"都渲染不出来。
+  const rows = window._memoryItems || [];
+  const groupId = String(item?.group_id || '');
+  if(groupId) {
+    const hit = rows.find(row=>String(row.id || '')===`group:${groupId}`)
+      || rows.find(row=>String(row.target?.group_id || '')===groupId);
+    if(hit) return hit;
+  } else {
+    const userId = String(item?.user_id || '');
+    const hit = rows.find(row=>String(row.target?.user_id || '')===userId)
+      || rows.find(row=>String(row.id || '')===`person:${userId}` || String(row.id || '')===`private:${userId}`);
+    if(hit) return hit;
+  }
+  // 记忆列表里没有，但**用户目录自己就带记忆计数**（relationship.memory_counts）。
+  // 计数非 0 说明这个对象确实有记忆、编辑器一定打得开（openMemory 走的是另一个
+  // 接口 /api/memory/detail）——所以入口不能因为 /api/memory 慢或失败而消失。
+  // 真实事故：面板打开时赶上服务重启，/api/memory 一直卡着 → 所有「编辑记忆」入口
+  // 集体缺席，而卡片上的记忆计数照常显示，看起来自相矛盾。
+  const counts = item?.relationship?.memory_counts || {};
+  if(Number(counts.total || 0) > 0) {
+    return {
+      id: userDirectoryMemoryId(item),
+      memory_counts: counts,
+      summary: item?.relationship?.summary || '',
+      from_directory: true,
+    };
+  }
+  return null;
 }
 function userDirectoryMemoryCardMarkup(item) {
   const memory=userDirectoryMemory(item);
@@ -52,8 +85,12 @@ async function loadDirectoryQZoneLoginStatus() {
       const data=await api('/api/qzone/login-status');
       window._directoryQzoneLoggedIn=Boolean(data.logged_in);
       if(target) {
-        target.textContent=data.logged_in ? `QQ 空间已登录${data.qq?' · QQ '+data.qq:''}` : (data.login_running?'正在等待 QQ 空间登录…':(data.reachable?'Bridge 在线但未登录':'QQ 空间 Bridge 未启动'));
-        target.className='note '+(data.logged_in?'ok':(data.reachable?'warn':'bad'));
+        // 「Bridge 未启动」不在这里重复：它的运行状态显示在顶部「运行状态」。
+        // 这里只讲登录态，那是顶部没有的信息。
+        target.textContent=data.logged_in
+          ? `QQ 空间已登录${data.qq?' · QQ '+data.qq:''}`
+          : (data.login_running?'正在等待 QQ 空间登录…':(data.reachable?'Bridge 在线但未登录':''));
+        target.className='note '+(data.logged_in?'ok':(data.reachable?'warn':''));
       }
       return data;
     } catch(error) {
@@ -71,8 +108,15 @@ function directoryWithTimeout(promise, timeoutMs=2200) {
 }
 async function refreshDirectoryQZoneData() {
   // 先读本地群聊总结计划；它不依赖 QQ 空间 Bridge。
-  const schedules=await directoryWithTimeout(api('/api/group-summaries/schedules'),1800).catch(()=>({schedules:[]}));
-  window._summarySchedules=schedules.schedules||window._summarySchedules||[];
+  try {
+    const schedules=await directoryWithTimeout(api('/api/group-summaries/schedules'),4000);
+    window._summarySchedules=schedules.schedules||[];
+    window._summarySchedulesLoaded=true;
+  } catch(error) {
+    // 保留上次成功读取的数据；绝不能把接口超时伪装成“该群没有计划”。
+    window._summarySchedules=window._summarySchedules||[];
+    window._summarySchedulesLoaded=false;
+  }
   renderUserDirectory();
   try {
     // 复用首屏已经发出的状态请求，避免同时向 Bridge 发两次 /status。
@@ -103,6 +147,10 @@ async function loadDirectoryAutomationState(retry=true) {
     try {
       const data=await api('/api/qzone/automation');
       window._qzoneAutomation={...(window._qzoneAutomation||{}),...data};
+      // 用户中心里的亚托莉发布卡片也复用 QQ 动态页的模型档案选择器。
+      renderUserDirectory();
+      if(typeof applyQZoneAutomationSettings==='function') applyQZoneAutomationSettings(data.settings||{});
+      if(typeof loadQZoneModelProfiles==='function') await loadQZoneModelProfiles();
       return data;
     } catch(error) {
       window._directoryAutomationError=String(error?.message||error);
@@ -173,8 +221,9 @@ function userDirectoryGroupSummaryCompactMarkup(item) {
 }
 function userDirectoryGroupSummaryMarkup(item) {
   const row=(window._summarySchedules||[]).find(value=>String(value.group_id)===String(item.group_id));
-  if(!row) return `<div class="user-directory-context user-directory-group-summary"><h4>群聊总结</h4><p class="note">尚未读取到该群的总结计划，刷新用户中心后会同步。</p></div>`;
-  const plan=(kind,label)=>{ const enabled=Boolean(Number(row[kind+'_enabled']||0)); const next=row[kind+'_next_at']||''; return `<div class="summary-plan"><label class="switch-line"><input id="${directorySummaryControlId(item.group_id,kind,'enabled')}" type="checkbox" ${enabled?'checked':''}>${label}</label><input id="${directorySummaryControlId(item.group_id,kind,'next_at')}" type="datetime-local" value="${escapeHtml(next)}"><span class="summary-last-sent">${row[kind+'_last_sent_at']?'上次发送：'+escapeHtml(String(row[kind+'_last_sent_at']).replace('T',' ')):'尚未自动发送'}</span><button class="ghost mini" onclick="generateGroupSummary('${escapeHtml(item.group_id)}','${kind}',true)">立即生成并发送</button></div>`; };
+  if(!window._summarySchedulesLoaded) return `<div class="user-directory-context user-directory-group-summary"><h4>群聊总结</h4><p class="note">群聊总结计划正在读取，请稍候。</p></div>`;
+  if(!row) return `<div class="user-directory-context user-directory-group-summary"><h4>群聊总结</h4><p class="note">该群暂无可用的已归档消息，暂时不能生成总结。</p></div>`;
+  const plan=(kind,label)=>{ const enabled=Boolean(Number(row[kind+'_enabled']||0)); const next=row[kind+'_next_at']||''; const encodedGroupId=escapeHtml(encodeURIComponent(String(item.group_id||''))); return `<div class="summary-plan"><label class="switch-line"><input id="${directorySummaryControlId(item.group_id,kind,'enabled')}" type="checkbox" ${enabled?'checked':''}>${label}</label><input id="${directorySummaryControlId(item.group_id,kind,'next_at')}" type="datetime-local" value="${escapeHtml(next)}"><span class="summary-last-sent">${row[kind+'_last_sent_at']?'上次发送：'+escapeHtml(String(row[kind+'_last_sent_at']).replace('T',' ')):'尚未自动发送'}</span><button class="ghost mini" onclick="generateGroupSummary('${escapeHtml(item.group_id)}','${kind}',true,false,this)">立即生成并发送</button><button class="ghost mini" title="生成图文报告并下载，不发送到 QQ" data-group="${encodedGroupId}" data-kind="${kind}" onclick="generateAndDownloadSavedGroupSummary(this)">立即生成并保存</button></div>`; };
   return `<div class="user-directory-context summary-context user-directory-group-summary"><div class="section-head"><div><h4>群聊总结计划</h4><p class="note">日报、周报、月报均在此卡片中设置。</p></div><div class="row"><button class="ghost" onclick="saveDirectoryGroupSummary(this,'${escapeHtml(item.group_id)}')">保存本群计划</button><button class="ghost" onclick="loadDirectoryGroupSummaries(this,'${escapeHtml(item.group_id)}')">加载近期总结</button></div></div><div class="summary-plan-grid">${plan('daily','日报')}${plan('weekly','周报')}${plan('monthly','月报')}</div><div class="directory-group-summary-history"></div></div>`;
 }
 async function loadDirectoryGroupSummaries(button, groupId) {
@@ -183,7 +232,9 @@ async function loadDirectoryGroupSummaries(button, groupId) {
   panel.innerHTML='<p class="note">正在读取近期总结…</p>';
   try {
     const data=await api('/api/group-summaries?group_id='+encodeURIComponent(groupId)+'&limit=20'); const items=data.items||[];
-    panel.innerHTML=items.length ? items.map(item=>`<article class="summary-detail-item"><div class="entry-head"><strong>${escapeHtml(item.title||'群聊总结')}</strong><span class="badge ${item.status==='completed'?'active':(item.status==='failed'?'red':'warn')}" >${escapeHtml(item.status||'')}</span></div><p class="note">${escapeHtml(item.period_label||'')} · ${escapeHtml(String(item.created_at||'').replace('T',' '))} · ${Number(item.message_count||0)} 条消息</p><div class="summary-detail-content">${escapeHtml(item.content||item.error||'报告正在生成…')}</div></article>`).join('') : '<p class="note">本群暂无已生成总结。</p>';
+    if(!items.length) { panel.innerHTML='<p class="note">本群暂无已生成总结。</p>'; return; }
+    const dates=[...new Set(items.map(item=>String(item.period_end||item.created_at||'').replace('T',' ').slice(0,10)||'未记录日期'))];
+    panel.innerHTML='<div class="summary-timeline">'+dates.map(date=>'<section class="summary-timeline-day"><h4>'+escapeHtml(date)+'</h4>'+items.filter(item=>(String(item.period_end||item.created_at||'').replace('T',' ').slice(0,10)||'未记录日期')===date).map(item=>`<article class="summary-timeline-item"><div><strong>${escapeHtml(({daily:'日报',weekly:'周报',monthly:'月报'}[item.period_type]||'群聊总结'))}</strong><span class="note"> · ${escapeHtml(String(item.period_end||item.created_at||'').replace('T',' ').slice(0,16))} · ${Number(item.message_count||0)} 条消息</span></div><div class="summary-actions"><span class="badge ${item.status==='completed'?'active':(item.status==='failed'?'red':'warn')}">${escapeHtml(item.progress_stage||item.status||'')}</span><button class="ghost mini" data-id="${escapeHtml(encodeURIComponent(item.id||''))}" onclick="openSummaryImage(this.dataset.id)">图文</button></div></article>`).join('')+'</section>').join('')+'</div>';
   } catch(error) { panel.innerHTML='<p class="bad">读取群聊总结失败：'+escapeHtml(error.message)+'</p>'; }
 }
 async function saveDirectoryGroupSummary(button, groupId) {
@@ -213,19 +264,77 @@ function userDirectoryAtriPublisherMarkup() {
   const postLogs=(window._qzoneAutomation?.logs||[]).filter(row=>row.action==='post').slice(0,5);
   const logMarkup=postLogs.length ? `<div class="atri-pool">${postLogs.map(row=>`<article class="atri-pool-item"><div class="pool-head"><span class="badge ${row.status==='success'?'active':'red'}">${row.status==='success'?'发布成功':'发布失败'}</span><span class="memory-meta">${qzoneDate(row.created_at)}</span></div><div class="pool-content">${escapeHtml(row.content||row.error||'无正文')}</div></article>`).join('')}</div>` : '<div class="memory-meta">暂无发布日志。</div>';
   const nextContent=item.content || (next.auto_generate?'到达计划时间后由模型生成正文并发布':'暂无待发布动态');
-  return `<div class="user-directory-context proactive-context atri-directory-publisher"><div class="section-head"><div><h4>亚托莉专属：自动发布动态</h4><p class="note">发布配置、下一条内容、内容池和发布记录均在此卡片内。</p></div><span class="badge ${settings.post_enabled?'active':'warn'}">${settings.post_enabled?'已启用':'已暂停'}</span></div><div class="qzone-next-post"><div class="memory-meta">下一条：${next.scheduled_at?qzoneDate(next.scheduled_at):'尚未排期'}</div><div class="qzone-next-post-content">${escapeHtml(nextContent)}</div><div class="memory-meta">${next.auto_generate?'到点自动生成':'已准备正文'} · ${settings.post_model_profile_id?escapeHtml(settings.post_model_profile_id):'当前聊天模型'}</div></div><div class="qzone-auto-switches"><strong>自动互动</strong><label><input id="directoryQzoneLikeEnabled" type="checkbox" ${settings.like_enabled?'checked':''}>自动点赞</label><label><input id="directoryQzoneCommentEnabled" type="checkbox" ${settings.comment_enabled?'checked':''}>自动评论</label><span class="memory-meta">保存后生效</span></div><div class="card-context-values"><span>今日发布：${Number(window._qzoneAutomation?.today?.post||0)}</span><span>今日点赞：${Number(window._qzoneAutomation?.today?.like||0)}</span><span>今日评论：${Number(window._qzoneAutomation?.today?.comment||0)}</span></div><details open><summary>内容池（${visiblePool.length} 条）</summary>${poolMarkup}</details><details><summary>评论池（${commentPool.length} 条）</summary>${commentPoolMarkup}</details><details open><summary>已发布记录（${postLogs.length} 条）</summary>${logMarkup}</details><div class="form-grid qzone-form-grid"><label class="switch-line"><input id="directoryQzonePostEnabled" type="checkbox" ${settings.post_enabled?'checked':''}>启用自动发布</label><label>每几天发布<input id="directoryQzonePeriodDays" type="number" min="1" max="31" value="${Number(settings.period_days||1)}"></label><label>每周期最多几条<input id="directoryQzonePostsPerPeriod" type="number" min="1" max="20" value="${Number(settings.posts_per_period||2)}"></label><label>开始时间<input id="directoryQzoneStartHour" type="number" min="0" max="23" value="${Number.isFinite(Number(settings.post_start_hour))?Number(settings.post_start_hour):9}"></label><label>结束时间<input id="directoryQzoneEndHour" type="number" min="1" max="24" value="${Number.isFinite(Number(settings.post_end_hour))?Number(settings.post_end_hour):23}"></label></div><label class="switch-line"><input id="directoryQzonePostAutoGenerate" type="checkbox" ${settings.post_auto_generate?'checked':''}>到点由模型生成正文并发布</label><textarea id="directoryQzonePostPrompt" class="qzone-comment" maxlength="2000" placeholder="生活趣事、思考感悟、原作剧情、热点观点等主题会按日期轮换">${escapeHtml(settings.post_prompt || '根据当前记忆和情绪，写一条自然、简短、带一点亚托莉口吻的 QQ 空间动态。')}</textarea><div class="row"><button onclick="saveDirectoryAtriPublisher(this)">保存发布设置</button><button class="ghost" onclick="publishDirectoryAtriPost(this)">立即生成并发布</button></div></div>`;
+  return `<div class="user-directory-context proactive-context atri-directory-publisher"><div class="section-head"><div><h4>亚托莉专属：自动发布动态</h4><p class="note">发布配置、下一条内容、内容池和发布记录均在此卡片内。</p></div><span class="badge ${settings.post_enabled?'active':'warn'}">${settings.post_enabled?'已启用':'已暂停'}</span></div><div class="qzone-next-post"><div class="memory-meta">下一条：${next.scheduled_at?qzoneDate(next.scheduled_at):'尚未排期'}</div><div class="qzone-next-post-content">${escapeHtml(nextContent)}</div><div class="memory-meta">${next.auto_generate?'到点自动生成':'已准备正文'} · ${settings.post_model_profile_id?escapeHtml(settings.post_model_profile_id):'当前聊天模型'}</div></div><div class="qzone-auto-switches"><strong>自动互动</strong><label><input id="directoryQzoneLikeEnabled" type="checkbox" ${settings.like_enabled?'checked':''}>自动点赞</label><label><input id="directoryQzoneCommentEnabled" type="checkbox" ${settings.comment_enabled?'checked':''}>自动评论</label><span class="memory-meta">保存后生效</span></div><div class="card-context-values"><span>今日发布：${Number(window._qzoneAutomation?.today?.post||0)}</span><span>今日点赞：${Number(window._qzoneAutomation?.today?.like||0)}</span><span>今日评论：${Number(window._qzoneAutomation?.today?.comment||0)}</span></div><details open><summary>内容池（${visiblePool.length} 条）</summary>${poolMarkup}</details><details><summary>评论池（${commentPool.length} 条）</summary>${commentPoolMarkup}</details><details open><summary>已发布记录（${postLogs.length} 条）</summary>${logMarkup}</details><div class="form-grid qzone-form-grid"><label class="switch-line"><input id="directoryQzonePostEnabled" type="checkbox" ${settings.post_enabled?'checked':''}>启用自动发布</label><label>每几天发布<input id="directoryQzonePeriodDays" type="number" min="1" max="31" value="${Number(settings.period_days||1)}"></label><label>每周期最多几条<input id="directoryQzonePostsPerPeriod" type="number" min="1" max="20" value="${Number(settings.posts_per_period||2)}"></label><label>开始时间<input id="directoryQzoneStartHour" type="number" min="0" max="23" value="${Number.isFinite(Number(settings.post_start_hour))?Number(settings.post_start_hour):9}"></label><label>结束时间<input id="directoryQzoneEndHour" type="number" min="1" max="24" value="${Number.isFinite(Number(settings.post_end_hour))?Number(settings.post_end_hour):23}"></label><label>生成模型<select id="directoryQzoneModelProfile"><option value="">当前聊天模型</option></select></label></div><label class="switch-line"><input id="directoryQzonePostAutoGenerate" type="checkbox" ${settings.post_auto_generate?'checked':''}>到点由模型生成正文并发布</label><textarea id="directoryQzonePostPrompt" class="qzone-comment" maxlength="2000" placeholder="生活趣事、思考感悟、原作剧情、热点观点等主题会按日期轮换">${escapeHtml(settings.post_prompt || '根据当前记忆和情绪，写一条自然、简短、带一点亚托莉口吻的 QQ 空间动态。')}</textarea><div class="row"><button onclick="saveDirectoryAtriPublisher(this)">保存发布设置</button><button class="ghost" onclick="publishDirectoryAtriPost(this)">立即生成并发布</button></div></div>`;
 }
 function userDirectoryDetailMarkup(item) {
-  if(item.entity_type === 'group') {
-    return `<div class="user-directory-inline-detail">${userDirectoryGroupSummaryMarkup(item)}</div>`;
-  }
-  const roles = item.roles || [];
-  const modalityPolicy = window._modalityAccess?.policy?.users?.[String(item.user_id)] || {};
+  // 「编辑记忆」和「视觉/语音权限」对用户与群聊一视同仁：
+  //   · 记忆记录的 id 是 group:<群号>（target.group_id），群聊也是完整对象；
+  //   · 权限策略有独立的 groups 桶，``is_modality_allowed`` 会认群授权。
+  // 以前群聊在这里直接 return，把这两块入口一起吞掉了。
   const memory = userDirectoryMemory(item);
+  // 到这里还拿不到记忆，就是**用户目录本身也说这个对象没有记忆**（memory_counts=0）。
+  const memoryRows = (window._memoryItems || []).length;
+  const memoryAction = memory
+    ? `<div class="row"><button class="ghost" onclick="openMemory('${escapeHtml(memory.id)}')">编辑记忆</button></div>`
+    : `<div class="memory-meta">该对象暂无记忆记录（已载入记忆条目：${memoryRows}${window._memoryLoadError ? '；最近一次读取失败：' + escapeHtml(window._memoryLoadError) : ''}）</div>`
+      + '<div class="row"><button class="ghost mini" onclick="reloadDirectoryMemory(this)">重新载入记忆</button></div>';
+  const isGroup = item.entity_type === 'group';
+  const entityId = String((isGroup ? item.group_id : item.user_id) ?? '');
+  const scope = isGroup ? 'groups' : 'users';
+  const modalityPolicy = window._modalityAccess?.policy?.[scope]?.[entityId] || {};
+  const roles = item.roles || [];
+  // 亚托莉自己的卡片不给授权开关：她的能力由模型配置决定，与白名单无关。
+  const modalityMarkup = (!isGroup && roles.includes('bot')) ? '' : `<div class="row"><label class="switch-line"><input class="user-directory-vision" type="checkbox" ${modalityPolicy.vision?'checked':''}>视觉模型</label><label class="switch-line"><input class="user-directory-voice" type="checkbox" ${modalityPolicy.voice?'checked':''}>语音模型</label><button class="ghost" onclick="saveUserDirectoryModality(this,'${isGroup?'group':'user'}:${escapeHtml(entityId)}')">保存权限</button></div>`;
+  if(isGroup) {
+    return `<div class="user-directory-inline-detail">${memoryAction}${modalityMarkup}${userDirectoryGroupSummaryMarkup(item)}</div>`;
+  }
   const atriMarkup = roles.includes('bot') ? userDirectoryAtriPublisherMarkup() : '';
-  const modalityMarkup = roles.includes('bot') ? '' : `<div class="row"><label class="switch-line"><input class="user-directory-vision" type="checkbox" ${modalityPolicy.vision?'checked':''}>视觉模型</label><label class="switch-line"><input class="user-directory-voice" type="checkbox" ${modalityPolicy.voice?'checked':''}>语音模型</label><button class="ghost" onclick="saveUserDirectoryModality(this,'user:${escapeHtml(item.user_id)}')">保存权限</button></div>`;
-  const memoryAction = memory ? `<div class="row"><button class="ghost" onclick="openMemory('${escapeHtml(memory.id)}')">编辑记忆</button></div>` : '';
   return `<div class="user-directory-inline-detail">${memoryAction}${modalityMarkup}${userDirectoryInlineFeedMarkup(item)}${atriMarkup}</div>`;
+}
+// 记忆接口可能**一直不返回**（服务重启期间打开的页面就会这样：既没报错也没数据）。
+// 不加超时的话，"正在载入"会永久挂着，重试按钮永远停在"载入中…"，自愈也永远不会再试。
+function loadMemoryWithTimeout(ms) {
+  const timeout = Number(ms || window._memoryLoadTimeoutMs || 20000);
+  const attempt = Promise.resolve().then(()=>loadMemory());
+  return Promise.race([
+    attempt,
+    new Promise((_, reject)=>setTimeout(
+      ()=>reject(new Error(`记忆接口 ${Math.round(timeout / 1000)} 秒没有响应，已放弃等待（可再试一次）`)),
+      timeout,
+    )),
+  ]);
+}
+function reloadDirectoryMemory(button) {
+  window._memoryLoadLastAt = 0;
+  return withButtonBusy(button, async () => {
+    try {
+      await loadMemoryWithTimeout();
+      window._memoryLoadError = '';
+      toast('记忆已重新载入');
+    } catch(error) {
+      window._memoryLoadError = (error && error.message) || String(error);
+      toast('记忆载入失败：' + window._memoryLoadError);
+    }
+    renderUserDirectory();
+  }, '载入中…');
+}
+// 记忆没载入时自动补一次：页面如果在服务重启期间打开，那一次 /api/memory 会失败
+// （或一直挂着），而以前**没有任何重试**，于是「编辑记忆」入口会一直缺席。
+// 加 5 秒冷却，避免失败时被每次重绘打成请求风暴。
+function ensureMemoryLoadedForDirectory() {
+  if((window._memoryItems || []).length) return;
+  if(window._memoryLoadPending) return;
+  const now = Date.now();
+  if(now - Number(window._memoryLoadLastAt || 0) < 5000) return;
+  window._memoryLoadLastAt = now;
+  window._memoryLoadPending = true;
+  Promise.resolve()
+    .then(()=> (typeof loadMemory === 'function' ? loadMemoryWithTimeout() : null))
+    .catch(error=>{ window._memoryLoadError = (error && error.message) || String(error); })
+    .then(()=>{
+      window._memoryLoadPending = false;
+      if((window._memoryItems || []).length) { window._memoryLoadError = ''; renderUserDirectory(); }
+    });
 }
 function renderUserDirectory() {
   const state = window._userDirectory || {items:[],groups:[]};
@@ -267,12 +376,21 @@ function renderUserDirectory() {
     // 专属发布/互动能力在展开详情中呈现。
     const cardContext = isGroup ? userDirectoryGroupSummaryCompactMarkup(item) : (roles.includes('bot') ? '' : userDirectoryMemoryCardMarkup(item));
     const activity=item.last_seen_at || (roles.includes('bot') ? userDirectoryFeed(item)?.abstime : '');
-    return `<div class="user-directory-entry"><button type="button" class="user-directory-row ${selected?'selected':''} ${rowClass}" onclick="selectUserDirectoryUser('${escapeHtml(key)}')"><strong>${escapeHtml(title)} ${roleLabel?userDirectoryBadge(roleLabel,'active'):''} ${special}</strong><span class="memory-meta">${isGroup?'群号 '+escapeHtml(item.group_id):'QQ '+escapeHtml(item.user_id)} · ${Number(item.message_count||0)} 条消息${activity ? ' · 最近 '+escapeHtml(userDirectoryTimeText(activity)) : ''}</span>${cardContext}</button>${selected ? userDirectoryDetailMarkup(item) : ''}</div>`;
+    // 折叠状态也直接给「编辑记忆」入口：以前它只存在于展开详情里，用户在用户中心
+    // 看不到任何按钮，以为入口被删了（群聊尤其明显，因为群卡片只有一段摘要）。
+    // 展开时由详情渲染同样的按钮，这里就不再重复。
+    const collapsedMemory = selected ? null : userDirectoryMemory(item);
+    const quickActions = collapsedMemory
+      ? `<div class="row user-directory-quick-actions"><button class="ghost mini" onclick="openMemory('${escapeHtml(collapsedMemory.id)}')">编辑记忆</button></div>`
+      : '';
+    return `<div class="user-directory-entry"><button type="button" class="user-directory-row ${selected?'selected':''} ${rowClass}" onclick="selectUserDirectoryUser('${escapeHtml(key)}')"><strong>${escapeHtml(title)} ${roleLabel?userDirectoryBadge(roleLabel,'active'):''} ${special}</strong><span class="memory-meta">${isGroup?'群号 '+escapeHtml(item.group_id):'QQ '+escapeHtml(item.user_id)} · ${Number(item.message_count||0)} 条消息${activity ? ' · 最近 '+escapeHtml(userDirectoryTimeText(activity)) : ''}</span>${cardContext}</button>${quickActions}${selected ? userDirectoryDetailMarkup(item) : ''}</div>`;
   };
   const target = $('userDirectoryRows');
   if(!target) return;
   const html = [sortedUsers.length ? `<div class="user-directory-section-title">用户（${sortedUsers.length}）</div>${sortedUsers.map(card).join('')}` : '', groups.length ? `<div class="user-directory-section-title">群聊（${groups.length}）</div>${groups.map(card).join('')}` : ''].join('');
   target.innerHTML = html || '<div class="empty">没有匹配的用户或群聊。</div>';
+  // 记忆没载入时在这里补一次（见 ensureMemoryLoadedForDirectory），载入成功后自动重绘。
+  ensureMemoryLoadedForDirectory();
   const status = state.sourceStatus || {};
   const qzoneStatus = status.qzone || '未刷新';
   const qzoneDetail = window._directoryQzoneFeedError ? `（${window._directoryQzoneFeedError.slice(0,120)}）` : '';

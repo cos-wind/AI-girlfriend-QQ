@@ -1,0 +1,24 @@
+# SearXNG 配置（精简版，适合 ATRI 本地自托管）
+use_default_settings: true
+
+general:
+  instance_name: "ATRI Search"
+
+server:
+  secret_key: "atri-local-searxng-secret-change-me"
+  bind_address: "0.0.0.0"
+  port: 8080
+
+search:
+  # 默认语言与市场；ATRI 会通过参数动态覆盖
+  default_lang: "all"
+  # 关闭安全搜索，保证技术内容完整召回
+  safe_search: 0
+  # 启用的引擎（按需增减；留空则用默认全部）
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0

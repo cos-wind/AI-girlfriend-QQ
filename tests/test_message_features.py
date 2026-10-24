@@ -530,8 +530,23 @@ def test_speechless_and_teasing_folders_can_send_manual_images(tmp_path) -> None
     assert str(teasing_image) in teasing.file_url
 
 
-def test_atri_manual_sticker_config_resolves_precise_images() -> None:
-    sticker_dir = Path(__file__).resolve().parents[1] / "data" / "stickers"
+def test_atri_manual_sticker_config_resolves_precise_images(tmp_path) -> None:
+    sticker_dir = tmp_path / "stickers"
+    examples = {
+        "无语": ("speechless", "atri_unamused_blank.jpg"),
+        "我超怕": ("teasing", "atri_teasing_scared.jpg"),
+        "气死": ("angry", "atri_angry_complain.jpg"),
+        "贴贴": ("affection", "atri_soft_shy.jpg"),
+    }
+    triggers = {}
+    for trigger, (emotion, filename) in examples.items():
+        image = sticker_dir / emotion / filename
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"test-image")
+        triggers[trigger] = {"emotion": emotion, "file": f"{emotion}/{filename}"}
+    (sticker_dir / "triggers.json").write_text(
+        json.dumps({"trigger_words": triggers}, ensure_ascii=False), encoding="utf-8"
+    )
     manager = StickerManager(sticker_dir, sticker_dir / "triggers.json")
 
     speechless = manager.choose("无语到麻了", "我先看你一眼", chance=0.0)

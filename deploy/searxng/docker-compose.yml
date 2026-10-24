@@ -1,0 +1,14 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: atri-searxng
+    ports:
+      - "8888:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8888/
+      # 若你有海外代理，可取消下面注释让 SearXNG 出网更稳：
+      # - SEARXNG_PROXY=http://127.0.0.1:7890
+      - SEARXNG_SECRET=atri-local-searxng-secret-change-me
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped

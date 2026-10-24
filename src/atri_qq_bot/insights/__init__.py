@@ -5,7 +5,7 @@ from .evaluation import EvaluationSample, context_from_tool_context
 from .runtime import InsightsRuntime
 from .store import InsightsStore
 from .report import group_summary_html
-from .image_report import render_group_summary_image
+from .image_report import group_summary_image_path, render_group_summary_image
 from .summary import summary_markdown
 
 __all__ = [
@@ -19,4 +19,5 @@ __all__ = [
     "summary_markdown",
     "group_summary_html",
     "render_group_summary_image",
+    "group_summary_image_path",
 ]

@@ -9,7 +9,7 @@ The TTS inventory began as a metadata-only audit. The two approved TTS candidate
 - Default: SenseVoiceSmall with local FSMN-VAD, 16kHz mono preprocessing, and a hot-reloaded project lexicon.
 - Candidate: `FunAudioLLM/Fun-ASR-Nano-2512`, pinned at `272c57b82523ada6fd87095e955f8e29100979ab`.
 - Candidate: `mobiuslabsgmbh/faster-whisper-large-v3-turbo`, pinned at `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`.
-- Candidate weights live under `D:\本地大模型\models\AI_ATRI\voice\asr`; their Python packages live under `data\runtime\asr-candidate-runtime`.
+- Candidate weights live under `<MODEL_ROOT>\voice\asr`; their Python packages live under `data\runtime\asr-candidate-runtime`.
 - The six-sample tri-language screen selected SenseVoice as the online engine. The other two candidates remain available for future real-microphone evaluation and are not loaded into the 8GB GPU during normal operation.
 
 ## Recommended evaluation order
@@ -89,7 +89,7 @@ The TTS inventory began as a metadata-only audit. The two approved TTS candidate
 Before any candidate is downloaded:
 
 1. Pin the repository revision and expected files.
-2. Download into `D:\本地大模型\models\AI_ATRI\voice\candidates\<candidate>`.
+2. Download into `<MODEL_ROOT>\voice\candidates\<candidate>`.
 3. Verify file size and SHA-256 against this inventory.
 4. Treat `.pth` and `.ckpt` as untrusted serialized data and inspect them in the isolated voice runtime only.
 5. Never execute repository-provided Python files without static review.

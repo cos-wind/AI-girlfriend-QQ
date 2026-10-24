@@ -6,6 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from ..runtime.paths import PROACTIVE_POLICY_PATH
+from ..runtime.reply_strategy import (
+    AFFECTION_TIER_FIELDS,
+    ACTIVITY_TIER_FIELDS,
+    load_reply_strategy,
+    merge_tier_table,
+    proactive_tier_overrides,
+)
 from .time_utils import parse_hhmm, safe_zoneinfo
 
 
@@ -32,13 +39,6 @@ DEFAULT_PROACTIVE_POLICY: dict[str, Any] = {
     "history_limit": 8,
     "max_chars": 90,
     "ignored_backoff": 1.5,
-    "tiers": [
-        {"id": "low", "name": "较低", "min_affection": 0, "max_affection": 35, "enabled": False, "min_hours": 18, "max_hours": 30, "daily_limit": 0},
-        {"id": "normal", "name": "普通", "min_affection": 35, "max_affection": 55, "enabled": True, "min_hours": 10, "max_hours": 24, "daily_limit": 1},
-        {"id": "familiar", "name": "熟悉", "min_affection": 55, "max_affection": 70, "enabled": True, "min_hours": 5, "max_hours": 14, "daily_limit": 2},
-        {"id": "close", "name": "亲近", "min_affection": 70, "max_affection": 85, "enabled": True, "min_hours": 2.5, "max_hours": 9, "daily_limit": 3},
-        {"id": "intimate", "name": "亲密", "min_affection": 85, "max_affection": 101, "enabled": True, "min_hours": 1.5, "max_hours": 6, "daily_limit": 4},
-    ],
     "content_weights": {
         "morning": 8,
         "goodnight": 7,
@@ -62,7 +62,55 @@ DEFAULT_PROACTIVE_POLICY: dict[str, Any] = {
 
 
 def default_proactive_policy() -> dict[str, Any]:
-    return deepcopy(DEFAULT_PROACTIVE_POLICY)
+    policy = deepcopy(DEFAULT_PROACTIVE_POLICY)
+    # 两张档位表都不在这里定义：它们住在 reply_strategy.json 的 affection_tiers /
+    # activity_tiers 里，由 load_proactive_policy() 注入，见下面的 tier 合并说明。
+    policy["tiers"] = []
+    policy["activity_tiers"] = []
+    return policy
+
+
+def _effective_activity_tiers(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    """群聊活跃度档位：同样以回复策略里的 ``activity_tiers`` 为唯一来源。
+
+    群聊的主动消息按群活跃度命中同一档，用这一档的随机间隔与每日上限，所以这份
+    档位必须能被 planner 看到。
+    """
+
+    return [
+        dict(tier) for tier in load_reply_strategy().get("activity_tiers") or []
+    ]
+
+
+def _effective_tiers(policy: dict[str, Any], payload: Any) -> list[dict[str, Any]]:
+    """给主动互动用的档位视图：以回复策略的档位表为唯一来源。
+
+    旧版本 ``proactive_policy.json`` 里自带一张好感档位表，好感范围与回复策略里的
+    完全重复。为了让升级后的用户不至于丢掉当时配好的随机间隔／每日上限，这里做一次
+    只读合并：
+    * 档位名、好感范围、启用状态一律取 ``affection_tiers``（唯一来源）；
+    * 仅在 ``proactive_tiers_migrated`` 还没置位时，把旧表里的
+      ``min_hours`` / ``max_hours`` / ``daily_limit`` 盖上去；
+    * WebUI 保存过任意一次配置后标记置位，之后完全以 ``affection_tiers`` 为准。
+    """
+
+    tiers = [
+        dict(tier) for tier in load_reply_strategy().get("affection_tiers") or []
+    ]
+    if not tiers:
+        return []
+    if _as_bool(policy.get("proactive_tiers_migrated", False)):
+        return tiers
+    if not isinstance(payload, dict):
+        return tiers
+    overrides = proactive_tier_overrides(payload.get("tiers"))
+    if not overrides:
+        return tiers
+    for tier in tiers:
+        merged = overrides.get(str(tier.get("id") or ""))
+        if merged:
+            tier.update(merged)
+    return tiers
 
 
 def load_proactive_policy(path: Path | None = None) -> dict[str, Any]:
@@ -73,12 +121,50 @@ def load_proactive_policy(path: Path | None = None) -> dict[str, Any]:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default_proactive_policy()
-    return normalize_proactive_policy(payload)
+    policy = normalize_proactive_policy(payload)
+    # 旧档位表只作为一次性迁移来源参与计算，结果不落盘：唯一来源是
+    # reply_strategy.json，保存时由 WebUI 把合并后的整张表写回去。
+    policy["tiers"] = _effective_tiers(policy, payload)
+    policy["activity_tiers"] = _effective_activity_tiers(policy)
+    return policy
+
+
+def persist_tiers_from_payload(payload: Any) -> dict[str, list[dict[str, Any]]]:
+    """把主动互动页面提交的档位表写回唯一来源 ``reply_strategy.json``。
+
+    两张表分别承载两套分档：``tiers`` 是私聊好感档位（用户分档页签），
+    ``activity_tiers`` 是群聊活跃度档位（群聊分档页签）。两边的保存入口都会提交
+    同一份快照，所以这里两张都合并，返回值供接口直接回给前端。
+    """
+
+    if not isinstance(payload, dict):
+        return {}
+    merged: dict[str, list[dict[str, Any]]] = {}
+    affection = merge_tier_table(
+        payload.get("tiers"),
+        table="affection_tiers",
+        fields=AFFECTION_TIER_FIELDS,
+        migrate_marker="proactive_tiers_migrated",
+    )
+    if affection is not None:
+        merged["tiers"] = affection
+    activity = merge_tier_table(
+        payload.get("activity_tiers"),
+        table="activity_tiers",
+        fields=ACTIVITY_TIER_FIELDS,
+    )
+    if activity is not None:
+        merged["activity_tiers"] = activity
+    return merged
 
 
 def save_proactive_policy(payload: dict[str, Any], path: Path | None = None) -> dict[str, Any]:
     target = path or PROACTIVE_POLICY_PATH
     policy = normalize_proactive_policy(payload)
+    # 两张档位表都不属于这个文件：唯一来源是 reply_strategy.json，写在这里只会变成
+    # 第二个真相（历史上就是这么长出重复分档表的）。
+    policy.pop("tiers", None)
+    policy.pop("activity_tiers", None)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         backup = target.with_suffix(".bak")
@@ -86,6 +172,8 @@ def save_proactive_policy(payload: dict[str, Any], path: Path | None = None) -> 
     temp = target.with_suffix(".tmp")
     temp.write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(target)
+    # 档位表不进 proactive_policy.json：唯一来源是 reply_strategy.json，由
+    # persist_tiers_from_payload() 负责落盘（见 WebUI 的 /api/proactive/save）。
     return policy
 
 
@@ -129,23 +217,6 @@ def normalize_proactive_policy(payload: Any) -> dict[str, Any]:
         timezone_name = str(payload["timezone"]).strip() or "Asia/Shanghai"
         safe_zoneinfo(timezone_name)
         policy["timezone"] = timezone_name
-
-    incoming_tiers = payload.get("tiers")
-    if isinstance(incoming_tiers, list):
-        by_id = {str(item.get("id")): item for item in incoming_tiers if isinstance(item, dict)}
-        normalized_tiers: list[dict[str, Any]] = []
-        for default in policy["tiers"]:
-            incoming = by_id.get(default["id"], {})
-            tier = dict(default)
-            tier["name"] = str(incoming.get("name", tier["name"]))[:12]
-            tier["enabled"] = _as_bool(incoming.get("enabled", tier["enabled"]))
-            tier["min_affection"] = _bounded_float(incoming.get("min_affection", tier["min_affection"]), 0, 100, "min_affection")
-            tier["max_affection"] = _bounded_float(incoming.get("max_affection", tier["max_affection"]), tier["min_affection"], 101, "max_affection")
-            tier["min_hours"] = _bounded_float(incoming.get("min_hours", tier["min_hours"]), 0.25, 168, "min_hours")
-            tier["max_hours"] = _bounded_float(incoming.get("max_hours", tier["max_hours"]), tier["min_hours"], 336, "max_hours")
-            tier["daily_limit"] = _bounded_int(incoming.get("daily_limit", tier["daily_limit"]), 0, 12, "daily_limit")
-            normalized_tiers.append(tier)
-        policy["tiers"] = normalized_tiers
 
     incoming_weights = payload.get("content_weights")
     if isinstance(incoming_weights, dict):

@@ -195,6 +195,8 @@ class ProactivePlanner:
 
 
 def tier_for_affection(policy: dict[str, Any], affection: float) -> dict[str, Any] | None:
+    # 档位表由 load_proactive_policy() 从 reply_strategy.json 注入：好感范围只配一次，
+    # 回复门控和主动调度共用同一份，不会再出现两处范围改漏一边的情况。
     for tier in policy.get("tiers") or []:
         if float(tier["min_affection"]) <= affection < float(tier["max_affection"]):
             return tier
@@ -228,21 +230,34 @@ def candidate_tier(
             }, "已手动允许"
         if not policy.get("group_enabled", False):
             return None, "群聊主动互动未启用"
-        if int(policy.get("group_daily_limit", 2)) <= 0:
-            return None, "群聊每日上限为 0"
+        # 群聊的间隔与每日上限现在也住在档位表里（与用户分档同构）：
+        # 按群活跃度命中一档，用这一档的数值。空档位表时退回全局默认。
+        activity = float(state.get("group_activity_score", 0))
+        group_tier = next(
+            (
+                tier
+                for tier in policy.get("activity_tiers") or []
+                if float(tier["min_activity"]) <= activity < float(tier["max_activity"])
+            ),
+            None,
+        )
+        if group_tier is None:
+            return None, "没有匹配的群活跃度档位"
+        if not group_tier.get("enabled", True):
+            return None, "该群活跃度档位已停用"
+        if int(group_tier.get("daily_limit") or 0) <= 0:
+            return None, "该档位不在群里主动说话"
         if message_count < int(policy.get("group_min_messages", 12)):
             return None, "群消息量不足"
         if not last_user_at or now_ts - last_user_at > int(policy.get("group_active_days", 3)) * 86400:
             return None, "群聊近期不活跃"
-        if float(state.get("group_activity_score", 0)) < float(policy.get("group_min_activity", 55)):
-            return None, "群活跃度未达门槛"
         return {
-            "id": "active_group",
-            "name": "活跃群聊",
+            "id": str(group_tier["id"]),
+            "name": str(group_tier.get("name") or group_tier["id"]),
             "enabled": True,
-            "min_hours": float(policy.get("group_min_hours", 3)),
-            "max_hours": float(policy.get("group_max_hours", 9)),
-            "daily_limit": int(policy.get("group_daily_limit", 2)),
+            "min_hours": float(group_tier["min_hours"]),
+            "max_hours": float(group_tier["max_hours"]),
+            "daily_limit": int(group_tier["daily_limit"]),
         }, "已入选"
 
     if not is_owner and trust_tier not in {"approved", "trusted"} and override != "allow":

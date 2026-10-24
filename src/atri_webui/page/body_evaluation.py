@@ -42,5 +42,5 @@ PART = r"""        <div id="evaluationDashboardPanel" class="insight-subpanel ac
 
       </div>
 
-      <div id="minecraft" class="panel">
+      <div id="advanced" class="panel">
 """

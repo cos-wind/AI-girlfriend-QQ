@@ -4,6 +4,28 @@ from .support import ToolboxMixin
 
 
 class ToolboxRequestMixin(ToolboxMixin):
+    async def analyze_url_material(self, url: str, share_text: str = '') -> ToolAnalysisResult:
+        """Run a durable URL import through the same request pipeline as QQ.
+
+        Only the selected URL is fetched. Platform share captions are evidence
+        supplied by the user, not proof of reading the remote video's contents.
+        """
+        from ..toolbox_parts.request_collection import _plain_share_title
+        title = _plain_share_title(share_text, url)
+        event = {'message': [{'type': 'share', 'data': {'url': url, 'title': title}}]} if title else {}
+        result = await self.analyze(event, url)
+        if result is None:
+            raise ValueError('资料解析工具已关闭或未返回可读内容')
+        if title and (result.read_level == 'metadata_only' or not any(
+                m.get('text', '').strip() for m in result.knowledge_materials)):
+            text = '用户提供的分享标题（未读取视频画面、音轨或字幕；标题可能被分享平台截断）：\n' + title
+            result = replace(result, knowledge_materials=[
+                *(m for m in result.knowledge_materials if m.get('text', '').strip()), {
+                'title': title, 'locator': url, 'text': text, 'coverage': 'user_share_metadata_only',
+                'blocks': [{'anchor': 'user_share_title', 'text': text}],
+            }])
+        return result
+
     async def analyze(
         self,
         event: dict[str, Any],
@@ -23,6 +45,7 @@ class ToolboxRequestMixin(ToolboxMixin):
         limitations: list[str] = []
         sources: list[str] = []
         read_levels: list[str] = []
+        knowledge_materials: list[dict[str, Any]] = []
         visual_data: bytes | None = None
         visual_source = ""
         visual_kind = ""
@@ -31,6 +54,11 @@ class ToolboxRequestMixin(ToolboxMixin):
         visual_fallback_available = False
 
         def track_visual_result(result: ToolAnalysisResult) -> None:
+            knowledge_materials.extend(result.knowledge_materials)
+            if not result.knowledge_materials:
+                knowledge_materials.append({"title": "媒体分析记录", "text": "\n".join(result.findings),
+                    "locator": ", ".join(result.sources), "coverage": "analysis_summary:" + result.read_level,
+                    "raw": result.visual_data, "filename": "visual.bin"})
             nonlocal visual_data
             nonlocal visual_source
             nonlocal visual_kind
@@ -199,6 +227,7 @@ class ToolboxRequestMixin(ToolboxMixin):
             visual_status=_merge_visual_statuses(visual_statuses),
             visual_ocr_confidence=visual_ocr_confidence,
             visual_fallback_available=visual_fallback_available,
+            knowledge_materials=knowledge_materials,
         )
 
     async def _analyze_video_ref_bounded(

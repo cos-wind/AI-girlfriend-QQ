@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,7 @@ class SpeechApplication:
         self.singing_jobs = self.singing_service.jobs
         self._last_quality: dict[str, Any] | None = None
         self._tts_idle_shutdown_task: Any | None = None
+        self._last_asr_timings: dict[str, float] = {}
 
     async def _ensure_tts_runtime(self) -> bool:
         """Allow cold-start loading without extending ordinary inference forever."""
@@ -111,12 +113,13 @@ class SpeechApplication:
             "singing": singing_status["clips"],
             "singing_jobs": singing_status["jobs"],
             "inference_resources": self.resources.status(),
+            "last_asr_timings": dict(getattr(self, "_last_asr_timings", {})),
             "profiles": profiles,
             # The service is request-ready before SenseVoice is resident.
             # ASR's own ``loaded`` flag still reports its exact model state.
-            "ready": bool(asr_status.get("dependency_available"))
-            and not bool(asr_status.get("load_error"))
-            and any(profile["ready"] for profile in profiles),
+            "ready": (bool(asr_status.get("dependency_available"))
+                      and not bool(asr_status.get("load_error")))
+            or any(profile["ready"] for profile in profiles),
         }
 
     async def warmup_asr(self) -> None:
@@ -126,6 +129,18 @@ class SpeechApplication:
         except ProviderError:
             # The error remains visible through /health; a later request can retry.
             return
+
+    async def control_asr(self, action: str) -> dict[str, Any]:
+        if action not in {"start", "stop"}:
+            raise ProviderError("不支持的识别模型操作")
+        # Share the inference queue with microphone requests and TTS. No runtime
+        # shutdown is needed: resident mode deliberately uses CPU only.
+        async with self.resources.lease("asr:control", timeout_seconds=30):
+            if action == "start":
+                await self.asr.load_resident()
+            else:
+                await self.asr.unload()
+        return {"ok": True, "asr": self.asr.status()}
 
     async def prewarm_tts(self) -> None:
         """Load GPT-SoVITS before the first authorized conversation needs it."""
@@ -141,23 +156,33 @@ class SpeechApplication:
             return
 
     async def transcribe(self, payload: dict[str, Any]) -> dict[str, Any]:
+        started = time.perf_counter()
         audio_path = Path(str(payload.get("audio_path") or "")).expanduser().resolve()
         if not audio_path.is_file():
             raise ProviderError("待识别语音文件不存在")
         try:
             async with self.resources.lease("asr"):
+                acquired = time.perf_counter()
                 asr_device = str(self.config.asr_device or "cpu").strip().lower()
                 requires_gpu = asr_device.startswith(("cuda", "gpu"))
                 if not await prepare_asr_runtime(requires_gpu=requires_gpu):
                     raise ProviderError("无法为语音识别释放本地推理资源")
+                prepared = time.perf_counter()
                 result = await self.asr.transcribe(
                     audio_path,
                     str(payload.get("language") or "auto"),
                 )
         finally:
-            # QQ voice input is sporadic. Do not leave this multi-GB model
-            # resident alongside GPT-SoVITS and Ollama after one message.
-            await self.asr.unload()
+            # CPU reuse is bounded by the worker idle timer; GPU workers exit
+            # after each request to return VRAM to TTS.
+            release = getattr(self.asr, "release_after_request", self.asr.unload)
+            await release()
+        self._last_asr_timings = {
+            "queue_seconds": round(acquired - started, 4),
+            "resource_prepare_seconds": round(prepared - acquired, 4),
+            **getattr(self.asr, "last_timings", {}),
+            "total_seconds": round(time.perf_counter() - started, 4),
+        }
         return {
             "ok": True,
             "text": result.text,

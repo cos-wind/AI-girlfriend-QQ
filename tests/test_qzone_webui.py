@@ -87,8 +87,12 @@ def test_qzone_admin_reads_and_normalizes_selected_users_feeds() -> None:
     )
     result = admin.feeds("10001", 10)
 
-    assert calls[0][0] == "get_emotion_list"
-    assert calls[0][1]["user_id"] == 10001
+    # get_emotion_list 更快，但会话刷新后可能返回空页面（即使同一好友在 QQ
+    # 空间里可读），因此改为带显式 feed_owner 的 get_feeds_html_act_all 直读
+    # 该好友自己的空间主页。
+    assert calls[0][0] == "get_feeds_html_act_all"
+    assert str(calls[0][1]["feed_owner"]) == "10001"
+    assert calls[0][1]["include_image_data"] is False
     assert result["feeds"][0]["tid"] == "feed-1"
     assert result["feeds"][0]["content"] == "今天天气很好"
     assert result["feeds"][0]["comment_count"] == 1
@@ -118,14 +122,24 @@ def test_qzone_admin_sends_manual_like_and_comment_actions() -> None:
     ]
 
 
-def test_qzone_admin_rejects_users_not_in_memory_panel() -> None:
+def test_qzone_admin_accepts_manual_qq_and_rejects_invalid_ids() -> None:
     admin = QZoneAdmin(
         memory_payload(),
-        QZoneBridgeClient(enabled_settings(), requester=lambda *_: {}),
+        QZoneBridgeClient(
+            enabled_settings(), requester=lambda *_: {"data": {"items": []}}
+        ),
     )
 
-    with pytest.raises(ValueError, match="记忆面板"):
-        admin.feeds("99999")
+    # 记忆面板里没有的合法 QQ 号会被当作"手动添加"条目接受，
+    # 这样界面才能手工读取任意好友的空间。Bridge 访问仍受回环地址限制保护
+    # （见 test_qzone_bridge_rejects_non_loopback_urls）。
+    result = admin.feeds("99999")
+    assert result["ok"] is True
+    assert result["user"]["user_id"] == "99999"
+    assert result["user"]["affection_label"] == "手动添加"
+
+    with pytest.raises(ValueError, match="QQ 号无效"):
+        admin.feeds("not-a-qq")
 
 
 def test_qzone_bridge_rejects_non_loopback_urls() -> None:
@@ -167,9 +181,40 @@ def test_qzone_feed_normalizer_does_not_expose_raw_image_data() -> None:
 def test_webui_contains_manual_qzone_controls() -> None:
     html = render_index()
 
-    assert "onclick=\"showTab(event,'qzone')\"" in html
-    assert 'id="qzoneUser"' in html
+    # QQ 空间控件在 WebUI 重构中从独立的 qzone 标签页搬进了「用户中心」，
+    # 原来手选好友的 id="qzoneUser" 也由用户中心列表取代。
+    assert "showTab(event,'users')" in html
+    assert 'id="qzoneModelProfile"' in html
+    assert 'id="directoryQzoneModelProfile"' in html
+    assert 'id="qzoneGlobalModelProfile"' in html
+    assert "saveGlobalQZoneModelProfile" in html
+    assert "post_model_profile_id:" in html
+    assert "loadQZoneModelProfiles" in html
+    assert "loadProfiles(); loadQZoneModelProfiles();" in html
     assert "/api/qzone/feeds" in html
     assert "/api/qzone/like" in html
     assert "/api/qzone/comment" in html
-    assert "确认并发布评论" in html
+    assert "发表生成评论" in html
+
+
+def test_user_directory_qzone_publisher_has_model_selector() -> None:
+    html = render_index()
+
+    assert 'id="directoryQzoneModelProfile"' in html
+    assert "post_model_profile_id:" in html
+
+
+def test_qzone_global_model_selector_has_configured_chat_profiles_on_first_render(monkeypatch) -> None:
+    from atri_webui.page import index
+
+    monkeypatch.setattr(index, "load_model_profiles", lambda: [
+        {"id": 'chat-"sample', "name": "示例聊天 <A>", "model": "sample-chat", "model_type": "chat"},
+        {"id": "second-chat", "model": "other-chat"},
+        {"id": "embedding-only", "model": "sample-embed", "model_type": "embedding"},
+    ])
+    html = render_index()
+
+    assert 'value="chat-&quot;sample"' in html
+    assert "示例聊天 &lt;A&gt;" in html
+    assert 'value="second-chat"' in html
+    assert 'value="embedding-only"' not in html

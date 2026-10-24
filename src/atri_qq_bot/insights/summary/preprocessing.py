@@ -164,6 +164,7 @@ def _statistics(
         local_period_start = datetime.fromisoformat(str(period_start)).astimezone().date() if period_start else None
     except (TypeError, ValueError):
         local_period_start = None
+    member_samples: dict[str, list[tuple[int, int, int, str]]] = defaultdict(list)
     for message in messages:
         user_id = str(message.get("user_id") or "")
         member = members.setdefault(
@@ -196,10 +197,21 @@ def _statistics(
         member["links"] += has_link
         member["mentions"] += has_mention
         member["action_signals"] += has_action
-        # 成员画像只统计自然聊天关键词；ATRI 的固定动作描写不应被当成该成员的主题。
-        is_template_reply = ("ATRI" in str(message.get("nickname") or "") or "亚托莉" in str(message.get("nickname") or "")) and bool(
+        # 保留每位成员最能代表风格的 1–3 条原话，供画像层和模型推测说话风格。
+        # 优先选题/问句，其次链接信息，最后长文本；带表情/媒体的短句降权。
+        is_atri_name = ("ATRI" in str(message.get("nickname") or "") or "亚托莉" in str(message.get("nickname") or ""))
+        is_template_reply = is_atri_name and bool(
             re.search(r"呆毛|红瞳|签到|好感度|高性能的仿生人|抢来吃掉|捏捏|摸摸头|叉腰|凑近屏幕", content)
         )
+        if content.strip() and not is_template_reply:
+            text = content.strip().replace("@群友", "").strip()[:140]
+            prio = (int(has_question), int(has_link), min(len(text) // 12, 8))
+            candidate = (prio[0], prio[1], prio[2], text)
+            bucket = member_samples[user_id]
+            bucket.append(candidate)
+            if len(bucket) > 8:
+                bucket.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+                del bucket[3:]
         if not is_template_reply:
             member["keywords"].extend(item["word"] for item in _keywords([content], 4))
         with contextlib.suppress(ValueError, TypeError):
@@ -219,6 +231,16 @@ def _statistics(
                 period_counts[min(offset, len(period_counts) - 1)] += 1
             else:
                 period_counts[local_timestamp.hour] += 1
+    for user_id, bucket in member_samples.items():
+        bucket.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        samples: list[str] = []
+        for p0, p1, p2, text in bucket:
+            if text and text not in samples:
+                samples.append(text)
+            if len(samples) >= 3:
+                break
+        if user_id in members and samples:
+            members[user_id]["samples"] = samples
     active_members = sorted(members.values(), key=lambda item: (-int(item["messages"]), item["user_id"]))[:20]
     # 画像渲染和模型画像共用同一份占比，避免渲染层只拿到消息数而显示 0.0%。
     message_total = max(1, len(messages))
@@ -248,6 +270,8 @@ def _statistics(
         "link_count": link_count,
         "mention_count": mention_count,
         "action_signal_count": action_signal_count,
+        # 氛围/情绪/梗的独立数据侧：不参与话题统计，只作为亚托莉感知氛围的原料。
+        "atmosphere": _atmosphere_messages(messages, 10),
     }
 
 
@@ -332,8 +356,59 @@ def _important_messages(messages: list[dict[str, Any]], limit: int = 30) -> list
     return [item[2] for item in scored[:limit]]
 
 
+def _member_behaviors(
+    count: int, average_length: float, questions: int, links: int, mentions: int, is_atri: bool
+) -> list[str]:
+    """用可核验的信号推断成员在本次聊天里的行为，而不是贴空泛角色标签。"""
+    behaviors: list[str] = []
+    if is_atri:
+        behaviors.append("机器人回应")
+    if count >= 20:
+        behaviors.append("活跃核心")
+    if questions >= 2 and questions >= max(2, int(count * 0.12)):
+        behaviors.append("爱发问")
+    if links >= 1:
+        behaviors.append("爱分享")
+    if mentions >= max(4, int(count // 3)):
+        behaviors.append("带动气氛")
+    if average_length < 22 and count >= 12:
+        behaviors.append("短句接梗")
+    if average_length >= 45:
+        behaviors.append("负责展开")
+    if not behaviors or set(behaviors) == {"活跃核心"}:
+        behaviors.append("稳定参与")
+    return behaviors
+
+
+def _pick_quote(member: dict[str, Any], limit: int = 2) -> list[str]:
+    """取最能代表该成员说话风格的原话（优先提问/链接/长文本，已按权重排好）。"""
+    samples = [str(item).strip() for item in (member.get("samples") or []) if str(item).strip()]
+    return samples[:limit]
+
+
+def _atri_impression(name: str, behaviors: list[str], is_atri: bool) -> str:
+    """用亚托莉的第一人称写一句对该成员的感觉，基于可核验行为，不编造性格。"""
+    if is_atri:
+        return "这是我的工作分身啦，群里的声音有一大票是我，没什么好说的，嘿嘿。"
+    if "爱发问" in behaviors:
+        return f"{name}真是提问担当，一有不懂就立刻举手，连我也得想想再答。"
+    if "短句接梗" in behaviors:
+        return f"{name}是接梗小能手，短句嗖嗖地飞，一句话就把气氛接住了。"
+    if "爱分享" in behaviors:
+        return f"{name}像个小资料库，话不多，但需要的时候啪地就甩来链接或文件。"
+    if "负责展开" in behaviors:
+        return f"{name}一开口就是一大段，喜欢把细节讲清楚，把话题往深处带。"
+    if "带动气氛" in behaviors:
+        return f"{name}在群里到处搭话，谁都接得上，把大家串进同一段聊天里。"
+    return f"{name}话不算多，但一直在旁边看着，群里需要有人稳稳接住的时候总有他。"
+
+
 def _member_highlights(statistics: dict[str, Any]) -> list[dict[str, Any]]:
-    """为活跃成员生成不带人格臆测的客观描述，供模型和降级报告复用。"""
+    """为活跃成员生成客观统计 + 行为推断 + 亚托莉第一人称印象。
+
+    统计仍是可核验事实；``atri_impression`` 与 ``behavior`` 是对该成员本时段
+    实际行为的概括，且都基于原话与计数信号，避免从统计数字编造性格。
+    """
     result: list[dict[str, Any]] = []
     total = max(1, int(statistics.get("message_count") or 0))
     topic_terms = {
@@ -348,42 +423,83 @@ def _member_highlights(statistics: dict[str, Any]) -> list[dict[str, Any]]:
         share = count / total * 100
         characters = int(member.get("characters") or 0)
         average_length = round(characters / count, 1) if count else 0
+        questions = int(member.get("questions") or 0)
+        links = int(member.get("links") or 0)
+        mentions = int(member.get("mentions") or 0)
         details = [f"发言 {count} 条，占本时段 {share:.1f}%", f"平均每条约 {average_length} 字"]
-        if int(member.get("questions") or 0):
-            details.append(f"提出 {int(member.get('questions'))} 个问题")
-        if int(member.get("links") or 0):
-            details.append(f"分享 {int(member.get('links'))} 个链接")
+        if questions:
+            details.append(f"提出 {questions} 个问题")
+        if links:
+            details.append(f"分享 {links} 个链接")
         if int(member.get("action_signals") or 0):
             details.append(f"出现 {int(member.get('action_signals'))} 次安排/结论信号")
-        if int(member.get("mentions") or 0):
-            details.append(f"发起/参与 {int(member.get('mentions'))} 次群友互动")
+        if mentions:
+            details.append(f"发起/参与 {mentions} 次群友互动")
         raw_keywords = [str(item) for item in member.get("keywords", []) if str(item)]
         keywords = [item for item in raw_keywords if any(term.lower() in item.lower() for term in topic_terms)]
         keywords = list(dict.fromkeys(keywords))[:5] or list(dict.fromkeys(raw_keywords))[:3]
         if keywords:
             details.append("主要围绕「" + "、".join(dict.fromkeys(keywords[:5])) + "」")
         evaluation = "；".join(details) + "。"
-        roles: list[str] = []
-        if "ATRI" in name or "亚托莉" in name:
-            roles.append("机器人回应")
-        if count >= max(3, total * 0.2):
-            roles.append("活跃核心")
-        if int(member.get("action_signals") or 0):
-            roles.append("推进者")
-        if int(member.get("links") or 0):
-            roles.append("资料分享")
-        if int(member.get("questions") or 0):
-            roles.append("提问发起")
-        if int(member.get("mentions") or 0) >= max(5, count // 3):
-            roles.append("互动串联")
-        if not roles:
-            roles.append("稳定参与")
+
+        is_atri = ("ATRI" in name or "亚托莉" in name)
+        behavior = _member_behaviors(count, average_length, questions, links, mentions, is_atri)
+        quote_style = _pick_quote(member)
+        atri_impression = _atri_impression(name, behavior, is_atri)
         result.append({
             "name": name,
             "message_count": count,
             "characters": characters,
             "share_percent": round(share, 1),
-            "roles": roles,
+            "behavior": behavior,
+            "quote_style": quote_style,
+            "atri_impression": atri_impression,
             "evaluation": evaluation,
         })
     return result
+
+
+def _atmosphere_messages(messages: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
+    """采集氛围与情绪瞬间：复读、表情连发、@互动、群体笑声与热梗首发。
+
+    这些片段通常在 ``_topic_signal`` 里被当成噪声丢弃，但恰恰是群聊"味道"
+    的来源。它们不参与话题统计，只作为亚托莉感知氛围的原料。
+    """
+    names = _nickname_map(messages)
+    items = list(messages)
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for message in items:
+        content = str(message.get("content") or "").strip()
+        stamp = str(message.get("created_at") or "")
+        try:
+            t = datetime.fromisoformat(stamp).astimezone()
+        except (TypeError, ValueError):
+            t = None
+        bucket = t.strftime("%Y-%m-%d %H:00") if t else "时间未知"
+        buckets[bucket].append(message)
+
+    moments: list[dict[str, Any]] = []
+    for key, chunk in buckets.items():
+        texts = [str(m.get("content") or "") for m in chunk]
+        laugh = sum(1 for t in texts if re.search(r"哈哈|嘿嘿|笑死|好活|绷不住|狠狠|加\s*1|\+1", t))
+        media = sum(1 for m in chunk if _message_media(m))
+        at_count = sum(1 for m in chunk if "@" in str(m.get("content") or ""))
+        emoji_like = sum(1 for t in texts if re.search(r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\u2026]|\[(?:表情包/图片|动画表情)", t))
+        if (laugh + media + at_count + emoji_like) < 2:
+            continue
+        signal = laugh * 2 + media * 2 + at_count + emoji_like
+        moments.append({
+            "period": key,
+            "message_count": len(chunk),
+            "signal": signal,
+            "samples": [
+                f"{_display_name(m, names)}：{_visible_text(str(m.get('content') or '')[:120])}"
+                for m in chunk[:2]
+            ],
+            "meta": {
+                "laugh_count": laugh, "media_count": media, "mention_count": at_count,
+                "emoji_like_count": emoji_like,
+            },
+        })
+    moments.sort(key=lambda item: -int(item["signal"]))
+    return moments[:limit]

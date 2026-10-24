@@ -47,6 +47,32 @@ function qzoneSettingValue(key, fallback) {
   const settings = window._qzoneAutomation?.settings || {};
   return settings[key] ?? fallback;
 }
+function syncQZoneModelSelectors() {
+  const profiles=Array.isArray(window._qzoneChatProfiles) ? window._qzoneChatProfiles : [];
+  if(!profiles.length) return;
+  const options='<option value="">当前聊天模型</option>' + profiles.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.model)} · ${escapeHtml(item.model)}</option>`).join('');
+  ['qzoneModelProfile','directoryQzoneModelProfile','qzoneGlobalModelProfile'].forEach(id=>{
+    const select=$(id);
+    if(!select) return;
+    const preferred=select.value || window._qzoneAutomation?.settings?.post_model_profile_id || '';
+    select.innerHTML=options;
+    if(profiles.some(item=>String(item.id)===String(preferred))) select.value=preferred;
+  });
+}
+function installQZoneModelSelectorSync() {
+  if(typeof renderUserDirectory==='function' && !renderUserDirectory.__qzoneModelSync) {
+    const baseRenderUserDirectory=renderUserDirectory;
+    const wrappedRenderUserDirectory=function(...args) { const result=baseRenderUserDirectory(...args); syncQZoneModelSelectors(); return result; };
+    wrappedRenderUserDirectory.__qzoneModelSync=true;
+    renderUserDirectory=wrappedRenderUserDirectory;
+  }
+  if(typeof renderQZoneBrowserFeeds==='function' && !renderQZoneBrowserFeeds.__qzoneModelSync) {
+    const baseRenderQZoneBrowserFeeds=renderQZoneBrowserFeeds;
+    const wrappedRenderQZoneBrowserFeeds=function(...args) { const result=baseRenderQZoneBrowserFeeds(...args); syncQZoneModelSelectors(); return result; };
+    wrappedRenderQZoneBrowserFeeds.__qzoneModelSync=true;
+    renderQZoneBrowserFeeds=wrappedRenderQZoneBrowserFeeds;
+  }
+}
 function renderQZoneAutomation() {
   const data = window._qzoneAutomation || {};
   const settings = data.settings || {};
@@ -184,12 +210,22 @@ async function loadQZoneModelProfiles() {
   try {
     const data = await api('/api/model-profiles');
     const profiles = (data.profiles || []).filter(item => item.model_type === 'chat');
-    const select = $('qzoneModelProfile');
-    if(!select) return;
-    const previous = select.value;
-    select.innerHTML = '<option value="">当前聊天模型</option>' + profiles.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.model)} · ${escapeHtml(item.model)}</option>`).join('');
-    if(profiles.some(item=>item.id===previous)) select.value = previous;
-  } catch(error) { if($('qzonePostGenerateMeta')) $('qzonePostGenerateMeta').textContent = '模型列表读取失败：' + error.message; }
+    window._qzoneChatProfiles = profiles;
+    const options = '<option value="">当前聊天模型</option>' + profiles.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.model)} · ${escapeHtml(item.model)}</option>`).join('');
+    ['qzoneModelProfile','directoryQzoneModelProfile','qzoneGlobalModelProfile'].forEach(id=>{
+      const select = $(id);
+      if(!select) return;
+      const previous = select.value;
+      select.innerHTML = options;
+      if(profiles.some(item=>item.id===previous)) select.value = previous;
+    });
+    const selected = profiles.find(item=>item.id===String(window._qzoneAutomation?.settings?.post_model_profile_id||''));
+    if($('qzoneGlobalModelMeta')) $('qzoneGlobalModelMeta').textContent = selected ? `当前：${selected.name || selected.model}` : '未指定时使用当前聊天模型';
+    syncQZoneModelSelectors();
+  } catch(error) {
+    if($('qzonePostGenerateMeta')) $('qzonePostGenerateMeta').textContent = '模型列表读取失败：' + error.message;
+    if($('qzoneGlobalModelMeta')) $('qzoneGlobalModelMeta').textContent = '模型列表读取失败：' + error.message;
+  }
 }
 function applyQZoneAutomationSettings(settings) {
   const value = settings || {};
@@ -201,6 +237,8 @@ function applyQZoneAutomationSettings(settings) {
   if($('qzoneEndHour')) $('qzoneEndHour').value=Number.isFinite(Number(value.post_end_hour))?Number(value.post_end_hour):23;
   if($('qzonePostPrompt')) $('qzonePostPrompt').value=String(value.post_prompt || '根据当前记忆和情绪，写一条自然、简短、带一点亚托莉口吻的 QQ 空间动态。');
   if($('qzoneModelProfile')) $('qzoneModelProfile').value=value.post_model_profile_id||'';
+  if($('directoryQzoneModelProfile')) $('directoryQzoneModelProfile').value=value.post_model_profile_id||'';
+  if($('qzoneGlobalModelProfile')) $('qzoneGlobalModelProfile').value=value.post_model_profile_id||'';
 }
 let qzoneAutomationLoading = false;
 async function loadQZoneAutomation() {
@@ -234,11 +272,11 @@ async function loadQZoneAutomation() {
 }
 async function saveQZoneAutomationSettings() {
   const settings=window._qzoneAutomation?.settings||{};
-  const body = {enabled:Boolean($('qzonePostEnabled')?.checked || settings.like_enabled || settings.comment_enabled), post_enabled:Boolean($('qzonePostEnabled')?.checked), post_auto_generate:Boolean($('qzonePostAutoGenerate')?.checked), post_prompt:$('qzonePostPrompt')?.value.trim()||'', post_model_profile_id:$('qzoneModelProfile')?.value||'', post_mode:'window', period_days:Number($('qzonePeriodDays')?.value||1), posts_per_period:Number($('qzonePostsPerPeriod')?.value||1), post_start_hour:Number($('qzoneStartHour')?.value||8), post_end_hour:Number($('qzoneEndHour')?.value||23), timezone:settings.timezone||'Asia/Shanghai', visibility:Number(settings.visibility??1), like_enabled:Boolean(settings.like_enabled), comment_enabled:Boolean(settings.comment_enabled), like_rule:'target', comment_use_pool:true, max_likes_per_run:Number(settings.max_likes_per_run??10), max_comments_per_run:Number(settings.max_comments_per_run??2), feed_limit:Number(settings.feed_limit??20)};
+  const body = {enabled:Boolean($('qzonePostEnabled')?.checked || settings.like_enabled || settings.comment_enabled), post_enabled:Boolean($('qzonePostEnabled')?.checked), post_auto_generate:Boolean($('qzonePostAutoGenerate')?.checked), post_prompt:$('qzonePostPrompt')?.value.trim()||'', post_model_profile_id:$('qzoneModelProfile')?.value||$('qzoneGlobalModelProfile')?.value||'', post_mode:'window', period_days:Number($('qzonePeriodDays')?.value||1), posts_per_period:Number($('qzonePostsPerPeriod')?.value||1), post_start_hour:Number($('qzoneStartHour')?.value||8), post_end_hour:Number($('qzoneEndHour')?.value||23), timezone:settings.timezone||'Asia/Shanghai', visibility:Number(settings.visibility??1), like_enabled:Boolean(settings.like_enabled), comment_enabled:Boolean(settings.comment_enabled), like_rule:'target', comment_use_pool:true, max_likes_per_run:Number(settings.max_likes_per_run??10), max_comments_per_run:Number(settings.max_comments_per_run??2), feed_limit:Number(settings.feed_limit??20)};
   try { await api('/api/qzone/automation/settings', {method:'POST', body:JSON.stringify(body)}); if(body.post_enabled && body.post_auto_generate){ try { await api('/api/qzone/automation/prepare-next',{method:'POST',body:'{}'}); } catch(error) { toast('设置已保存，但下一条动态预生成失败：'+error.message); } } toast('QQ 空间自动互动配置已保存'); await loadQZoneAutomation(); } catch(error) { toast('保存失败：' + error.message); }
 }
 async function refreshDirectoryAutomationState() {
-  try { const data=await api('/api/qzone/automation'); window._qzoneAutomation={...(window._qzoneAutomation||{}),...data}; renderUserDirectory(); }
+  try { const data=await api('/api/qzone/automation'); window._qzoneAutomation={...(window._qzoneAutomation||{}),...data}; renderUserDirectory(); if(typeof applyQZoneAutomationSettings==='function') applyQZoneAutomationSettings(data.settings||{}); if(typeof loadQZoneModelProfiles==='function') await loadQZoneModelProfiles(); }
   catch(error) { toast('自动发布状态刷新失败：'+error.message); }
 }
 async function saveDirectoryAtriPublisher(button) {
@@ -246,7 +284,7 @@ async function saveDirectoryAtriPublisher(button) {
 }
 async function saveDirectoryAtriPublisherCore() {
   const settings=window._qzoneAutomation?.settings||{};
-  const body={...settings, enabled:Boolean($('directoryQzonePostEnabled')?.checked || $('directoryQzoneLikeEnabled')?.checked || $('directoryQzoneCommentEnabled')?.checked), post_enabled:Boolean($('directoryQzonePostEnabled')?.checked), like_enabled:Boolean($('directoryQzoneLikeEnabled')?.checked), comment_enabled:Boolean($('directoryQzoneCommentEnabled')?.checked), like_rule:'target', post_auto_generate:Boolean($('directoryQzonePostAutoGenerate')?.checked), post_prompt:$('directoryQzonePostPrompt')?.value.trim()||'', period_days:Number($('directoryQzonePeriodDays')?.value||1), posts_per_period:Number($('directoryQzonePostsPerPeriod')?.value||1), post_start_hour:Number($('directoryQzoneStartHour')?.value||9), post_end_hour:Number($('directoryQzoneEndHour')?.value||23), comment_use_pool:true};
+  const body={...settings, enabled:Boolean($('directoryQzonePostEnabled')?.checked || $('directoryQzoneLikeEnabled')?.checked || $('directoryQzoneCommentEnabled')?.checked), post_enabled:Boolean($('directoryQzonePostEnabled')?.checked), like_enabled:Boolean($('directoryQzoneLikeEnabled')?.checked), comment_enabled:Boolean($('directoryQzoneCommentEnabled')?.checked), like_rule:'target', post_auto_generate:Boolean($('directoryQzonePostAutoGenerate')?.checked), post_prompt:$('directoryQzonePostPrompt')?.value.trim()||'', post_model_profile_id:$('directoryQzoneModelProfile')?.value||$('qzoneGlobalModelProfile')?.value||settings.post_model_profile_id||'', period_days:Number($('directoryQzonePeriodDays')?.value||1), posts_per_period:Number($('directoryQzonePostsPerPeriod')?.value||1), post_start_hour:Number($('directoryQzoneStartHour')?.value||9), post_end_hour:Number($('directoryQzoneEndHour')?.value||23), comment_use_pool:true};
   try { await api('/api/qzone/automation/settings',{method:'POST',body:JSON.stringify(body)}); if(body.post_enabled && body.post_auto_generate) await api('/api/qzone/automation/prepare-next',{method:'POST',body:'{}'}); await refreshDirectoryAutomationState(); toast('亚托莉自动发布设置已保存'); }
   catch(error) { toast('亚托莉发布设置保存失败：'+error.message); }
 }
@@ -254,14 +292,25 @@ async function publishDirectoryAtriPost(button) {
   return withButtonBusy(button, ()=>publishDirectoryAtriPostCore(), '发布中…');
 }
 async function publishDirectoryAtriPostCore() {
-  try { const result=await api('/api/qzone/automation/publish-generated',{method:'POST',body:JSON.stringify({prompt:$('directoryQzonePostPrompt')?.value.trim()||'',model_profile_id:window._qzoneAutomation?.settings?.post_model_profile_id||''})}); toast(result.ok?'亚托莉动态已生成并发布':'动态发布失败'); await refreshDirectoryAutomationState(); }
+  try { const result=await api('/api/qzone/automation/publish-generated',{method:'POST',body:JSON.stringify({prompt:$('directoryQzonePostPrompt')?.value.trim()||'',model_profile_id:$('directoryQzoneModelProfile')?.value||$('qzoneGlobalModelProfile')?.value||window._qzoneAutomation?.settings?.post_model_profile_id||''})}); toast(result.ok?'亚托莉动态已生成并发布':'动态发布失败'); await refreshDirectoryAutomationState(); }
   catch(error) { toast('亚托莉动态发布失败：'+error.message); }
 }
 async function toggleQZoneAll(value) {
   $('qzoneEnabled').checked = !!value; await saveQZoneAutomationSettings();
 }
-async function publishGeneratedQZonePost() { const promptText=$('qzonePostPrompt')?.value.trim()||''; try { const result=await api('/api/qzone/automation/publish-generated',{method:'POST',body:JSON.stringify({prompt:promptText,model_profile_id:$('qzoneModelProfile')?.value||''})}); toast(result.ok?'已生成并发布动态':'发布失败'); await loadQZoneAutomation(); } catch(error) { toast('动态发布失败：'+error.message); } }
+async function saveGlobalQZoneModelProfile(button) {
+  const profileId=$('qzoneGlobalModelProfile')?.value||'';
+  const settings={...(window._qzoneAutomation?.settings||{}),post_model_profile_id:profileId};
+  try {
+    if(button) button.disabled=true;
+    await api('/api/qzone/automation/settings',{method:'POST',body:JSON.stringify(settings)});
+    if(window._qzoneAutomation) window._qzoneAutomation.settings=settings;
+    applyQZoneAutomationSettings(settings);
+    if($('qzoneGlobalModelMeta')) $('qzoneGlobalModelMeta').textContent=profileId?'模型选择已保存':'未指定时使用当前聊天模型';
+    toast('QQ 动态生成模型已保存');
+  } catch(error) { toast('模型保存失败：'+error.message); }
+  finally { if(button) button.disabled=false; }
+}
+async function publishGeneratedQZonePost() { const promptText=$('qzonePostPrompt')?.value.trim()||''; try { const result=await api('/api/qzone/automation/publish-generated',{method:'POST',body:JSON.stringify({prompt:promptText,model_profile_id:$('qzoneModelProfile')?.value||$('qzoneGlobalModelProfile')?.value||window._qzoneAutomation?.settings?.post_model_profile_id||''})}); toast(result.ok?'已生成并发布动态':'发布失败'); await loadQZoneAutomation(); } catch(error) { toast('动态发布失败：'+error.message); } }
 async function saveQZonePersonPolicy(userId, field, value) { const feeds=window._qzoneLatestFeeds||[]; const feed=feeds.find(item=>String(item.user_id)===String(userId)); const targets=[...(window._qzoneAutomation?.targets||[])]; let target=targets.find(item=>String(item.user_id)===String(userId)); if(!target){target={user_id:String(userId),nickname:feed?.author||`QQ ${userId}`,enabled_like:false,enabled_comment:false}; targets.push(target);} target[field]=!!value; try { const result=await api('/api/qzone/automation/targets',{method:'POST',body:JSON.stringify({targets})}); window._qzoneAutomation.targets=result.targets||targets; const enabledLike=window._qzoneAutomation.targets.some(item=>item.enabled_like); const enabledComment=window._qzoneAutomation.targets.some(item=>item.enabled_comment); await api('/api/qzone/automation/settings',{method:'POST',body:JSON.stringify({...window._qzoneAutomation.settings,enabled:Boolean(enabledLike||enabledComment||window._qzoneAutomation.settings.post_enabled),like_enabled:enabledLike,comment_enabled:enabledComment,like_rule:'target',comment_use_pool:true})}); toast(`${field==='enabled_like'?'自动点赞':'自动评论'}已${value?'开启':'关闭'}`); } catch(error) { toast('保存用户设置失败：'+error.message); } }
-
-async function loadMemory() {
 """

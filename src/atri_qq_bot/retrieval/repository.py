@@ -14,6 +14,7 @@ import sqlite3
 import struct
 import threading
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -42,19 +43,22 @@ class SemanticMemoryRepository:
     都很小；索引不可用时抛出普通异常，调用方负责降级而不是阻断回复。
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
         self.path = Path(path)
+        self.read_only = read_only
         self._schema_ready = False
         self._schema_lock = threading.Lock()
 
     def ensure_schema(self) -> None:
+        if self.read_only:
+            return
         if self._schema_ready:
             return
         with self._schema_lock:
             if self._schema_ready:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS semantic_entries (
@@ -78,16 +82,33 @@ class SemanticMemoryRepository:
                         tokenize='unicode61'
                     );
                     CREATE TABLE IF NOT EXISTS semantic_embeddings (
-                        entry_id TEXT PRIMARY KEY REFERENCES semantic_entries(entry_id) ON DELETE CASCADE,
+                        entry_id TEXT NOT NULL REFERENCES semantic_entries(entry_id) ON DELETE CASCADE,
                         model TEXT NOT NULL,
                         dimensions INTEGER NOT NULL,
                         vector BLOB NOT NULL,
-                        updated_at REAL NOT NULL
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY(entry_id, model)
                     );
                     CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_model
                         ON semantic_embeddings(model, updated_at DESC);
                     """
                 )
+                # Preserve existing vectors when upgrading the original single-model cache.
+                keys = [row[1] for row in conn.execute("PRAGMA table_info(semantic_embeddings)") if row[5]]
+                if keys == ["entry_id"]:
+                    conn.executescript("""
+                        BEGIN IMMEDIATE;
+                        ALTER TABLE semantic_embeddings RENAME TO semantic_embeddings_legacy;
+                        CREATE TABLE semantic_embeddings (
+                            entry_id TEXT NOT NULL REFERENCES semantic_entries(entry_id) ON DELETE CASCADE,
+                            model TEXT NOT NULL, dimensions INTEGER NOT NULL, vector BLOB NOT NULL,
+                            updated_at REAL NOT NULL, PRIMARY KEY(entry_id, model)
+                        );
+                        INSERT INTO semantic_embeddings SELECT * FROM semantic_embeddings_legacy;
+                        DROP TABLE semantic_embeddings_legacy;
+                        CREATE INDEX idx_semantic_embeddings_model ON semantic_embeddings(model, updated_at DESC);
+                        COMMIT;
+                    """)
             self._schema_ready = True
 
     def replace_scope_source(
@@ -95,46 +116,54 @@ class SemanticMemoryRepository:
         scope: str,
         source: str,
         entries: Iterable[dict[str, Any]],
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> int:
         """以一小批最新档案替换某会话的索引，保证编辑/删除即时生效。"""
 
         self.ensure_schema()
         rows = [self._normalise_entry(scope, source, item) for item in entries]
-        with self._connect() as conn:
-            old_ids = [
-                row[0]
-                for row in conn.execute(
-                    "SELECT entry_id FROM semantic_entries WHERE scope = ? AND source = ?",
-                    (scope, source),
-                )
-            ]
-            if old_ids:
-                conn.executemany(
-                    "DELETE FROM semantic_entries_fts WHERE entry_id = ?",
-                    ((entry_id,) for entry_id in old_ids),
-                )
-                conn.executemany(
-                    "DELETE FROM semantic_embeddings WHERE entry_id = ?",
-                    ((entry_id,) for entry_id in old_ids),
-                )
-            conn.execute(
-                "DELETE FROM semantic_entries WHERE scope = ? AND source = ?",
-                (scope, source),
+        # 同一 scope+source 下可能存在 layer/title/content 完全相同的重复条目
+        # （例如结构化记忆里“锅巴”“动漫”这类短兴趣被重复收录）。它们的 entry_id
+        # 会碰撞，直接 executemany INSERT 会触发 UNIQUE 约束冲突，进而让整条
+        # 检索链路退化为兜底分支、丢掉“本群约定”的常驻注入。这里按 entry_id
+        # 去重，只保留第一次出现，从根本上消除冲突。
+        seen: set[str] = set()
+        deduped: list[tuple[Any, ...]] = []
+        for row in rows:
+            entry_id = row[0]
+            if entry_id in seen:
+                continue
+            seen.add(entry_id)
+            deduped.append(row)
+        rows = deduped
+        if connection is not None:
+            return self._replace_rows(connection, scope, source, rows)
+        with closing(self._connect()) as conn, conn:
+            return self._replace_rows(conn, scope, source, rows)
+
+    @staticmethod
+    def _replace_rows(conn: sqlite3.Connection, scope: str, source: str, rows: list[tuple[Any, ...]]) -> int:
+        """Diff in the caller's transaction; unchanged content retains its vectors."""
+        old_ids = {
+            row[0] for row in conn.execute(
+                "SELECT entry_id FROM semantic_entries WHERE scope = ? AND source = ?", (scope, source)
             )
-            if rows:
-                conn.executemany(
-                    """
-                    INSERT INTO semantic_entries(
-                        entry_id, scope, source, layer, title, content,
-                        importance, updated_at, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [row[:9] for row in rows],
-                )
-                conn.executemany(
-                    "INSERT INTO semantic_entries_fts(entry_id, scope, terms) VALUES (?, ?, ?)",
-                    ((row[0], row[1], row[9]) for row in rows),
-                )
+        }
+        new_ids = {row[0] for row in rows}
+        for entry_id in old_ids - new_ids:
+            conn.execute("DELETE FROM semantic_entries_fts WHERE entry_id = ?", (entry_id,))
+            conn.execute("DELETE FROM semantic_embeddings WHERE entry_id = ?", (entry_id,))
+            conn.execute("DELETE FROM semantic_entries WHERE entry_id = ?", (entry_id,))
+        for row in rows:
+            conn.execute(
+                """INSERT INTO semantic_entries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(entry_id) DO UPDATE SET importance=excluded.importance,
+                   updated_at=excluded.updated_at, metadata_json=excluded.metadata_json""", row[:9]
+            )
+            # Category metadata can change indexed search hints without changing content.
+            conn.execute("DELETE FROM semantic_entries_fts WHERE entry_id = ?", (row[0],))
+            conn.execute("INSERT INTO semantic_entries_fts(entry_id, scope, terms) VALUES (?, ?, ?)", (row[0], row[1], row[9]))
         return len(rows)
 
     def search(self, scope: str, query: str, limit: int = 5) -> list[RetrievedEntry]:
@@ -144,7 +173,7 @@ class SemanticMemoryRepository:
         match_query = _fts_query(query)
         if not match_query:
             return []
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT e.entry_id, e.scope, e.source, e.layer, e.title, e.content,
@@ -180,7 +209,7 @@ class SemanticMemoryRepository:
         """返回尚未由指定模型编码的条目，供低优先级维护脚本分批处理。"""
 
         self.ensure_schema()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT e.entry_id, e.title || '：' || e.content
@@ -202,21 +231,23 @@ class SemanticMemoryRepository:
             return
         self.ensure_schema()
         vector = struct.pack(f"<{len(values)}f", *[float(value) for value in values])
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO semantic_embeddings(entry_id, model, dimensions, vector, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(entry_id) DO UPDATE SET
+                SELECT ?, ?, ?, ?, ? WHERE EXISTS (
+                    SELECT 1 FROM semantic_entries WHERE entry_id = ?
+                )
+                ON CONFLICT(entry_id, model) DO UPDATE SET
                     model=excluded.model, dimensions=excluded.dimensions,
                     vector=excluded.vector, updated_at=excluded.updated_at
                 """,
-                (entry_id, model, len(values), vector, time.time()),
+                (entry_id, model, len(values), vector, time.time(), entry_id),
             )
 
     def embedding_count(self, model: str | None = None) -> int:
         self.ensure_schema()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             if model:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM semantic_embeddings WHERE model = ?", (model,)
@@ -239,7 +270,7 @@ class SemanticMemoryRepository:
         if not query:
             return []
         self.ensure_schema()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT e.entry_id, e.scope, e.source, e.layer, e.title, e.content,
@@ -279,7 +310,7 @@ class SemanticMemoryRepository:
         if not self.path.exists():
             return {"ready": False, "path": str(self.path), "entries": 0}
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 count = int(conn.execute("SELECT COUNT(*) FROM semantic_entries").fetchone()[0])
                 sources = {
                     str(source): int(total)
@@ -292,8 +323,10 @@ class SemanticMemoryRepository:
             return {"ready": False, "path": str(self.path), "entries": 0, "error": str(exc)}
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=0.35)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = (sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.35)
+                if self.read_only else sqlite3.connect(self.path, timeout=0.35))
+        if not self.read_only:
+            conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=350")
         return conn

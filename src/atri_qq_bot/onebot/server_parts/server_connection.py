@@ -1,6 +1,42 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
+
 from .server_support import OneBotServerMixin, _sync_server_globals
+
+# 显式导入而不是依赖 _sync_server_globals 的全局注入：账号路径是安全关键路径，
+# 不应该依赖那个 __getattribute__ 钩子在运行时把名字塞进来。
+# 这几个模块本身不 import onebot，所以不会形成循环依赖。
+from ...accounts import (  # type: ignore[import-not-found]
+    AccountContext,
+    AccountSwitchCoordinator,
+    bootstrap_from_config,
+    build_runtime_resources,
+    current_account,
+    registry_for_config,
+)
+
+# 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
+# 保证模块在被单独导入（例如单元测试）时也能正常记录账号/连接类告警。
+LOGGER = logging.getLogger("atri.onebot")
+
+# 账号切换时要整体替换的 server 属性。**每一项都必须换成新值或 None**，
+# 绝不能保留上一个账号的对象——那会把 A 账号的数据写进 B 账号的库。
+ACCOUNT_SCOPED_ATTRIBUTES = (
+    "reply_engine",
+    "insights",
+    "cognition_shadow",
+    "stickers",
+    "tools",
+    "voice",
+)
+
+# 账号切换前等待在途消息处理的超时。宁可超时继续（generation 会兜底），
+# 也不能让一个卡住的任务把换账号永久挂死。
+ACCOUNT_DRAIN_TIMEOUT_SECONDS = 5.0
+ACCOUNT_DRAIN_POLL_SECONDS = 0.05
 
 
 class OneBotConnectionMixin(OneBotServerMixin):
@@ -16,8 +52,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 由生命周期入口注入旁路；单元测试和独立适配器构造不会隐式创建数据库。
         self.insights = insights_runtime
         if self.insights is not None:
-            # 总结旁路只依赖一个可选发送回调；未连接 NapCat 时仍可正常生成并保存报告。
+            # 总结可选发送；人工生成时则按需向当前登录的 QQ 内核读取历史消息。
             self.insights.summaries.set_group_sender(self.send_group_summary)
+            self.insights.summaries.set_group_history_fetcher(self.fetch_group_history)
         self.cognition_shadow = None
         if bool(getattr(config, "cognition_shadow_enabled", False)):
             try:
@@ -39,6 +76,10 @@ class OneBotConnectionMixin(OneBotServerMixin):
         self._pending_actions: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._onebot_probe_failures = 0
         self._last_napcat_manual_login_notice_at = 0.0
+        # NapCat 实际登录号与 BOT_QQ 不一致时，事件会被整体忽略；这种"完全没反应"
+        # 必须能在日志里看到原因，所以两条告警各自限频。
+        self._account_mismatch_notice_at = 0.0
+        self._foreign_account_event_notice_at = 0.0
         self._message_tasks: set[asyncio.Task[Any]] = set()
         self._conversation_queues: dict[str, asyncio.Queue[tuple[Any, dict[str, Any]]]] = {}
         self._conversation_workers: dict[str, asyncio.Task[Any]] = {}
@@ -60,6 +101,161 @@ class OneBotConnectionMixin(OneBotServerMixin):
             reply_engine.memory,
             getattr(config, "owner_qqs", ()),
         )
+        # 账号系统（ACCOUNT_SYSTEM_ENABLED，默认关闭）。
+        # 关闭时 coordinator 为 None，下面所有账号相关方法都是空操作，
+        # 整条链路与账号化之前逐条一致。
+        self._account_base_config = config
+        self.account_coordinator = None
+        if bool(getattr(config, "account_system_enabled", False)):
+            self.account_coordinator = self._build_account_coordinator(config)
+
+    def _build_account_coordinator(
+        self,
+        config: Any,
+        *,
+        builders: dict[str, Any] | None = None,
+        required: Any = None,
+    ) -> Any:
+        """按配置建立账号协调器；BOT_QQ 在这里被引导成默认账号。
+
+        排空用的是 ``self.drain_account_work``，所以协调器必须在 server 实例上构造。
+
+        ``builders`` / ``required`` 只是给测试注入轻量资源的接缝——生产路径不传，
+        走 ``build_runtime_resources`` 的默认表。
+        """
+        account = bootstrap_from_config(config)
+        if account is not None:
+            LOGGER.info(
+                "账号系统已启用：默认账号 %s（确认状态 %s）",
+                account.account_id,
+                "已确认" if account.confirmed else "待确认",
+            )
+        else:
+            LOGGER.warning("账号系统已启用，但 BOT_QQ 未设置，无法引导默认账号")
+        return AccountSwitchCoordinator(
+            config,
+            build=lambda target, previous: build_runtime_resources(
+                config,
+                target,
+                builders=builders,
+                required=(
+                    required
+                    if required is not None
+                    else frozenset({"reply_engine"})
+                ),
+            ),
+            async_drain=self.drain_account_work,
+        )
+
+    async def drain_account_work(self) -> None:
+        """账号切换前排空在途的消息处理。
+
+        不能复用 ``shutdown()``——那个是 ``cancel``，会把正在处理的消息直接丢掉。
+        这里等它们跑完，并设上限避免被一个卡住的任务永久挂死。
+        """
+        deadline = time.monotonic() + ACCOUNT_DRAIN_TIMEOUT_SECONDS
+        pending: set[Any] = set()
+        while True:
+            pending = {
+                task
+                for task in (
+                    set(self._message_tasks)
+                    | set(self._conversation_workers.values())
+                )
+                if not task.done()
+            }
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                # 超时不阻断切换：每条任务都持有自己那份上下文快照，
+                # 写的是它自己账号的库；generation 兜底会处理延迟解析路径的调用点。
+                LOGGER.warning(
+                    "账号切换排空超时：仍有 %s 个任务在跑，继续切换", len(pending)
+                )
+                return
+            await asyncio.sleep(ACCOUNT_DRAIN_POLL_SECONDS)
+
+    def apply_account_context(self, context: Any) -> None:
+        """把账号上下文里的资源换到 server 上。调用方必须已完成排空。
+
+        **每一项账号作用域资源都换成新值或 None**，绝不保留上一个账号的对象——
+        否则新账号的记忆会写进旧账号的库，而且不会报错。
+        """
+        self.config = context.config
+        for name in ACCOUNT_SCOPED_ATTRIBUTES:
+            setattr(self, name, context.resources.get(name))
+
+        # 下面这几个跟着 config / reply_engine 走，必须一起重建。
+        # 重建失败时**置空而不是保留旧对象**：旧对象绑定的是上一个账号的记忆，
+        # 留着它比没有它更危险（会把新账号的数据写进旧账号的库）。
+        try:
+            self._group_reply_focus = GroupReplyFocusStore(bot_qq=self.config.bot_qq)
+        except Exception as exc:
+            LOGGER.error("重建群聊焦点存储失败，已置空：%s", exc)
+            self._group_reply_focus = None
+        if self.reply_engine is not None:
+            try:
+                self.proactive_planner = ProactivePlanner(
+                    self.reply_engine.memory,
+                    getattr(self.config, "owner_qqs", ()),
+                )
+            except Exception as exc:
+                LOGGER.error("重建主动消息规划器失败，已置空：%s", exc)
+                self.proactive_planner = None
+        else:
+            self.proactive_planner = None
+        if self.insights is not None:
+            # 新账号的 insights 是全新实例，发送器与历史读取器要重新挂上。
+            self.insights.summaries.set_group_sender(self.send_group_summary)
+            self.insights.summaries.set_group_history_fetcher(self.fetch_group_history)
+
+    async def follow_napcat_account(self, peer_uin: int | None) -> None:
+        """按 NapCat 实际登录号切换账号。
+
+        仅在账号系统开启时生效。三条边界：
+
+        * ``ACCOUNT_FOLLOW_NAPCAT`` 关闭时，当前账号就是注册表里的默认账号
+          （BOT_QQ），所以 NapCat 登录了别的号也只会继续用默认账号——
+          这正是今天的"账号不一致就忽略消息"行为。
+        * 跟随开启但该号**未在 WebUI 确认过**时 ``current_account`` 返回 None，
+          于是不切换，行为同样回落到今天。
+        * 目标与当前相同则什么都不做。
+        """
+        coordinator = self.account_coordinator
+        if coordinator is None:
+            return
+
+        base = self._account_base_config
+        if peer_uin is not None and bool(getattr(base, "account_follow_napcat", False)):
+            try:
+                _account, discovered = registry_for_config(base).observe_from_napcat(
+                    peer_uin
+                )
+            except Exception as exc:
+                LOGGER.warning("记录 NapCat 登录账号失败：%s", exc)
+            else:
+                if discovered:
+                    LOGGER.warning(
+                        "发现新账号 QQ %s（未确认）：确认前不建数据区，"
+                        "行为与今天的账号不一致一致",
+                        peer_uin,
+                    )
+
+        target = current_account(base, napcat_uin=peer_uin)
+        if target is None:
+            return
+        if coordinator.context.account_id == target.account_id:
+            return
+
+        try:
+            context = await coordinator.aswitch(
+                target, reason=f"NapCat 登录 {peer_uin}"
+            )
+        except Exception as exc:
+            # 失败原子性保证旧上下文仍然有效，所以这里只记日志、继续用旧账号。
+            LOGGER.error("账号切换失败，继续使用当前账号：%s", exc)
+            return
+        self.apply_account_context(context)
 
     async def handle_connection(self, websocket: Any, path: str | None = None) -> None:
         # NapCat 是反向 WebSocket 客户端：连接建立后持续接收事件，并主动探测
@@ -135,18 +331,78 @@ class OneBotConnectionMixin(OneBotServerMixin):
             return False
         healthy = _onebot_status_is_healthy(result)
         data = result.get("data") if isinstance(result, dict) else None
-        self_id = self.config.bot_qq if isinstance(data, dict) else None
+        peer_uin = await self._napcat_login_uin(websocket)
         if healthy:
+            self_id = self.config.bot_qq if isinstance(data, dict) else None
+            detail = "QQ 登录与消息服务正常"
+            if peer_uin is not None and int(peer_uin) != int(self.config.bot_qq or 0):
+                # 账号不一致时机器人会忽略所有消息（事件 self_id 不匹配），
+                # 用户看到的现象就是"发消息完全没反应"。
+                detail = (
+                    f"NapCat 登录 {peer_uin}，项目 BOT_QQ={self.config.bot_qq}；"
+                    "账号不一致，机器人会忽略所有消息"
+                )
+                self._warn_account_mismatch(peer_uin)
             publish_onebot_probe_result(
                 True,
-                detail="QQ 登录与消息服务正常",
+                detail=detail,
                 self_id=self_id,
+                peer_uin=peer_uin,
             )
+            # 账号系统开启时按 NapCat 实际登录号切换；未开启时是空操作。
+            await self.follow_napcat_account(peer_uin)
             return True
         detail = _onebot_action_error_detail(result, default="QQ 内核报告离线或异常")
-        publish_onebot_probe_result(False, detail=detail, self_id=self_id)
+        publish_onebot_probe_result(
+            False,
+            detail=detail,
+            self_id=self.config.bot_qq if isinstance(data, dict) else None,
+            peer_uin=peer_uin,
+        )
         LOGGER.warning("QQ 状态异常：%s", detail)
         return False
+
+    async def _napcat_login_uin(self, websocket: Any) -> int | None:
+        """读取 NapCat 实际登录的 QQ 号；失败返回 None（不影响健康判断）。"""
+
+        try:
+            result = await self.call_action_and_wait(websocket, "get_login_info", {}, 5.0)
+        except Exception:
+            return None
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            return None
+        try:
+            value = int(data.get("user_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        return value or None
+
+    def _warn_account_mismatch(self, peer_uin: int) -> None:
+        now = time.monotonic()
+        if now - self._account_mismatch_notice_at < 600:
+            return
+        self._account_mismatch_notice_at = now
+        LOGGER.warning(
+            "账号不一致：NapCat 登录的是 %s，但项目 BOT_QQ=%s。"
+            "这种情况下所有 QQ 消息都会被忽略（既没有回复，也不会有消息决策日志）。"
+            "请二选一：把 .env 的 BOT_QQ 改成 %s，或在 NapCat 里换回 %s 后重启项目。",
+            peer_uin,
+            self.config.bot_qq,
+            peer_uin,
+            self.config.bot_qq,
+        )
+
+    def _warn_foreign_account_event(self, event_self_id: int | None) -> None:
+        now = time.monotonic()
+        if now - self._foreign_account_event_notice_at < 600:
+            return
+        self._foreign_account_event_notice_at = now
+        LOGGER.warning(
+            "忽略其它账号的事件：事件 self_id=%s，配置 BOT_QQ=%s（账号不一致时不会回复）",
+            event_self_id,
+            self.config.bot_qq,
+        )
 
     async def onebot_health_loop(self, websocket: Any) -> None:
         await asyncio.sleep(1.0)
@@ -201,7 +457,19 @@ class OneBotConnectionMixin(OneBotServerMixin):
             if event is None:
                 return
 
+        # 新人入群同样是 notice。归一化成普通群消息后走同一条回复链路，
+        # 由它来触发入群欢迎；亚托莉自己进群返回 None，直接忽略。
+        if is_group_increase_event(event):
+            event = normalize_group_increase_event(event, self.config.bot_qq)
+            if event is None:
+                return
+
         if event.get("post_type") == "message":
+            event_self_id = _as_int(event.get("self_id"))
+            if event_self_id not in {None, self.config.bot_qq}:
+                # 事件是别的 QQ 号的（NapCat 登录号与 BOT_QQ 不一致）：旧代码会
+                # 静默忽略，用户只看到"发了消息没反应"。这里留下可排查的告警。
+                self._warn_foreign_account_event(event_self_id)
             if getattr(self, "insights", None) is not None and event.get("message_type") == "group":
                 # 在 1.2 秒防抖合并前归档，避免连续群消息被合并后丢失统计粒度。
                 self.insights.archive_group_message(
@@ -295,5 +563,4 @@ class OneBotConnectionMixin(OneBotServerMixin):
             else:
                 self._conversation_workers.pop(queue_id, None)
                 self._start_conversation_worker(queue_id)
-
 

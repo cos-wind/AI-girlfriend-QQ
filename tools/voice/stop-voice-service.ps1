@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+. (Join-Path $PSScriptRoot "voice-endpoint.ps1")
+$VoiceServicePort = Get-ConfiguredVoicePort -ProjectDir $ProjectDir
 $PidFile = Join-Path $ProjectDir "data\runtime\voice-service.pid"
 
 function Get-ListeningProcessId {
@@ -20,11 +22,11 @@ if (Test-Path -LiteralPath $PidFile) {
         $RecordedProcessId = [int]$RawPid
     }
 }
-$ListeningProcessId = Get-ListeningProcessId -Port 8790
+$ListeningProcessId = Get-ListeningProcessId -Port $VoiceServicePort
 if ($ListeningProcessId) {
     $IsAtriVoice = $false
     try {
-        $Health = Invoke-RestMethod -Uri "http://127.0.0.1:8790/health" -TimeoutSec 2
+        $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$VoiceServicePort/health" -TimeoutSec 2
         $IsAtriVoice = [bool]$Health.ok -and $Health.service -eq "atri-voice"
     } catch {
         $IsAtriVoice = $false
@@ -41,7 +43,7 @@ foreach ($ProcessId in $TargetIds) {
 }
 Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
 for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
-    $RemainingProcessId = Get-ListeningProcessId -Port 8790
+    $RemainingProcessId = Get-ListeningProcessId -Port $VoiceServicePort
     if (-not $RemainingProcessId) {
         Write-Host "Voice service stopped."
         exit 0
@@ -54,4 +56,4 @@ for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
     }
     Start-Sleep -Milliseconds 250
 }
-throw "Voice service still owns port 8790 after stop request."
+throw "Voice service still owns port $VoiceServicePort after stop request."

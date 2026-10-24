@@ -13,55 +13,95 @@ async function loadProactive() {
   window._proactive = data;
   const p = data.policy || {};
   const engineValue = cfg.PROACTIVE_V2_ENABLED?.raw || cfg.PROACTIVE_V2_ENABLED?.value || '';
-  $('proactiveEngineEnabled').checked = String(engineValue).toLowerCase() === 'true';
-  $('proactiveEnabled').checked = !!p.enabled;
-  $('proactiveOwnerOnly').checked = !!p.owner_only;
-  $('proactiveUseAi').checked = !!p.use_ai;
-  $('proactiveGuidedTopics').checked = !!p.guided_topics;
-  $('proactivePrivateMinAffection').value = p.private_min_affection ?? 70;
-  $('proactivePrivateActiveDays').value = p.private_active_days ?? 14;
-  $('proactivePrivateMinMessages').value = p.private_min_messages ?? 5;
-  $('proactiveGroupEnabled').checked = !!p.group_enabled;
-  $('proactiveGroupMinActivity').value = p.group_min_activity ?? 55;
-  $('proactiveGroupActiveDays').value = p.group_active_days ?? 3;
-  $('proactiveGroupMinMessages').value = p.group_min_messages ?? 12;
-  $('proactiveGroupMinHours').value = p.group_min_hours ?? 3;
-  $('proactiveGroupMaxHours').value = p.group_max_hours ?? 9;
-  $('proactiveGroupDailyLimit').value = p.group_daily_limit ?? 2;
-  $('proactiveTimezone').value = p.timezone || 'Asia/Shanghai';
-  $('proactiveQuietStart').value = p.quiet_start || '00:30';
-  $('proactiveQuietEnd').value = p.quiet_end || '07:00';
-  $('proactiveCheckSeconds').value = p.check_seconds || 60;
-  $('proactiveBackoff').value = p.ignored_backoff || 1.5;
-  $('proactiveHistoryLimit').value = p.history_limit ?? 8;
-  $('proactiveMaxChars').value = p.max_chars || 90;
-  $('proactiveFeatureState').innerHTML = data.feature_enabled
-    ? '<span class="ok">新版调度器已接管私聊、早安及已启用的群聊主动消息；旧版循环处于回退待命状态。</span>'
-    : '<span class="bad">新版调度器未启用，当前仍由旧版私聊/早安规则运行。</span>';
-  $('proactiveTierRows').innerHTML = (p.tiers || []).map((tier,index)=>`<tr data-tier-index="${index}">
-    <td><strong>${escapeHtml(tier.name)}</strong><div class="memory-meta mono">${escapeHtml(tier.id)}</div></td>
-    <td><input class="tier-enabled" type="checkbox" ${tier.enabled?'checked':''}></td>
-    <td><div class="row" style="margin:0"><input class="tier-min compact-input" type="number" min="0" max="100" step="1" value="${tier.min_affection}"><span>至</span><input class="tier-max compact-input" type="number" min="0" max="101" step="1" value="${tier.max_affection}"></div></td>
-    <td><div class="row" style="margin:0"><input class="tier-min-hours compact-input" type="number" min="0.25" max="168" step="0.25" value="${tier.min_hours}"><span>至</span><input class="tier-max-hours compact-input" type="number" min="0.25" max="336" step="0.25" value="${tier.max_hours}"></div></td>
-    <td><input class="tier-limit compact-input" type="number" min="0" max="12" step="1" value="${tier.daily_limit}"></td>
-  </tr>`).join('');
-  $('proactiveWeights').innerHTML = Object.entries(p.content_weights || {}).map(([key,value])=>
-    `<label>${escapeHtml(proactiveWeightLabels[key] || key)}<input data-weight="${escapeHtml(key)}" type="number" min="0" max="100" step="1" value="${value}"></label>`
-  ).join('');
-  $('proactiveGroupWeights').innerHTML = Object.entries(p.group_content_weights || {}).map(([key,value])=>
-    `<label>${escapeHtml(proactiveWeightLabels[key] || key)}<input data-group-weight="${escapeHtml(key)}" type="number" min="0" max="100" step="1" value="${value}"></label>`
-  ).join('');
+  // 这个函数同时服务「高级配置」页和「测试」页（后者只用主动消息预览），
+  // 所以每个写入点都要容忍元素不在当前页面。
+  const write = (id, action) => { const node = $(id); if(node) action(node); };
+  write('proactiveEngineEnabled', node=>{ node.checked = String(engineValue).toLowerCase() === 'true'; });
+  write('proactiveEnabled', node=>{ node.checked = !!p.enabled; });
+  write('proactiveOwnerOnly', node=>{ node.checked = !!p.owner_only; });
+  write('proactiveUseAi', node=>{ node.checked = !!p.use_ai; });
+  write('proactiveGuidedTopics', node=>{ node.checked = !!p.guided_topics; });
+  write('proactiveGroupEnabled', node=>{ node.checked = !!p.group_enabled; });
+  write('proactiveGroupMinActivity', node=>{ node.value = p.group_min_activity ?? 55; });
+  write('proactiveGroupActiveDays', node=>{ node.value = p.group_active_days ?? 3; });
+  write('proactiveGroupMinMessages', node=>{ node.value = p.group_min_messages ?? 12; });
+  write('proactiveGroupMinHours', node=>{ node.value = p.group_min_hours ?? 3; });
+  write('proactiveGroupMaxHours', node=>{ node.value = p.group_max_hours ?? 9; });
+  write('proactiveGroupDailyLimit', node=>{ node.value = p.group_daily_limit ?? 2; });
+  write('proactiveTimezone', node=>{ node.value = p.timezone || 'Asia/Shanghai'; });
+  write('proactiveQuietStart', node=>{ node.value = p.quiet_start || '00:30'; });
+  write('proactiveQuietEnd', node=>{ node.value = p.quiet_end || '07:00'; });
+  write('proactiveCheckSeconds', node=>{ node.value = p.check_seconds || 60; });
+  write('proactiveBackoff', node=>{ node.value = p.ignored_backoff || 1.5; });
+  write('proactiveHistoryLimit', node=>{ node.value = p.history_limit ?? 8; });
+  write('proactiveMaxChars', node=>{ node.value = p.max_chars || 90; });
+  // 主动互动门槛卡片已删除（好感/活跃度门槛由分档表表达）。这里的四个字段
+  // 不再有控件，读取到的值原样留在 window._proactive 里，保存时不会被改写。
+  write('proactiveFeatureState', node=>{
+    node.innerHTML = data.feature_enabled
+      ? '<span class="ok">新版调度器已接管私聊、早安及已启用的群聊主动消息；旧版循环处于回退待命状态。</span>'
+      : '<span class="bad">新版调度器未启用，当前仍由旧版私聊/早安规则运行。</span>';
+  });
+  // 亲密度分档：服务端返回的就是合并后的整张表（reply_strategy 的档位 + 主动侧字段），
+  // 这里渲染一次即可，两个页面共用同一个 tbody。
+  if($('affectionTierRows')) {
+    replyStrategyRenderTiers(p.tiers || []);
+    replyStrategyTiersLoaded = true;
+  }
+  // 群聊分档必须在这里**无条件**重渲染：本函数拿到的 p.activity_tiers 是唯一带
+  // 完整主动侧数值的来源。loadReplyStrategy() 与 loadProactive() 是并发的，前者
+  // 可能在 window._proactive 还是 null 时就渲染了群聊表，于是间隔/每日上限被
+  // 渲染成空白输入框；若这里不重渲染，空白会一直留着，保存时把空值当成 0 写回。
+  if($('replyActivityTierRows')) {
+    renderReplyStrategyActivityTiers(p.activity_tiers || []);
+  }
+  write('proactiveWeights', node=>{
+    node.innerHTML = Object.entries(p.content_weights || {}).map(([key,value])=>
+      `<label>${escapeHtml(proactiveWeightLabels[key] || key)}<input data-weight="${escapeHtml(key)}" type="number" min="0" max="100" step="1" value="${value}"></label>`
+    ).join('');
+  });
+  write('proactiveGroupWeights', node=>{
+    node.innerHTML = Object.entries(p.group_content_weights || {}).map(([key,value])=>
+      `<label>${escapeHtml(proactiveWeightLabels[key] || key)}<input data-group-weight="${escapeHtml(key)}" type="number" min="0" max="100" step="1" value="${value}"></label>`
+    ).join('');
+  });
   renderProactivePreviewTypes();
   const schedule = data.schedule || {};
   const items = schedule.items || [];
-  if(items.length && !$('proactivePreviewUser').value) {
+  if(items.length && $('proactivePreviewUser') && !$('proactivePreviewUser').value) {
     const firstEligible = items.find(item=>item.eligible) || items[0];
     $('proactivePreviewScope').value = firstEligible.target_type || 'private';
     $('proactivePreviewUser').value = firstEligible.target_id || '';
     renderProactivePreviewTypes();
   }
 }
+// 「分档面板」在用户分档 / 群聊分档之间切换。主动消息那个面板已删除：
+// 主动侧的门槛与权重是卡片上的普通表单项，不需要再占一个只读页签。
+function showTierPane(name) {
+  const target = ['user','group'].includes(name) ? name : 'user';
+  document.querySelectorAll('.tier-tab').forEach(tab=>{
+    tab.classList.toggle('active', tab.dataset.tierTab === target);
+  });
+  ['user','group'].forEach(key=>{
+    const pane = $('tierPane' + key.charAt(0).toUpperCase() + key.slice(1));
+    if(pane) pane.classList.toggle('active', key === target);
+  });
+}
+// 档位按钮上的小徽标：一眼看出这一档有没有启用。
+// 档位按钮上的小徽标：一眼看出这一档有没有启用。
+// 回复策略本身常开（运行规则卡片已删除），所以徽标只报「几档启用」。
+function renderTierTabBadges(tiers) {
+  const counts = {on:0, total:0};
+  (Array.isArray(tiers) ? tiers : []).forEach(tier=>{
+    counts.total += 1;
+    if(tier && tier.enabled) counts.on += 1;
+  });
+  const badge = `${counts.on}/${counts.total} 档启用`;
+  document.querySelectorAll('.tier-tab-badge').forEach(node=>{ node.textContent = badge; });
+}
 function renderProactivePreviewTypes() {
+  // 主动消息预览挪到了「测试」页的聊天回复测试里，作为扩展项；元素可能还不存在。
+  if(!$('proactivePreviewType')) return;
   const p = (window._proactive || {}).policy || {};
   const scope = $('proactivePreviewScope')?.value || 'private';
   const weights = scope==='group' ? (p.group_content_weights || {}) : (p.content_weights || {});
@@ -72,24 +112,29 @@ function renderProactivePreviewTypes() {
   if(previous && Object.hasOwn(weights, previous)) $('proactivePreviewType').value = previous;
   const items = ((window._proactive || {}).schedule || {}).items || [];
   const matching = items.find(item=>item.target_type===scope && item.eligible) || items.find(item=>item.target_type===scope);
-  if(matching) $('proactivePreviewUser').value = matching.target_id || '';
+  if(matching && !$('proactivePreviewUser').value) $('proactivePreviewUser').value = matching.target_id || '';
+  const hint = $('proactivePreviewTierHint');
+  if(hint) {
+    hint.textContent = p.enabled === false
+      ? '主动消息当前已关闭，预览只是看看文案会怎么写；要真正发出需要在「高级配置」里开启。'
+      : '命中档位与频率在「高级配置」页的数值分档面板里调整。';
+  }
 }
 function collectProactivePolicy() {
+  // 以服务端返回的整份 policy 为底稿，只覆盖本页还有控件的字段。
+  //
+  // 只读 DOM 里确实存在的元素！之前这里还留着 6 个已经被删掉的门槛输入框
+  // （proactiveGroupMinActivity / ActiveDays / MinMessages / MinHours / MaxHours /
+  // DailyLimit），$() 返回 null，取 .value 直接抛 TypeError，保存就必然失败。
+  // 群聊的门槛、间隔现在由 activity_tiers 表达，不再单独提交。
+  // 私聊的 private_active_days / private_min_messages 与群聊的 group_active_days /
+  // group_min_messages 已经没有控件，原值由底稿保留。
   const base = JSON.parse(JSON.stringify((window._proactive || {}).policy || {}));
   base.enabled = $('proactiveEnabled').checked;
   base.owner_only = $('proactiveOwnerOnly').checked;
   base.use_ai = $('proactiveUseAi').checked;
   base.guided_topics = $('proactiveGuidedTopics').checked;
-  base.private_min_affection = Number($('proactivePrivateMinAffection').value);
-  base.private_active_days = Number($('proactivePrivateActiveDays').value);
-  base.private_min_messages = Number($('proactivePrivateMinMessages').value);
   base.group_enabled = $('proactiveGroupEnabled').checked;
-  base.group_min_activity = Number($('proactiveGroupMinActivity').value);
-  base.group_active_days = Number($('proactiveGroupActiveDays').value);
-  base.group_min_messages = Number($('proactiveGroupMinMessages').value);
-  base.group_min_hours = Number($('proactiveGroupMinHours').value);
-  base.group_max_hours = Number($('proactiveGroupMaxHours').value);
-  base.group_daily_limit = Number($('proactiveGroupDailyLimit').value);
   base.timezone = $('proactiveTimezone').value.trim();
   base.quiet_start = $('proactiveQuietStart').value;
   base.quiet_end = $('proactiveQuietEnd').value;
@@ -97,40 +142,38 @@ function collectProactivePolicy() {
   base.ignored_backoff = Number($('proactiveBackoff').value);
   base.history_limit = Number($('proactiveHistoryLimit').value);
   base.max_chars = Number($('proactiveMaxChars').value);
-  base.tiers = Array.from(document.querySelectorAll('#proactiveTierRows tr')).map((row,index)=>({
-    ...(base.tiers[index] || {}),
-    enabled:row.querySelector('.tier-enabled').checked,
-    min_affection:Number(row.querySelector('.tier-min').value),
-    max_affection:Number(row.querySelector('.tier-max').value),
-    min_hours:Number(row.querySelector('.tier-min-hours').value),
-    max_hours:Number(row.querySelector('.tier-max-hours').value),
-    daily_limit:Number(row.querySelector('.tier-limit').value)
-  }));
+  // 两张档位表都提交同一份快照，避免只写一半。
+  base.tiers = collectAffectionTiers();
+  base.activity_tiers = collectReplyStrategyActivityTiers(
+    ((window._replyStrategy || {}).policy || {}).activity_tiers || []
+  );
   base.content_weights = {};
   document.querySelectorAll('[data-weight]').forEach(input=>base.content_weights[input.dataset.weight]=Number(input.value));
   base.group_content_weights = {};
   document.querySelectorAll('[data-group-weight]').forEach(input=>base.group_content_weights[input.dataset.groupWeight]=Number(input.value));
   return base;
 }
-async function saveProactive() {
-  await api('/api/config', {method:'POST', body:JSON.stringify({PROACTIVE_V2_ENABLED:$('proactiveEngineEnabled').checked})});
-  await api('/api/proactive/save', {method:'POST', body:JSON.stringify(collectProactivePolicy())});
-  await loadProactive();
-  await loadMemory();
-  toast('主动互动配置已保存，记忆页计划已同步更新');
+async function saveProactive(button) {
+  // 档位表与回复策略共用，两个保存按钮都走同一条「一起落盘」的路径。
+  return saveReplyAndProactive(button, '保存中…');
 }
-async function previewProactive() {
-  $('proactivePreviewOut').textContent = '正在生成预览...';
-  try {
-    const body = {event_type:$('proactivePreviewType').value, scope:$('proactivePreviewScope').value, target_id:$('proactivePreviewUser').value.trim()};
-    const result = await api('/api/proactive/preview', {method:'POST', body:JSON.stringify(body)});
-    $('proactivePreviewOut').textContent = `${result.reply || result.text || ''}
+async function previewProactive(button) {
+  const out = $('proactivePreviewOut');
+  if(!out) return;
+  return withButtonBusy(button, async () => {
+    out.textContent = '正在生成预览...';
+    if(!$('proactivePreviewType').value) await loadProactive();
+    try {
+      const body = {event_type:$('proactivePreviewType').value, scope:$('proactivePreviewScope').value, target_id:$('proactivePreviewUser').value.trim()};
+      const result = await api('/api/proactive/preview', {method:'POST', body:JSON.stringify(body)});
+      out.textContent = `${result.reply || result.text || ''}
 
 来源：${result.source || '未知'}${result.error ? `
 模型错误：${result.error}` : ''}`;
-  } catch (error) {
-    $('proactivePreviewOut').textContent = `预览失败：${error.message}`;
-  }
+    } catch (error) {
+      out.textContent = `预览失败：${error.message}`;
+    }
+  }, '生成中…');
 }
 async function loadConfig() {
   const cfg = await api('/api/config');
@@ -173,6 +216,25 @@ async function saveDirectoryModalityPolicy() {
     if($('directoryModalityAccessState')) $('directoryModalityAccessState').textContent = '保存失败：' + error.message;
     toast('权限策略保存失败：' + error.message);
   }
+}
+
+async function loadQZoneBridge() {
+  // 运行状态统一显示在顶部「运行状态」，卡片里不再重复显示。
+  await loadStatus();
+}
+async function startQZoneBridge(button) {
+  return withButtonBusy(button, async () => {
+    const result = await api('/api/qzone/bridge',{method:'POST',body:JSON.stringify({action:'start'})});
+    toast(result.message || 'Bridge 已启动');
+    await loadQZoneBridge();
+  }, '启动中…');
+}
+async function stopQZoneBridge(button) {
+  return withButtonBusy(button, async () => {
+    const result = await api('/api/qzone/bridge',{method:'POST',body:JSON.stringify({action:'stop'})});
+    toast(result.message || 'Bridge 已停止');
+    await loadQZoneBridge();
+  }, '停止中…');
 }
 
 function userDirectorySourceLabel(source) {

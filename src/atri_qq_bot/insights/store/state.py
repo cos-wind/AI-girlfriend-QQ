@@ -10,7 +10,8 @@ class StateMixin(InsightsStoreMixin):
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # 日志目录默认为项目根目录；测试和迁移工具可传入独立目录。
-        self.log_root = Path(log_root).expanduser().resolve() if log_root else Path(__file__).resolve().parents[3]
+        from atri_runtime import user_root
+        self.log_root = Path(log_root).expanduser().resolve() if log_root else user_root()
         # 仅主程序的 data/insights 数据库自动回填；测试临时库不会意外吸收工作区日志。
         self._sync_logs_enabled = log_root is not None or self.path.parent.name.lower() == "insights"
         self._initialize()
@@ -88,6 +89,10 @@ class StateMixin(InsightsStoreMixin):
                     period_label TEXT NOT NULL DEFAULT '',
                     trigger_type TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'queued',
+                    progress_percent INTEGER NOT NULL DEFAULT 0,
+                    progress_stage TEXT NOT NULL DEFAULT '已排队',
+                    progress_detail TEXT NOT NULL DEFAULT '',
+                    progress_updated_at TEXT NOT NULL DEFAULT '',
                     message_count INTEGER NOT NULL DEFAULT 0,
                     topics_json TEXT NOT NULL DEFAULT '[]',
                     key_points_json TEXT NOT NULL DEFAULT '[]',
@@ -161,6 +166,10 @@ class StateMixin(InsightsStoreMixin):
                 ("period_type", "TEXT NOT NULL DEFAULT 'custom'"),
                 ("period_key", "TEXT NOT NULL DEFAULT ''"),
                 ("period_label", "TEXT NOT NULL DEFAULT ''"),
+                ("progress_percent", "INTEGER NOT NULL DEFAULT 0"),
+                ("progress_stage", "TEXT NOT NULL DEFAULT '已排队'"),
+                ("progress_detail", "TEXT NOT NULL DEFAULT ''"),
+                ("progress_updated_at", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if column not in summary_columns:
                     db.execute(f"ALTER TABLE group_summaries ADD COLUMN {column} {definition}")

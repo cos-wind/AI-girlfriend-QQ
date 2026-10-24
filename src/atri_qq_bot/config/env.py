@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    from atri_runtime import user_root
+    return user_root()
 
 
 def _env(name: str, default: str) -> str:

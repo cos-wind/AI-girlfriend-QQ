@@ -11,6 +11,7 @@ import ctypes
 import logging
 import os
 import sys
+from atri_runtime import instance_suffix
 
 
 _BOT_MUTEX_HANDLE: int | None = None
@@ -22,7 +23,9 @@ def _acquire_bot_mutex() -> bool:
         return True
     global _BOT_MUTEX_HANDLE
     kernel32 = ctypes.windll.kernel32
-    handle = kernel32.CreateMutexW(None, False, "Global\\AtriQQBotService")
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.CreateMutexW(None, False, "Global\\AtriQQBotService" + instance_suffix())
     if not handle:
         return True
     if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS

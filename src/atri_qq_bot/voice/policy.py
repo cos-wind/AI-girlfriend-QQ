@@ -32,7 +32,6 @@ DEFAULT_VOICE_BEHAVIOR: dict[str, Any] = {
     "quality_gate_enabled": True,
     "quality_max_error_rate": 0.12,
     "quality_retries": 1,
-    "singing_enabled": True,
     "quiet_start": "00:30",
     "quiet_end": "07:00",
     "timezone": "Asia/Shanghai",
@@ -53,6 +52,18 @@ class VoicePolicyDecision:
 
 def default_voice_behavior() -> dict[str, Any]:
     return deepcopy(DEFAULT_VOICE_BEHAVIOR)
+
+
+def conversation_synthesis_options(policy: dict[str, Any]) -> dict[str, Any]:
+    """Shared QQ/desktop delivery defaults; retry only rejected audio, without ASR."""
+    return {
+        "prefer_original": bool(policy.get("original_clip_enabled", True)),
+        "quality_gate": False,
+        "quality_max_error_rate": float(policy.get("quality_max_error_rate", 0.22)),
+        "quality_retries": 1,
+        "allow_context_original_fallback": True,
+        "allow_best_effort": True,
+    }
 
 
 def load_voice_behavior(path: Path | None = None) -> dict[str, Any]:
@@ -95,7 +106,6 @@ def normalize_voice_behavior(payload: Any) -> dict[str, Any]:
         "proactive_voice_enabled",
         "original_clip_enabled",
         "quality_gate_enabled",
-        "singing_enabled",
         "calls_enabled",
     ):
         if key in payload:

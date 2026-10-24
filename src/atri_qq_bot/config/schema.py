@@ -37,6 +37,12 @@ class BotConfig:
     message_split_max_parts: int = 4
     message_send_delay_min: float = 0.55
     message_send_delay_max: float = 1.35
+    # 拟人打字节奏：按字数估算"打完这一条"的耗时，再叠加抖动。
+    # reply_first_delay_* 是看到消息到发出第一条之间的停顿（读消息 + 起手打字）。
+    typing_chars_per_second: float = 5.5
+    typing_max_delay_seconds: float = 12.0
+    reply_first_delay_min: float = 0.8
+    reply_first_delay_max: float = 2.5
     sticker_dir: Path = field(default_factory=lambda: _project_root() / "data" / "stickers")
     sticker_trigger_file: Path = field(
         default_factory=lambda: _project_root() / "data" / "stickers" / "triggers.json"
@@ -119,6 +125,9 @@ class BotConfig:
     toolbox_video_max_frames: int = 4
     # 单条视频消息的总处理预算，默认 60 秒，超时自动降级到 OCR/标题。
     toolbox_video_deadline_seconds: float = 60.0
+    # 多帧（视频抽样帧 / 多帧 GIF）视觉理解的输出 token 上限。
+    # 单张图片继续用固定 320；多帧综合理解需要更多字段输出，默认放宽到 800。
+    toolbox_vision_video_num_predict: int = 800
     llm_tools_enabled: bool = True
     llm_tool_max_calls: int = 2
     llm_agent_protocol_enabled: bool = False
@@ -136,8 +145,15 @@ class BotConfig:
     web_search_enabled: bool = True
     web_search_timeout_seconds: float = 6.0
     web_search_max_results: int = 5
+    # 结构化搜索 API key（可选，任一配置即启用该源；未配置自动跳过）。
+    tavily_api_key: str = ""
+    serpapi_api_key: str = ""
+    searxng_instances: str = ""
     web_page_max_chars: int = 8_000
     web_grounding_review_enabled: bool = True
+    # 时效性/专业事实类提问强制先联网取证，避免小模型直接拿训练记忆编造版本号、
+    # 价格、政策等易过期信息。设为 false 可退回"模型自行决定是否搜索"。
+    web_fact_search_enforcement: bool = True
     voice_asr_enabled: bool = False
     voice_tts_enabled: bool = False
     voice_service_url: str = "http://127.0.0.1:8790"
@@ -154,6 +170,14 @@ class BotConfig:
     webui_enabled: bool = True
     webui_host: str = "127.0.0.1"
     webui_port: int = 8787
+    # 账号管理系统（见 docs/account_system/）。两个开关默认关闭，此时整条链路走
+    # 账号化之前的代码路径——"代码部署了但开关没开"等于零行为变化，回退只需改
+    # .env 加重启。
+    account_system_enabled: bool = False
+    account_follow_napcat: bool = False
+    accounts_db_path: Path = field(
+        default_factory=lambda: _project_root() / "data" / "accounts" / "index.sqlite3"
+    )
 
     @property
     def ai_enabled(self) -> bool:

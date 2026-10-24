@@ -30,7 +30,8 @@ from ..toolbox_parts.ocr import OcrExtraction, extract_image_text
 
 URL_RE = re.compile(r"https?://[^\s<>\]）)\"']+", re.IGNORECASE)
 WINDOWS_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n\"'<>]+)")
-TEXT_EXTENSIONS = {".txt", ".md", ".log", ".csv", ".tsv", ".json"}
+TEXT_EXTENSIONS = {".txt", ".md", ".log", ".csv", ".tsv", ".json", ".py", ".js", ".ts", ".tsx",
+                   ".jsx", ".c", ".cpp", ".h", ".hpp", ".rs", ".go", ".java", ".tex", ".yaml", ".yml"}
 DOC_EXTENSIONS = {".docx", ".pdf"}
 SHEET_EXTENSIONS = {".xlsx"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}

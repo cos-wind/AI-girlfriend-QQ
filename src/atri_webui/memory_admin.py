@@ -887,6 +887,10 @@ def normalize_manual_memory_content(conversation_id: str, content: dict[str, Any
             else:
                 entry["confidence"] = clamp_float(entry.get("confidence"), 0.0, 1.0, 0.75)
                 entry["evidence_count"] = max(1, int(as_float(entry.get("evidence_count")) or 1))
+            # WebUI 的"新增记忆"会先插入一条空值草稿行；保存时直接丢弃未填写内容，
+            # 否则会留下永远检索不到、只能占位的空记忆。
+            if not str(entry.get("value") or "").strip():
+                continue
             normalized_entries.append(entry)
         structured[layer] = normalized_entries
     return normalized

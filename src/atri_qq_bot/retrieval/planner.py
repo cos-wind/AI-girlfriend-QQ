@@ -37,9 +37,9 @@ class RetrievalSettings:
             database_path=Path(
                 getattr(config, "memory_retrieval_path", root / "semantic_memory.sqlite3")
             ),
-            max_context_chars=max(800, min(3000, int(getattr(config, "memory_retrieval_max_chars", 1800)))),
+            max_context_chars=max(800, min(3000, int(getattr(config, "memory_retrieval_max_chars", 2400)))),
             lore_limit=max(1, min(5, int(getattr(config, "memory_retrieval_lore_limit", 3)))),
-            memory_limit=max(2, min(8, int(getattr(config, "memory_retrieval_memory_limit", 5)))),
+            memory_limit=max(2, min(8, int(getattr(config, "memory_retrieval_memory_limit", 6)))),
             # 向量索引只作为第二阶段能力：绝不在消息主线程自动加载 bge-m3。
             vector_enabled=bool(getattr(config, "memory_vector_enabled", False)),
             embedding_model=str(getattr(config, "memory_embedding_model", "bge-m3:latest")),
@@ -50,6 +50,52 @@ class RetrievalSettings:
                 getattr(config, "memory_embedding_timeout_seconds", 2.0)
             ),
         )
+
+
+# 人工写进群记忆的"行为规范"与"话题偏好"要**常驻**注入，不能参与关键词检索竞争：
+# 一条"不要有攻击性"只有在这句话恰好聊到"攻击"时才会被 FTS 召回，日常聊天根本
+# 碰不到它，于是"写了规范却不起效"。这里按内容/类别把它们单独挑出来，每轮都带上。
+_NORM_MARKERS = re.compile(
+    r"(不要|不许|禁止|不准|别把|别发|别叫|别重复|别骂|别理|别回|别喊|"
+    r"可以不回|识别不了.{0,6}可以不|"
+    r"保持.{0,8}(语气|温柔|分寸)|注意.{0,8}(分寸|边界|隐私|语气)|"
+    r"说话.{0,8}(分寸|注意)|有攻击性|攻击性|温柔.{0,8}攻击|"
+    r"分寸|边界|群规|规范|规则|约定|请遵守|遵守)"
+)
+_TOPIC_KEY_MARKERS = ("兴趣", "偏好", "话题", "主题", "聊", "身份", "专业", "资料", "称呼")
+_TOPIC_EXCLUDE_MARKERS = ("讨厌", "反感", "不喜欢", "别", "不要", "禁止", "不许", "不准")
+
+
+def _persistent_facts(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """从 profile 里抽出"规范"与"话题"两类常驻事实（规范优先，不重复）。"""
+
+    structured = profile.get("structured_memory") or {}
+    rules: list[str] = []
+    topics: list[str] = []
+    for layer_name in ("l1", "l2"):
+        for item in structured.get(layer_name) or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("state") or "") == "sleeping":
+                continue
+            value = str(item.get("value") or "").strip()
+            if not value or len(value) > 120:
+                continue
+            if value.startswith(("[", "http", "www")):
+                continue
+            key = str(item.get("key") or item.get("category") or "")
+            if _NORM_MARKERS.search(value) or _NORM_MARKERS.search(key):
+                if value not in rules:
+                    rules.append(value)
+                continue
+            # 话题只从 L1 的"档案事实"里取（兴趣/偏好/身份…），L2 是事件、容易混入
+            # 吵架和转发；"讨厌/反感"这类负面类目也不是"偏好话题"。
+            if layer_name == "l1" and any(marker in key for marker in _TOPIC_KEY_MARKERS):
+                if any(marker in key for marker in _TOPIC_EXCLUDE_MARKERS):
+                    continue
+                if value not in topics:
+                    topics.append(value)
+    return rules, topics
 
 
 class ContextRetrievalPlanner:
@@ -100,7 +146,8 @@ class ContextRetrievalPlanner:
             if _looks_like_lore_question(user_text)
             else []
         )
-        return self._render(profile, memories, lore)
+        rules, topics = _persistent_facts(profile)
+        return self._render(profile, memories, lore, rules, topics)
 
     def status(self) -> dict[str, Any]:
         status = self.repository.status()
@@ -114,15 +161,40 @@ class ContextRetrievalPlanner:
         )
         return status
 
+    # 群聊里人工写入的记忆既可能落在 L1/L2，也可能落在 L3（会话片段）。
+    # 旧版只索引前三层，导致写在 L3 的内容"记了却检索不到"。这里把 L3 也纳入，
+    # 但用更低权重并过滤纯噪声，避免聊天碎片污染专业话题的召回。
+    _MEDIA_NOISE_RE = re.compile(
+        r"^\s*[\[［](?:表情包/图片|动画表情|图片|视频|语音|文件|分享|音乐|json|xml)[:：\]]",
+        re.I,
+    )
+    _PUNCT_NOISE_RE = re.compile(r"^[\s@群友、，。！？?~…\-—_/\\|:：;；()（）\[\]【】\"'`]+$")
+
+    @classmethod
+    def _is_noise_memory(cls, value: str) -> bool:
+        """判断一条 L3 片段是否只是媒体占位、纯表情或过短寒暄。"""
+        text = re.sub(r"@群友", "", str(value or "")).strip()
+        if not text:
+            return True
+        if cls._MEDIA_NOISE_RE.match(str(value).strip()):
+            return True
+        if cls._PUNCT_NOISE_RE.match(text):
+            return True
+        # 去掉空格与常见标点后按字符数判断，过短的多为"没看""算吧"这类寒暄。
+        compact = re.sub(r"[\s，。！？?~…、,\.!;:：;]", "", text)
+        return len(compact) < 5
+
     def _sync_profile(self, scope: str, profile: dict[str, Any]) -> None:
         structured = profile.get("structured_memory") or {}
         entries: list[dict[str, Any]] = []
-        for layer_name, importance in (("l1", 0.95), ("l2", 0.72), ("candidates", 0.45)):
+        for layer_name, importance in (("l1", 0.95), ("l2", 0.72), ("l3", 0.6), ("candidates", 0.45)):
             for item in list(structured.get(layer_name) or []):
                 if not isinstance(item, dict) or str(item.get("state") or "") == "sleeping":
                     continue
                 value = str(item.get("value") or "").strip()
                 if not value:
+                    continue
+                if layer_name == "l3" and self._is_noise_memory(value):
                     continue
                 entries.append(
                     {
@@ -159,11 +231,19 @@ class ContextRetrievalPlanner:
         profile: dict[str, Any],
         memories: list[RetrievedEntry],
         lore: list[RetrievedEntry],
+        rules: list[str],
+        topics: list[str],
     ) -> str:
         lines = [
             "相处细节：先接住当前话题；只在确实相关时自然带出，不要说自己在读取记忆，也不要说调用或记录记忆。",
             "记不准就坦白，不要补造细节。口癖只在情绪和话题自然匹配时偶尔使用，避免复用最近几轮的开头、句式或同一句傲娇话。",
         ]
+        # 人工写进记忆的"规范"与"话题"常驻注入：规范是给亚托莉自己的行为准则，
+        # 话题是这个群偏爱聊什么。它们不参与关键词竞争，所以每轮都生效。
+        if rules:
+            lines.append("本群约定（始终遵守，用你自己的语气落实）：" + "；".join(rules[:6]))
+        if topics:
+            lines.append("本群偏好与话题（自然带入，不强行切换）：" + "；".join(topics[:8]))
         affection = str(profile.get("affection_state") or "").strip()
         if affection:
             # 沿用旧上下文的自然表述，避免下游人格提示和既有测试语义变化。

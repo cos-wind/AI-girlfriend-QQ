@@ -1,26 +1,14 @@
 from __future__ import annotations
 
 from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+from .handler_account import effective_bot_qq_for, view_memory_admin_for
 
 
 class HandlerConfigMixin(WebUIHandlerMixin):
-    def _handle_minecraft_config(self) -> None:
-        try:
-            config = save_minecraft_bridge_config(self._read_json())
-        except (OSError, ValueError) as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "config": config})
-
-    def _handle_minecraft_command(self) -> None:
-        try:
-            result = send_minecraft_command(self._read_json())
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except OSError as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result)
-
     def _handle_config_update(self) -> None:
+        # 只读检视模式下拒绝改配置：写的是全局 .env，属于运行账号的配置。
+        if self._refuse_when_read_only("修改配置"):
+            return
         payload = self._read_json()
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
@@ -104,6 +92,8 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         source state instead of failing the whole directory request.
         """
         params = parse_qs(query)
+        state = self.webui_state
+        viewing_other = state.view_account() is not None
         friends: list[dict[str, Any]] = []
         source_status = {
             "memory": "ready",
@@ -111,7 +101,12 @@ class HandlerConfigMixin(WebUIHandlerMixin):
             "modality": "ready",
             "qzone": "not_refreshed",
         }
-        if str(params.get("sync_qzone", ["0"])[0]).lower() in {"1", "true", "yes", "on"}:
+        # QQ 空间是**运行账号**的登录会话（Cookie 在 Bridge 里）。查看别的账号时
+        # 没有那个账号的空间会话，所以这里明确不拉、并说明原因，而不是把运行账号的
+        # 好友混进被查看账号的用户列表。
+        if viewing_other:
+            source_status["qzone"] = "not_available_for_viewed_account"
+        elif str(params.get("sync_qzone", ["0"])[0]).lower() in {"1", "true", "yes", "on"}:
             try:
                 friends = self._qzone_admin().friends()
                 source_status["qzone"] = "ready"
@@ -119,22 +114,28 @@ class HandlerConfigMixin(WebUIHandlerMixin):
                 source_status["qzone"] = f"offline: {str(exc)[:180]}"
         try:
             group_names = self._group_name_cache()
+            # 四个来源全部跟随「查看账号」：记忆、评测、权限策略、空间互动对象。
+            # 之前只接了记忆，于是切到新账号后用户中心还是原账号的人——那是 bug。
             memory_payload = self._decorate_memory_payload(
-                self.webui_state.memory_admin.summary(), group_names
+                view_memory_admin_for(self).summary(), group_names
             )
             insights_users: list[dict[str, Any]] = []
             insights_groups: list[dict[str, Any]] = []
-            runtime = getattr(self.webui_state.server, "insights", None)
-            if runtime is not None:
-                insights_users = runtime.store.known_users()
-                insights_groups = runtime.store.group_summary_schedules()
+            insights_store = state.view_insights_store()
+            if insights_store is not None:
+                insights_users = insights_store.known_users()
+                insights_groups = insights_store.group_summary_schedules()
                 for group in insights_groups:
                     group_id = str(group.get("group_id") or "")
                     if group_id and not str(group.get("group_name") or "").strip():
                         group["group_name"] = group_names.get(group_id, "")
                 source_status["insights"] = "ready"
-            policy = load_modality_access()
-            targets = self.webui_state.qzone_automation.store.targets()
+            elif viewing_other:
+                # 被查看的账号还没有评测库，这不是错误，是"还没有数据"。
+                source_status["insights"] = "empty_for_viewed_account"
+            policy = state.view_modality_policy()
+            targets = state.view_qzone_targets()
+            view_config = state.view_config()
             directory = UserDirectory(
                 memory_payload=memory_payload,
                 insights_users=insights_users,
@@ -142,8 +143,9 @@ class HandlerConfigMixin(WebUIHandlerMixin):
                 qzone_targets=targets,
                 qzone_friends=friends,
                 insights_groups=insights_groups,
-                bot_qq=self.webui_state.config.bot_qq,
-                owner_qqs=self.webui_state.config.owner_qqs,
+                # 代表"机器人自己"的号必须跟随生效账号，否则换号后目录里还把旧号当机器人。
+                bot_qq=effective_bot_qq_for(self),
+                owner_qqs=view_config.owner_qqs,
                 source_status=source_status,
             )
             user_id = str(params.get("id", [""])[0]).strip()
@@ -181,14 +183,178 @@ class HandlerConfigMixin(WebUIHandlerMixin):
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         self._send_json({"ok": True, "policy": policy})
 
+    def _handle_reply_strategy_preview(self) -> None:
+        """按好感度/活跃度预览会命中哪一档、上限多少。"""
+
+        payload = self._read_json()
+        if not isinstance(payload, dict):
+            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
+        try:
+            value = float(payload.get("value") or 0.0)
+        except (TypeError, ValueError):
+            return self._send_error(HTTPStatus.BAD_REQUEST, "value 必须是数字")
+        try:
+            result = preview_limits(
+                kind=str(payload.get("kind") or "user"),
+                value=value,
+            )
+        except OSError as exc:
+            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+        self._send_json({"ok": True, **result})
+
+    def _handle_reply_strategy(self) -> None:
+        """回复策略 + 频率计数 + 可选对象（好感/活跃度），供高级页「回复策略」卡片使用。"""
+
+        try:
+            policy = load_reply_strategy()
+            counters = counter_snapshot()
+        except OSError as exc:
+            return self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+        self._send_json(
+            {
+                "ok": True,
+                "policy": policy,
+                "counters": counters,
+                "objects": self._reply_strategy_objects(policy),
+            }
+        )
+
+    def _handle_reply_strategy_save(self) -> None:
+        payload = self._read_json()
+        if not isinstance(payload, dict):
+            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
+        try:
+            policy = save_reply_strategy(payload)
+        except (OSError, ValueError) as exc:
+            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+        self._send_json({"ok": True, "policy": policy})
+
+    def _handle_reply_strategy_object(self) -> None:
+        """用户中心按卡片保存单个用户/群聊的聊天权限与频率覆盖。"""
+
+        payload = self._read_json()
+        if not isinstance(payload, dict):
+            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
+        try:
+            result = update_object_rule(
+                str(payload.get("kind") or "user"),
+                str(payload.get("id") or ""),
+                payload.get("rule") or {},
+                name=str(payload.get("name") or ""),
+                remove=bool(payload.get("remove")),
+            )
+        except ValueError as exc:
+            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+        except OSError as exc:
+            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+        self._send_json({"ok": True, **result})
+
+    def _handle_reply_strategy_reset(self) -> None:
+        try:
+            reset_reply_counters()
+        except OSError as exc:
+            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+        self._send_json({"ok": True, "reset": True})
+
+    def _reply_strategy_objects(self, policy: dict[str, Any]) -> list[dict[str, Any]]:
+        """把记忆面板里的用户/群与它们的规则合并成一张表。
+
+        对象来自记忆面板（带好感度 / 群活跃度），策略里手动添加但记忆里还没有的
+        对象也会被合并进来，避免"刚加的对象在表格里看不见"。
+        """
+
+        owner_ids = {str(item) for item in (self.webui_state.config.owner_qqs or ())}
+        collected: dict[tuple[str, str], dict[str, Any]] = {}
+        try:
+            items = view_memory_admin_for(self).summary().get("items") or []
+        except Exception:
+            items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "")
+            target = item.get("target") if isinstance(item.get("target"), dict) else {}
+            conversation_id = str(item.get("id") or "")
+            if kind == "person":
+                identifier = str(target.get("user_id") or "").strip()
+                if not identifier.isdigit() and conversation_id.startswith("private:"):
+                    identifier = conversation_id.split(":", 1)[1].strip()
+                if not identifier.isdigit():
+                    continue
+                collected[("user", identifier)] = {
+                    "id": identifier,
+                    "kind": "user",
+                    "name": str(item.get("display_name") or f"QQ {identifier}"),
+                    "affection": item.get("affection"),
+                    "activity": None,
+                    "owner": identifier in owner_ids,
+                }
+            elif kind == "group":
+                identifier = str(target.get("group_id") or "").strip()
+                if not identifier.isdigit() and conversation_id.startswith("group:"):
+                    identifier = conversation_id.split(":", 1)[1].split(":", 1)[0].strip()
+                if not identifier.isdigit():
+                    continue
+                collected[("group", identifier)] = {
+                    "id": identifier,
+                    "kind": "group",
+                    "name": str(item.get("display_name") or f"群 {identifier}"),
+                    "affection": None,
+                    "activity": item.get("activity"),
+                    "owner": False,
+                }
+
+        for kind, rules in (
+            ("user", policy.get("users") or {}),
+            ("group", policy.get("groups") or {}),
+        ):
+            for raw_id, rule in (rules or {}).items():
+                identifier = str(raw_id)
+                if not identifier.isdigit():
+                    continue
+                default_name = f"QQ {identifier}" if kind == "user" else f"群 {identifier}"
+                entry = collected.setdefault(
+                    (kind, identifier),
+                    {
+                        "id": identifier,
+                        "kind": kind,
+                        "name": default_name,
+                        "affection": None,
+                        "activity": None,
+                        "owner": identifier in owner_ids,
+                    },
+                )
+                rule_name = str((rule or {}).get("name") or "").strip()
+                if rule_name:
+                    entry["name"] = rule_name[:120]
+
+        objects: list[dict[str, Any]] = []
+        for (kind, identifier), entry in collected.items():
+            rules = policy.get("users") if kind == "user" else policy.get("groups")
+            rule = (rules or {}).get(identifier)
+            entry["rule"] = dict(rule or {"mode": "auto"})
+            objects.append(entry)
+        objects.sort(
+            key=lambda item: (
+                0 if item.get("owner") else 1,
+                -(float(item.get("affection") or item.get("activity") or 0.0)),
+                str(item.get("id")),
+            )
+        )
+        return objects
+
     def _handle_proactive_save(self) -> None:
         payload = self._read_json()
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
         try:
+            # 两张档位表（私聊好感档 / 群聊活跃度档）都是「回复策略」与「主动互动」
+            # 共用的，住在 reply_strategy.json；主动互动页面保存时一起写回唯一来源。
+            tiers = persist_tiers_from_payload(payload)
             policy = save_proactive_policy(payload)
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+        policy.update(tiers)
         self._send_json({"ok": True, "policy": policy})
 
     def _handle_proactive_preview(self) -> None:
@@ -282,25 +448,16 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         self._send_json({"ok": True, **result})
 
     def _voice_payload(self) -> dict[str, Any]:
+        """语音服务与档案的可读状态。
+
+        歌曲合成工作流已迁出，因此这里不再探测 AI_music 桥接；工作台的探活走
+        `/api/music/entry-status`。
+        """
+
         try:
             health = run_coro(self.webui_state.server.voice.client.health())
         except Exception as exc:
             health = {"ok": False, "error": str(exc), "ready": False}
-        try:
-            music_health = _music_bridge_request("/api/health", timeout=1.5)
-            music_service = {
-                "ok": bool(music_health.get("ok")),
-                "url": MUSIC_SERVICE_URL,
-                "error": "",
-                "projects": music_health.get("music_projects") or {},
-            }
-        except Exception as exc:
-            music_service = {
-                "ok": False,
-                "url": MUSIC_SERVICE_URL,
-                "error": str(exc),
-                "projects": {},
-            }
         singing = health.get("singing")
         singing_references = (
             singing.get("references", [])
@@ -318,7 +475,6 @@ class HandlerConfigMixin(WebUIHandlerMixin):
             "tts_pronunciation_text": tts_pronunciation_text(),
             "behavior": load_voice_behavior(),
             "singing_references": singing_references,
-            "music_service": music_service,
         }
 
 

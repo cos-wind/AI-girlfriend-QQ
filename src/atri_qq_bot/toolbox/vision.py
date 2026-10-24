@@ -4,6 +4,30 @@ from .support import ToolboxMixin
 
 
 class ToolboxVisionMixin(ToolboxMixin):
+    async def analyze_image_upload(
+        self,
+        data: bytes,
+        source: str = "api:image",
+        *,
+        user_question: str = "",
+    ) -> ToolAnalysisResult:
+        """Analyze image bytes received through an external API client.
+
+        Keeping this as a public method gives Core API a stable seam without
+        exposing request-parser internals or requiring callers to share paths.
+        """
+
+        if not data:
+            raise ValueError("图片内容为空")
+        if len(data) > int(getattr(self, "vision_max_bytes", 8_000_000)):
+            raise ValueError("图片文件过大")
+        return await self._analyze_image_bytes(
+            data,
+            str(source or "api:image"),
+            visual_kind="image",
+            vision_prompt=_visual_prompt_for_kind("image", user_question),
+        )
+
     async def _analyze_image_ref(
         self,
         image_ref: _SegmentRef,
@@ -189,7 +213,7 @@ class ToolboxVisionMixin(ToolboxMixin):
             limitations.append(vision_limitation)
         else:
             limitations.append("当前只读取到图片元信息；未配置视觉模型时，不会臆测图片里具体画面。")
-        if ocr_result.error and not vision_text:
+        if ocr_result.error:
             limitations.append(
                 f"独立 OCR 暂不可用：{_shorten(ocr_result.error, 240)}"
             )
@@ -217,6 +241,12 @@ class ToolboxVisionMixin(ToolboxMixin):
                 else "unavailable"
             ),
             visual_ocr_confidence=ocr_result.average_confidence,
+            knowledge_materials=[{"title": "图片 OCR 与视觉分析", "locator": source, "raw": data,
+                "filename": _basename_from_ref(source) or "image.bin",
+                "text": "\n\n".join(p for p in (ocr_result.text, vision_text) if p),
+                "coverage": "image_ocr_and_model_description;unverified",
+                "blocks": [{"anchor": "ocr", "text": ocr_result.text},
+                           {"anchor": "model_description", "text": vision_text}]}],
         )
 
     def _byte_limit_for_ext(self, ext: str) -> int:
@@ -483,7 +513,7 @@ class ToolboxVisionMixin(ToolboxMixin):
 
     async def _extract_image_ocr(self, data: bytes) -> OcrExtraction:
         if not self.ocr_enabled:
-            return OcrExtraction()
+            return OcrExtraction(error="OCR 未开启，请在设置 → 图片与视频中启用文字识别。")
         return await asyncio.to_thread(extract_image_text, data)
 
     async def _analyze_image_with_openai_compatible(
@@ -505,6 +535,13 @@ class ToolboxVisionMixin(ToolboxMixin):
             }
             for encoded_image, mime_type in zip(encoded_images, mime_types)
         ]
+        # 与 Ollama 原生路径一致：多帧（视频抽样帧）需要更大输出预算，
+        # 避免 max_tokens 截断导致视觉输出被判无效。
+        max_tokens = (
+            getattr(self, "vision_video_num_predict", 800)
+            if len(encoded_images) > 1
+            else 480
+        )
         payload = {
             "model": model or self.vision_model,
             "messages": [
@@ -518,7 +555,7 @@ class ToolboxVisionMixin(ToolboxMixin):
                 },
             ],
             "temperature": 0.1,
-            "max_tokens": 480,
+            "max_tokens": max_tokens,
         }
         active_model = str(model or self.vision_model).casefold()
         active_base_url = str(base_url or self.vision_base_url).casefold()
@@ -563,6 +600,14 @@ class ToolboxVisionMixin(ToolboxMixin):
     ) -> _VisionModelResponse:
         import httpx
 
+        # 多帧（视频抽样帧 / 多帧 GIF）需要综合前后变化，输出字段更多，
+        # 固定 320 token 会被写满触发 truncated_output，导致回落到封面。
+        # 单张图片继续用 320，多帧用可配置的更大上限（默认 800）。
+        num_predict = (
+            getattr(self, "vision_video_num_predict", 800)
+            if len(encoded_images) > 1
+            else 320
+        )
         payload = {
             "model": model or self.vision_model,
             "messages": [
@@ -575,7 +620,7 @@ class ToolboxVisionMixin(ToolboxMixin):
             "format": VISUAL_RESPONSE_SCHEMA,
             "options": {
                 "temperature": 0.1,
-                "num_predict": 320,
+                "num_predict": num_predict,
                 "num_ctx": 4096,
             },
         }

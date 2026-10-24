@@ -8,16 +8,12 @@ from typing import Literal
 from .schema import VoiceRequest
 
 
-DeliveryMode = Literal["speech", "singing"]
+DeliveryMode = Literal["speech"]
 
 _NEGATED_VOICE_PATTERNS = (
     re.compile(r"(?:不要|不用|别|无需|不必).{0,4}(?:语音|声音|朗读|念)"),
     re.compile(r"(?:不要|不用|别|无需|不必).{0,1}唱"),
     re.compile(r"(?:语音|声音).{0,3}(?:关掉|关闭|停用)"),
-)
-_SINGING_PATTERNS = (
-    re.compile(r"(?:给我|为我|帮我|可以|能不能|能|请)?唱(?:一首|首|一段|段|两句|几句|歌)?"),
-    re.compile(r"(?:来|整)(?:一首|首|一段|段|两句|几句)(?:歌)?"),
 )
 _SPEECH_PATTERNS = (
     re.compile(r"(?:用|发|改成|换成).{0,4}语音(?:回复|回答|说|回|消息)?"),
@@ -89,8 +85,6 @@ def detect_explicit_delivery_intent(text: str) -> ExplicitDeliveryIntent | None:
     value = re.sub(r"\s+", "", str(text or "")).strip()
     if not value or any(pattern.search(value) for pattern in _NEGATED_VOICE_PATTERNS):
         return None
-    if any(pattern.search(value) for pattern in _SINGING_PATTERNS):
-        return ExplicitDeliveryIntent("singing")
     if any(pattern.search(value) for pattern in _SPEECH_PATTERNS):
         return ExplicitDeliveryIntent("speech")
     return None
@@ -112,13 +106,10 @@ def build_explicit_voice_fallback(
     return VoiceRequest(
         text=spoken,
         emotion=_infer_emotion(user_text, spoken),
-        intensity=0.68 if intent.mode == "singing" else 0.58,
+        intensity=0.58,
         language="auto",
         reason="explicit_request",
         mode=intent.mode,
-        song_title="",
-        segment_index=None,
-        segment_hint="",
     )
 
 

@@ -61,6 +61,76 @@ def normalize_poke_event(event: dict[str, Any], bot_qq: int) -> dict[str, Any] |
     return normalized
 
 
+def is_group_increase_event(event: dict[str, Any]) -> bool:
+    """判断 OneBot 通知是否为"新人入群"事件。
+
+    和戳一戳一样属于 notice 而非普通 message，先在适配层识别，
+    再归一化成可以复用现有回复链路的普通群消息事件。
+    """
+
+    return (
+        str(event.get("post_type") or "").lower() == "notice"
+        and str(event.get("notice_type") or "").lower() == "group_increase"
+    )
+
+
+def group_increase_text(name: Any, member_id: Any) -> str:
+    """入群事件的展示文本。
+
+    用「亚托莉看到…」的事件口吻，而不是"有人在对你说话"——这样人格层会自然地
+    把它当成一次观察去回应，而不是当成一句需要接的话。
+
+    昵称/群名片拿到就用，拿不到退回 QQ 号（且不把 QQ 号写两遍）。
+    归一化与"补到昵称后重写文本"两处共用这一个函数，避免格式漂移。
+    """
+    clean = str(name or "").strip()
+    if clean:
+        return f"[亚托莉看到新成员「{clean}」(QQ {member_id}) 加入了本群]"
+    return f"[亚托莉看到新成员 QQ {member_id} 加入了本群]"
+
+
+def normalize_group_increase_event(
+    event: dict[str, Any], bot_qq: int
+) -> dict[str, Any] | None:
+    """把"新人入群"通知转换成普通群消息事件，用来触发入群欢迎。
+
+    归一化之后它会自然走进现有的回复策略、人格、记忆、语音和表情包流程，
+    不需要在回复链路里加任何特例分支。
+
+    **亚托莉自己进群时返回 ``None``**：那不是"欢迎新人"，不该由她欢迎自己。
+    """
+    if not is_group_increase_event(event):
+        return None
+    group_id = event.get("group_id")
+    member_id = _as_int(event.get("user_id"))
+    if group_id is None or member_id is None:
+        return None
+    if member_id == int(bot_qq):
+        return None
+
+    nickname = str(event.get("nickname") or "").strip()
+    text = group_increase_text(nickname, member_id)
+
+    normalized = dict(event)
+    normalized.update(
+        {
+            "post_type": "message",
+            "message_type": "group",
+            "sub_type": "group_increase",
+            "message": [{"type": "text", "data": {"text": text}}],
+            "raw_message": text,
+            # 供上层区分事件来源、补昵称与日志排查。
+            "_atri_group_increase_event": True,
+            "_atri_group_increase_member": {
+                "user_id": str(member_id),
+                "group_id": str(group_id),
+                "nickname": nickname,
+            },
+        }
+    )
+    return normalized
+
+
 def extract_reply_message_id(message: Any) -> str | None:
     """从消息段或 NapCat 的 reply 对象中提取被引用消息 ID。"""
 

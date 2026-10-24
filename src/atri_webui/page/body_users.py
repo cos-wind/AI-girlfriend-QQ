@@ -3,13 +3,17 @@ from __future__ import annotations
 PART = r"""        <div class="surface">
           <div class="section-head">
             <div><h2>统一用户中心</h2><p class="note">用户、群聊、记忆与互动设置集中管理。亚托莉始终置顶，余弦寄长风其次。</p></div>
-            <div class="row"><button class="ghost" onclick="runUserDirectoryRefresh(this)">刷新用户目录</button></div>
+            <div class="row"><a class="ghost" href="/knowledge">共同记忆与知识库</a><button class="ghost" onclick="runUserDirectoryRefresh(this)">刷新用户目录</button></div>
           </div>
+          <div id="userDirectoryScopeHint" class="account-active-hint"></div>
           <div class="user-directory-integrated-toolbar">
             <strong>QQ 空间连接</strong>
             <span id="directoryQzoneBridgeAuth" class="note">正在检查 QQ 空间登录状态...</span>
             <button class="ghost" onclick="directoryStartQZoneLogin()">登录 QQ 空间</button>
             <button onclick="runUserDirectoryRefresh(this)">刷新好友动态与群聊计划</button>
+            <label class="qzone-model-global-control">QQ 动态生成模型<select id="qzoneGlobalModelProfile"><option value="">当前聊天模型</option></select></label>
+            <button class="ghost" onclick="saveGlobalQZoneModelProfile(this)">保存模型</button>
+            <span id="qzoneGlobalModelMeta" class="note">正在读取模型配置...</span>
             <label class="switch-line"><input id="directoryProactiveEnabled" type="checkbox" onchange="saveDirectoryProactiveToggle()">主动消息</label>
             <span id="directoryProactiveState" class="note">正在读取主动消息状态...</span>
           </div>
@@ -50,6 +54,18 @@ PART = r"""        <div class="surface">
             <textarea id="testText" placeholder="例如：我今天好累，亚托莉你会怎么回？"></textarea>
             <div class="row"><button onclick="testChat()">生成回复</button></div>
             <div class="out" id="testOut"></div>
+            <details class="test-extension">
+              <summary>主动消息预览（扩展）</summary>
+              <p class="note">被动回复和主动消息走的是同一套人格与记忆，差别只在触发方式。这里按「数值分档」里命中的档位，预览一次主动消息会怎么开口；只生成文案，不会发送 QQ 消息。</p>
+              <div class="grid">
+                <label>预览场景<select id="proactivePreviewScope" onchange="renderProactivePreviewTypes()"><option value="private">私聊</option><option value="group">群聊</option></select></label>
+                <label>内容类型<select id="proactivePreviewType"></select></label>
+                <label>QQ / 群号（可留空）<input id="proactivePreviewUser" inputmode="numeric" placeholder="默认使用首个入选目标"></label>
+              </div>
+              <div class="row"><button class="ghost" onclick="previewProactive(this)">生成主动消息预览</button></div>
+              <div class="out" id="proactivePreviewOut">还没有生成预览。</div>
+              <p class="note" id="proactivePreviewTierHint">当前档位与频率在「高级配置」页的数值分档面板里调整。</p>
+            </details>
           </div>
           <div class="surface">
             <div class="section-head">

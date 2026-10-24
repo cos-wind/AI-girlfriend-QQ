@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+from .handler_account import view_memory_admin_for
 
 
 class HandlerCoreMixin(WebUIHandlerMixin):
@@ -9,6 +10,8 @@ class HandlerCoreMixin(WebUIHandlerMixin):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/knowledge" or parsed.path.startswith("/api/knowledge/"):
+            return self._handle_knowledge_get(parsed.path, parsed.query)
         if parsed.path == "/":
             return self._send_html(_render_index_dynamic())
         if parsed.path == "/voice-call":
@@ -45,9 +48,19 @@ class HandlerCoreMixin(WebUIHandlerMixin):
         if parsed.path == "/api/group-summaries":
             return self._handle_summaries(parsed.query)
         if parsed.path == "/api/config":
-            return self._send_json(config_payload(self.webui_state.config))
+            # 读路径跟随「查看账号」：看别的账号时展示它的有效配置。
+            # 写入仍然是全局 .env（运行账号的配置），见 _handle_config_update。
+            return self._send_json(config_payload(self.webui_state.view_config()))
+        if parsed.path == "/api/account/current":
+            return self._handle_account_current()
+        if parsed.path == "/api/account/napcat":
+            return self._handle_account_napcat_status()
+        if parsed.path == "/api/account/view":
+            return self._handle_account_view_get()
         if parsed.path == "/api/modality-access":
             return self._handle_modality_access()
+        if parsed.path == "/api/reply-strategy":
+            return self._handle_reply_strategy()
         if parsed.path == "/api/users":
             return self._handle_users(parsed.query)
         if parsed.path == "/api/proactive":
@@ -58,34 +71,17 @@ class HandlerCoreMixin(WebUIHandlerMixin):
             return self._send_json(model_profiles_payload(self.webui_state.config))
         if parsed.path == "/api/local-models":
             return self._send_json(local_models_payload())
-        if parsed.path == "/api/minecraft":
-            return self._send_json(minecraft_dashboard())
         if parsed.path == "/api/voice":
             return self._send_json(self._voice_payload())
+        if parsed.path == "/api/voice/service":
+            return self._handle_voice_service_status()
         if parsed.path == "/api/voice/behavior":
             return self._send_json({"ok": True, "behavior": load_voice_behavior()})
-        if parsed.path == "/api/voice/singing/jobs":
-            return self._handle_singing_jobs()
-        if parsed.path == "/api/voice/singing/job":
-            return self._handle_singing_job(parsed.query)
-        if parsed.path == "/api/music/projects":
-            return self._handle_music_projects()
-        if parsed.path == "/api/music/capabilities":
-            return self._handle_music_capabilities()
-        if parsed.path == "/api/music/sources":
-            return self._handle_music_sources()
-        if parsed.path == "/api/music/project":
-            return self._handle_music_project(parsed.query)
-        if parsed.path == "/api/music/project/audio":
-            return self._handle_music_project_audio(parsed.query)
-        if parsed.path == "/api/music/project/waveform":
-            return self._handle_music_project_waveform(parsed.query)
-        if parsed.path == "/api/music/project/log":
-            return self._handle_music_project_log(parsed.query)
-        if parsed.path == "/api/music/delivery-songs":
-            return self._send_json(self._delivery_songs_payload())
-        if parsed.path == "/api/music/delivery-audio":
-            return self._send_delivery_song_audio(parsed.query)
+        # 歌曲合成工作流已迁出到独立的 AI_music 项目；这里只保留入口探活。
+        if parsed.path == "/api/music/entry-status":
+            return self._handle_music_workbench_status()
+        if parsed.path == "/api/music/songs":
+            return self._send_json(self._songs_payload())
         if parsed.path == "/api/voice/audio":
             return self._send_voice_audio(parsed.query)
         if parsed.path == "/api/stickers":
@@ -94,14 +90,17 @@ class HandlerCoreMixin(WebUIHandlerMixin):
             return self._send_sticker_file(parsed.query)
         if parsed.path == "/api/memory":
             names = self._group_name_cache()
+            # 读路径跟随"查看账号"：手动选了别的账号时展示它的记忆。
             return self._send_json(
-                self._decorate_memory_payload(self.webui_state.memory_admin.summary(), names)
+                self._decorate_memory_payload(
+                    view_memory_admin_for(self).summary(), names
+                )
             )
         if parsed.path == "/api/memory/detail":
             names = self._group_name_cache()
             return self._send_json(
                 self._decorate_memory_payload(
-                    self.webui_state.memory_admin.detail(parsed.query), names
+                    view_memory_admin_for(self).detail(parsed.query), names
                 )
             )
         if parsed.path == "/api/qzone":
@@ -114,22 +113,49 @@ class HandlerCoreMixin(WebUIHandlerMixin):
             return self._handle_qzone_login_status()
         if parsed.path == "/api/qzone/friends":
             return self._handle_qzone_friends()
+        if parsed.path == "/api/qzone/bridge":
+            return self._handle_qzone_bridge_status()
         if parsed.path == "/api/qzone/automation":
+            # 查看别的账号时不显示运行账号的自动化数据与内容池。
+            if self._viewing_other_account():
+                return self._qzone_unavailable()
             payload = self.webui_state.qzone_automation.dashboard()
             payload["bot_qq"] = str(self.webui_state.config.bot_qq)
             payload["owner_qqs"] = [str(value) for value in (self.webui_state.config.owner_qqs or ())]
             return self._send_json(payload)
         if parsed.path == "/api/qzone/automation/logs":
+            if self._viewing_other_account():
+                return self._qzone_unavailable(logs=[])
             params = parse_qs(parsed.query)
             return self._send_json({"ok": True, "logs": self.webui_state.qzone_automation.store.logs(int(params.get("limit", [100])[0] or 100), str(params.get("action", [""])[0]))})
         self._send_error(HTTPStatus.NOT_FOUND, "not found")
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/knowledge/"):
+            return self._handle_knowledge_post(parsed.path)
+        if parsed.path == "/api/account/view":
+            return self._handle_account_view_set()
+        if parsed.path == "/api/account/napcat/switch":
+            return self._handle_account_napcat_switch()
+        if parsed.path == "/api/account/confirm":
+            return self._handle_account_confirm()
+        if parsed.path == "/api/account/add":
+            return self._handle_account_add()
+        if parsed.path == "/api/account/update":
+            return self._handle_account_update()
         if parsed.path == "/api/config":
             return self._handle_config_update()
         if parsed.path == "/api/modality-access":
             return self._handle_modality_access_save()
+        if parsed.path == "/api/reply-strategy":
+            return self._handle_reply_strategy_save()
+        if parsed.path == "/api/reply-strategy/object":
+            return self._handle_reply_strategy_object()
+        if parsed.path == "/api/reply-strategy/preview":
+            return self._handle_reply_strategy_preview()
+        if parsed.path == "/api/reply-strategy/reset-counters":
+            return self._handle_reply_strategy_reset()
         if parsed.path == "/api/proactive/save":
             return self._handle_proactive_save()
         if parsed.path == "/api/proactive/preview":
@@ -158,48 +184,21 @@ class HandlerCoreMixin(WebUIHandlerMixin):
             return self._handle_summary_schedule_save()
         if parsed.path == "/api/voice/translate":
             return self._handle_voice_translate()
-        if parsed.path == "/api/minecraft/config":
-            return self._handle_minecraft_config()
-        if parsed.path == "/api/minecraft/command":
-            return self._handle_minecraft_command()
         if parsed.path == "/api/voice/save":
             return self._handle_voice_save()
+        if parsed.path == "/api/voice/service":
+            return self._handle_voice_service_action()
         if parsed.path == "/api/voice/reference":
             return self._handle_voice_reference()
         if parsed.path == "/api/voice/preview":
             return self._handle_voice_preview()
         if parsed.path == "/api/voice/test-asr":
             return self._handle_voice_test_asr()
-        if parsed.path == "/api/voice/singing/source":
-            return self._handle_singing_source_upload()
-        if parsed.path == "/api/voice/singing/create":
-            return self._handle_singing_create()
-        if parsed.path == "/api/voice/singing/cancel":
-            return self._handle_singing_cancel()
-        if parsed.path == "/api/music/project/create":
-            return self._handle_music_project_create()
-        if parsed.path == "/api/music/project/stems":
-            return self._handle_music_project_stems()
-        if parsed.path == "/api/music/project/stage":
-            return self._handle_music_project_stage()
-        if parsed.path == "/api/music/project/pipeline":
-            return self._handle_music_project_operation("pipeline")
-        if parsed.path == "/api/music/project/confirm":
-            return self._handle_music_project_operation("confirm")
-        if parsed.path == "/api/music/project/rollback":
-            return self._handle_music_project_operation("rollback")
-        if parsed.path == "/api/music/project/reset":
-            return self._handle_music_project_operation("reset")
-        if parsed.path == "/api/music/project/recover":
-            return self._handle_music_project_operation("recover")
-        if parsed.path == "/api/music/project/segment":
-            return self._handle_music_project_operation("segment")
-        if parsed.path == "/api/music/project/export":
-            return self._handle_music_project_operation("export")
-        if parsed.path == "/api/music/delivery-source":
-            return self._handle_delivery_music_source_upload()
-        if parsed.path == "/api/music/delivery-segment":
-            return self._handle_delivery_music_segment()
+        # 歌曲合成工作流已迁出：保留数据接口，删掉全部转发与歌唱任务接口。
+        if parsed.path == "/api/music/entry-start":
+            return self._handle_music_workbench_start()
+        if parsed.path == "/api/music/upload":
+            return self._handle_song_upload()
         if parsed.path == "/api/voice-call/turn":
             return self._handle_voice_call_turn()
         if parsed.path == "/api/voice-call/close":
@@ -221,8 +220,12 @@ class HandlerCoreMixin(WebUIHandlerMixin):
         if parsed.path == "/api/memory/delete":
             return self._handle_memory_delete()
         if parsed.path == "/api/memory/backup":
-            backup = self.webui_state.memory_admin.backup("manual")
+            if self._refuse_when_read_only("手动备份记忆"):
+                return
+            backup = self.webui_state.running_memory_admin().backup("manual")
             return self._send_json({"ok": True, "backup": str(backup)})
+        if parsed.path == "/api/qzone/bridge":
+            return self._handle_qzone_bridge_action()
         if parsed.path == "/api/qzone/like":
             return self._handle_qzone_like()
         if parsed.path == "/api/qzone/comment":

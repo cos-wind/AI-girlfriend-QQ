@@ -73,6 +73,11 @@ class ToolboxStateMixin(ToolboxMixin):
             getattr(config, "toolbox_video_frame_analysis_enabled", True)
         )
         self.video_max_frames = max(1, min(8, int(getattr(config, "toolbox_video_max_frames", 4))))
+        # 多帧视觉理解的输出 token 上限（视频抽样帧 / 多帧 GIF）。钳制在 [320, 2048]。
+        self.vision_video_num_predict = max(
+            320,
+            min(2048, int(getattr(config, "toolbox_vision_video_num_predict", 800))),
+        )
         # 视频处理使用独立预算，避免抽帧、OCR、视觉请求串行叠加后拖住整条回复链路。
         self.video_deadline_seconds = max(
             20.0,

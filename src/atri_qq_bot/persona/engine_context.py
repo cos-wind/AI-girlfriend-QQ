@@ -286,13 +286,6 @@ class EngineContextMixin(PersonaEngineMixin):
         if any(word in text for word in ("吃饭", "饿", "早餐", "午饭", "晚饭")):
             return "那先解决吃饭问题。别只靠饮料和零食糊弄过去，主人要是不好好吃饭，亚托莉会生气气。"
 
-        delivery_intent = detect_explicit_delivery_intent(text)
-        if delivery_intent is not None and delivery_intent.mode == "singing":
-            return (
-                "想唱给你听，但我现在还不能把歌词真正唱成歌。"
-                "我不想拿普通朗读糊弄你，等歌声练好后再认真唱给主人听。"
-            )
-
         if _has_abstract_trigger(_intent_text(text)):
             return "轻松绷住"
 

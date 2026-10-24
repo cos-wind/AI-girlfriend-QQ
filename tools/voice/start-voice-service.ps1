@@ -5,9 +5,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+. (Join-Path $PSScriptRoot "voice-endpoint.ps1")
+$VoiceServicePort = Get-ConfiguredVoicePort -ProjectDir $ProjectDir
 $DefaultLocalModelsRoot = $env:LOCAL_MODELS_ROOT
 if ([string]::IsNullOrWhiteSpace($DefaultLocalModelsRoot)) {
-    $DefaultLocalModelsRoot = Join-Path ("D:\" + [char]0x672C + [char]0x5730 + [char]0x5927 + [char]0x6A21 + [char]0x578B) "models"
+    $DefaultLocalModelsRoot = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".ollama\models"
 }
 $DefaultProjectModelRoot = Join-Path $DefaultLocalModelsRoot "AI_ATRI"
 if ([string]::IsNullOrWhiteSpace($ModelRoot)) {
@@ -45,10 +47,10 @@ function Get-ListeningProcessId {
 function Test-VoiceReady {
     try {
         $Health = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:8790/health" `
+            -Uri "http://127.0.0.1:$VoiceServicePort/health" `
             -Method Get `
             -TimeoutSec 3
-        return [bool]$Health.ok -and [bool]$Health.ready
+        return [bool]$Health.ok -and $Health.service -eq "atri-voice" -and [bool]$Health.ready
     } catch {
         return $false
     }
@@ -57,11 +59,19 @@ function Test-VoiceReady {
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "Voice runtime is not installed. Run setup-voice-runtime.ps1 first."
 }
-$ExistingProcessId = Get-ListeningProcessId -Port 8790
+$ExistingProcessId = Get-ListeningProcessId -Port $VoiceServicePort
 if ($ExistingProcessId) {
+    try {
+        $ExistingHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$VoiceServicePort/health" -TimeoutSec 3
+    } catch {
+        throw "Port $VoiceServicePort is occupied; cannot confirm an ATRI voice service."
+    }
+    if ($ExistingHealth.service -ne "atri-voice" -or -not $ExistingHealth.ok) {
+        throw "Port $VoiceServicePort belongs to another service. Choose a different port in the desktop app."
+    }
     for ($i = 0; $i -lt 180; $i++) {
         if (Test-VoiceReady) {
-            Write-Host "Voice service is ready at http://127.0.0.1:8790"
+            Write-Host "Voice service is ready at http://127.0.0.1:$VoiceServicePort"
             return
         }
         Start-Sleep -Milliseconds 500
@@ -72,7 +82,7 @@ if ($ExistingProcessId) {
 New-Item -ItemType Directory -Force -Path $RuntimeDir, $LogDir, $ModelRoot | Out-Null
 $AsciiModelRoot = $env:ASCII_ATRI_MODELS_ROOT
 if ([string]::IsNullOrWhiteSpace($AsciiModelRoot)) {
-    $AsciiModelRoot = "D:\AtriModels"
+    $AsciiModelRoot = Join-Path $ProjectDir "models"
 }
 $ModelAccessRoot = if (Test-Path -LiteralPath $AsciiModelRoot) {
     $AsciiModelRoot
@@ -89,6 +99,11 @@ $env:ATRI_ASR_MODEL = if (Test-Path -LiteralPath (Join-Path $LocalSenseVoice "mo
     "iic/SenseVoiceSmall"
 }
 $env:ATRI_ASR_DEVICE = "cpu"
+if ([string]::IsNullOrWhiteSpace($env:ATRI_ASR_WORKER_IDLE_SECONDS)) {
+    $env:ATRI_ASR_WORKER_IDLE_SECONDS = "60"
+}
+$env:ATRI_VOICE_HOST = "127.0.0.1"
+$env:ATRI_VOICE_PORT = "$VoiceServicePort"
 $LocalVad = Join-Path $env:MODELSCOPE_CACHE "models\iic--speech_fsmn_vad_zh-cn-16k-common-pytorch\snapshots\master"
 $env:ATRI_ASR_VAD_MODEL = if (Test-Path -LiteralPath (Join-Path $LocalVad "model.pt")) {
     $LocalVad
@@ -130,10 +145,10 @@ $Process = Start-Process `
     -PassThru
 for ($i = 0; $i -lt 180; $i++) {
     Start-Sleep -Milliseconds 500
-    $ListeningProcessId = Get-ListeningProcessId -Port 8790
+    $ListeningProcessId = Get-ListeningProcessId -Port $VoiceServicePort
     if ($ListeningProcessId -and (Test-VoiceReady)) {
         $ListeningProcessId | Set-Content -LiteralPath $PidFile -Encoding ASCII
-        Write-Host "Voice service is ready at http://127.0.0.1:8790"
+        Write-Host "Voice service is ready at http://127.0.0.1:$VoiceServicePort"
         return
     }
     if ($Process.HasExited) {

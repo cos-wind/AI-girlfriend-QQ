@@ -23,6 +23,9 @@ class EngineStateMixin(PersonaEngineMixin):
         # 回复失败是运行态信号，不是聊天内容。OneBot 层消费后只记录日志/评测，
         # 绝不把异常文案、固定模板或伪装成人格回复的兜底发给用户。
         self._pending_reply_failures: dict[str, str] = {}
+        # 工具循环里最后一次"内容非空但没过校验"的候选回复。多轮都没拿到合格
+        # 回复时用它兜底，避免整轮静默消失（用户侧表现为发了消息没反应）。
+        self._last_candidate_reply: str = ""
         self._cognition_store: CognitionStateStore | None = None
         if bool(getattr(config, "cognition_shadow_enabled", False)):
             try:
@@ -59,6 +62,7 @@ class EngineStateMixin(PersonaEngineMixin):
         actor_id: int | str | None = None,
         runtime_context: bool = False,
         profile_id: str | None = None,
+        event_id: str | None = None,
     ) -> None:
         if _is_affection_command(user_text):
             return
@@ -69,6 +73,7 @@ class EngineStateMixin(PersonaEngineMixin):
             actor_id=actor_id,
             nickname=nickname,
             is_owner=is_owner,
+            event_id=event_id,
         )
         if profile_id and profile_id != conversation_id:
             self.memory.observe_user(
@@ -77,6 +82,7 @@ class EngineStateMixin(PersonaEngineMixin):
                 actor_id=actor_id,
                 nickname=nickname,
                 is_owner=is_owner,
+                event_id=event_id,
             )
         if runtime_context:
             self._remember_user_context(conversation_id, user_text, nickname)

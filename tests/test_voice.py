@@ -50,24 +50,20 @@ def _isolate_voice_tests_from_the_live_modality_allowlist(monkeypatch) -> None:
     )
 
 
-def test_explicit_delivery_guard_detects_speech_singing_and_negation() -> None:
+def test_explicit_delivery_guard_only_detects_speech() -> None:
     assert detect_explicit_delivery_intent("用语音回复我").mode == "speech"
-    assert detect_explicit_delivery_intent("给我唱两句吧").mode == "singing"
+    assert detect_explicit_delivery_intent("给我唱两句吧") is None
     assert detect_explicit_delivery_intent("不要发语音，打字就好") is None
 
 
-def test_explicit_delivery_guard_builds_voice_request_from_model_reply() -> None:
+def test_singing_does_not_create_tts_fallback() -> None:
     request = build_explicit_voice_fallback(
         "别打字，唱两句给我听",
         "**早上好**，今天也要开心。",
         max_chars=160,
     )
 
-    assert request is not None
-    assert request.text == "早上好，今天也要开心。"
-    assert request.reason == "explicit_request"
-    assert request.mode == "singing"
-    assert request.emotion == "happy"
+    assert request is None
 
 
 def test_explicit_delivery_guard_preserves_exact_requested_speech() -> None:
@@ -1005,10 +1001,10 @@ def test_onebot_voice_quality_failure_sends_text_fallback(
             object(),
             {
                 "message_type": "group",
-                "group_id": 1076073703,
+                "group_id": 900001001,
                 "user_id": 100000002,
             },
-            "group:1076073703",
+            "group:900001001",
             VoiceRequest(text, language="zh"),
         )
     )
@@ -1066,10 +1062,10 @@ def test_onebot_service_failure_sends_remaining_text(
             object(),
             {
                 "message_type": "group",
-                "group_id": 1076073703,
+                "group_id": 900001001,
                 "user_id": 100000002,
             },
-            "group:1076073703",
+            "group:900001001",
             VoiceRequest(
                 "哒哒哒哒，好想玩原神呜呜呜，看云彩缤纷",
                 language="zh",
@@ -1317,14 +1313,21 @@ def test_onebot_singing_failure_does_not_send_generic_model_fallback(tmp_path: P
     payload = json.loads(websocket.sent[-1])
     text = payload["params"]["message"]
     assert "啦啦啦" not in text
-    assert text == "这首歌我还没学会哦。"
+    assert text == "歌单暂时是空的，还没有可以发送的成品歌曲。"
     assert fake_engine.recorded_replies
-    assert fake_engine.recorded_replies[-1] == "这首歌我还没学会哦。"
+    assert fake_engine.recorded_replies[-1] == text
     assert "啦啦啦" not in fake_engine.recorded_replies[-1]
 
 
-def test_onebot_explicit_singing_bypasses_chat_model_and_sends_prepared_record(
-    tmp_path: Path,
+@pytest.mark.parametrize(("initial_text", "selection"), [
+    ("给我唱铁花飞", "确认"),
+    ("唱首歌", "铁花飞"),
+    ("合唱团今天放假", None),
+    ("来一段代码", None),
+    ("唱好啦！《小星星》来听", None),
+])
+def test_onebot_fixed_singing_flow_and_unrequested_model_tool_guard(
+    tmp_path: Path, initial_text: str, selection: str | None, monkeypatch,
 ) -> None:
     config = BotConfig(
         bot_qq=100000001,
@@ -1355,7 +1358,11 @@ def test_onebot_explicit_singing_bypasses_chat_model_and_sends_prepared_record(
 
         async def reply(self, *args: object, **kwargs: object) -> str:
             self.reply_calls += 1
-            raise AssertionError("明确点歌不应调用聊天模型")
+            return "普通聊天回复。"
+
+        def consume_voice_request(self, conversation_id: str) -> VoiceRequest:
+            # 即使模型谎称用户明确点歌，也不能覆盖当前用户的普通聊天。
+            return VoiceRequest("唱歌", mode="singing", reason="explicit_request")
 
         def record_bot_reply(self, conversation_id: str, reply_text: str, *args: object, **kwargs: object) -> None:
             self.recorded_replies.append(reply_text)
@@ -1370,13 +1377,22 @@ def test_onebot_explicit_singing_bypasses_chat_model_and_sends_prepared_record(
         async def send(self, payload: str) -> None:
             self.sent.append(payload)
 
-    complete = tmp_path / "完整音乐"
+    complete = tmp_path / "music"
     complete.mkdir(parents=True)
     full_song = complete / "铁花飞.wav"
     full_song.write_bytes(b"prepared-full-song")
     fake_engine = FakeEngine()
     server = OneBotServer(config, fake_engine)  # type: ignore[arg-type]
     server.singing = SingingConversationController(root=complete)
+    if selection is not None:
+        def unexpected_delay(*args):
+            raise AssertionError("固定点歌不应等待模拟打字延迟")
+        monkeypatch.setattr("atri_qq_bot.onebot.server._first_reply_delay", unexpected_delay)
+
+        async def unexpected_synthesis(*args, **kwargs):
+            raise AssertionError("固定点歌只发送已有文件，不应调用语音合成服务")
+
+        monkeypatch.setattr(SpeechServiceClient, "synthesize", unexpected_synthesis)
     websocket = FakeWebSocket()
 
     async def successful_action(
@@ -1397,18 +1413,54 @@ def test_onebot_explicit_singing_bypasses_chat_model_and_sends_prepared_record(
                 "message_type": "private",
                 "self_id": config.bot_qq,
                 "user_id": 10001,
-                "message": [{"type": "text", "data": {"text": "给我唱铁花飞"}}],
+                "message": [{"type": "text", "data": {"text": initial_text}}],
                 "sender": {"nickname": "主人"},
             },
         )
     )
 
-    assert fake_engine.reply_calls == 0
     payload = json.loads(websocket.sent[-1])
     assert payload["action"] == "send_private_msg"
+    if selection is None:
+        assert fake_engine.reply_calls == 1
+        delivered = payload["params"]["message"]
+        assert isinstance(delivered, str) and "普通聊天回复" in delivered
+        assert fake_engine.recorded_replies == [delivered]
+        return
+
+    assert fake_engine.reply_calls == 0
+    assert "歌单" in payload["params"]["message"]
+    assert "铁花飞" in payload["params"]["message"]
+    asyncio.run(server._handle_event(websocket, {
+        "post_type": "message", "message_type": "private", "self_id": config.bot_qq,
+        "user_id": 10001, "message": [{"type": "text", "data": {"text": selection}}],
+        "sender": {"nickname": "主人"},
+    }))
+    payload = json.loads(websocket.sent[-1])
+    assert fake_engine.reply_calls == 0
     assert payload["params"]["message"][0]["type"] == "record"
     assert str(full_song.resolve()) in payload["params"]["message"][0]["data"]["file"]
-    assert fake_engine.recorded_replies == ["《铁花飞》完整歌曲"]
+    assert len(fake_engine.recorded_replies) == 2
+    assert fake_engine.recorded_replies[-1] == "《铁花飞》完整歌曲"
+
+
+def test_model_tool_cannot_create_singing_request(tmp_path: Path) -> None:
+    from atri_qq_bot.persona import AtriReplyEngine
+
+    config = BotConfig(
+        bot_qq=100000001, host="127.0.0.1", port=8765, reply_mode="private",
+        openai_api_key="test", openai_base_url="https://example.test/v1",
+        openai_model="test", temperature=0.8, max_tokens=200,
+        memory_path=tmp_path / "memory.json",
+    )
+    engine = AtriReplyEngine(config)
+    result = asyncio.run(engine._execute_context_tool(
+        "private:1", "speak_as_atri",
+        {"text": "唱歌", "reason": "explicit_request", "mode": "singing", "song_title": "铁花飞"},
+        config,
+    ))
+    assert "固定歌单会话" in result
+    assert engine.consume_voice_request("private:1") is None
 
 
 def test_voice_send_failure_sends_text_fallback() -> None:

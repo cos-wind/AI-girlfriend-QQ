@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import sys
 import time
 import uuid
 from dataclasses import replace
@@ -42,6 +43,12 @@ from ..runtime.control import (
 )
 from ..runtime.paths import PROJECT_ROOT
 from ..runtime.modality_access import is_event_modality_allowed
+from ..runtime.reply_strategy import (
+    ReplyDecision,
+    evaluate_reply,
+    load_reply_strategy,
+    record_reply,
+)
 from ..stickers import StickerManager
 from ..toolbox import ToolAnalyzer
 from ..voice import (
@@ -61,12 +68,16 @@ from ..voice import (
     stabilize_explicit_voice_request,
 )
 from atri_webui import bind_loop, start_webui, stop_webui
+
 from .message_batch import _merge_message_batch, _message_to_segments
 from .message_parser import (
     extract_plain_text,
     extract_reply_inline_message,
     extract_reply_message_id,
+    group_increase_text,
+    is_group_increase_event,
     is_poke_event,
+    normalize_group_increase_event,
     normalize_poke_event,
 )
 from .reply_policy import _as_int, is_bot_mentioned, should_reply
@@ -88,6 +99,7 @@ from .server_parts.helpers import (
     _compose_model_input,
     _conversation_id,
     _event_has_visual_material,
+    _first_reply_delay,
     _is_visual_followup,
     _merge_pending_visual_event,
     _message_queue_id,
@@ -101,7 +113,7 @@ from .server_parts.helpers import (
     _require_onebot_action_success,
     _send_delay,
     _should_reuse_cached_visual,
-    _singing_context_id,
+    _typing_delay,
     _voice_remaining_text,
 )
 

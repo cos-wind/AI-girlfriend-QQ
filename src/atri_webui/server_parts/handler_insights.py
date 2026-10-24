@@ -1,22 +1,46 @@
 from __future__ import annotations
 
+import contextlib
+from urllib.parse import quote
+
 from .handler_support import WebUIHandlerMixin, _sync_webui_globals
 
 
 class HandlerInsightsMixin(WebUIHandlerMixin):
     def _insights_runtime(self) -> Any:
+        """**运行账号**的评测运行时。写操作一律走它。"""
         runtime = getattr(self.webui_state.server, "insights", None)
         if runtime is None:
             raise RuntimeError("评测与群聊总结旁路未启动，请查看项目日志")
         return runtime
 
+    def _view_insights_store(self) -> Any:
+        """**读**操作应当使用的评测库，跟随「查看账号」。
+
+        查看别的账号时返回它自己的 ``InsightsStore``；该账号还没有评测数据时抛错，
+        面板据此显示"这个账号还没有评测数据"，而不是显示运行账号的记录。
+        """
+        store = self.webui_state.view_insights_store()
+        if store is None:
+            if self.webui_state.view_account() is not None:
+                raise RuntimeError("这个账号还没有评测数据")
+            raise RuntimeError("评测与群聊总结旁路未启动，请查看项目日志")
+        return store
+
+    def _refuse_insights_write(self, action: str) -> bool:
+        """只读检视模式下拒绝写评测/总结：写路径永远落在运行账号上。"""
+        refuser = getattr(self, "_refuse_when_read_only", None)
+        if callable(refuser) and refuser(action):
+            return True
+        return False
+
     def _group_name_cache(self) -> dict[str, str]:
-        """读取并尽力刷新群名；NapCat 离线时不阻塞页面且使用旧缓存。"""
+        """立即返回缓存；群名刷新转入后台，避免 OneBot 拖慢 WebUI。"""
         runtime = getattr(self.webui_state.server, "insights", None)
         if runtime is None:
             return {}
         with contextlib.suppress(Exception):
-            run_coro(self.webui_state.refresh_group_names())
+            self.webui_state.refresh_group_names_soon()
         return runtime.store.group_name_map()
 
     @staticmethod
@@ -53,7 +77,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
     def _handle_summary_groups(self) -> None:
         try:
             self._group_name_cache()
-            groups = self._insights_runtime().store.group_ids()
+            groups = self._view_insights_store().group_ids()
         except Exception as exc:
             return self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
         self._send_json({"ok": True, "groups": groups})
@@ -61,7 +85,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
     def _handle_summary_schedules(self) -> None:
         try:
             self._group_name_cache()
-            schedules = self._insights_runtime().store.group_summary_schedules()
+            schedules = self._view_insights_store().group_summary_schedules()
             # 兼容旧版只保存 HH:MM 的计划：首次展示时给出下一次执行日期，保存后即持久化。
             for row in schedules:
                 for kind, days in (("daily", 1), ("weekly", 7), ("monthly", 30)):
@@ -75,6 +99,8 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
         self._send_json({"ok": True, "schedules": schedules})
 
     def _handle_summary_schedule_save(self) -> None:
+        if self._refuse_insights_write("保存总结计划"):
+            return
         payload = self._read_json()
         try:
             group_id = str((payload or {}).get("group_id") or "").strip()
@@ -130,7 +156,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
         params = parse_qs(query)
         try:
             names = self._group_name_cache()
-            items = self._insights_runtime().store.list_summaries(
+            items = self._view_insights_store().list_summaries(
                 str(params.get("group_id", [""])[0]).strip(),
                 int(params.get("limit", ["100"])[0]),
             )
@@ -143,7 +169,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
     def _handle_summary_detail(self, query: str) -> None:
         summary_id = str(parse_qs(query).get("id", [""])[0]).strip()
         try:
-            detail = self._insights_runtime().store.summary_detail(summary_id)
+            detail = self._view_insights_store().summary_detail(summary_id)
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         if detail is None:
@@ -152,12 +178,17 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
         self._send_json({"ok": True, "summary": detail})
 
     def _handle_summary_generate(self) -> None:
+        if self._refuse_insights_write("生成群聊总结"):
+            return
         payload = self._read_json()
         try:
             group_id = str((payload or {}).get("group_id") or "").strip()
             raw_period_type = str((payload or {}).get("period_type") or "").strip().lower()
             period_date = str((payload or {}).get("period_date") or "").strip()
-            trigger_type = "manual_send" if bool((payload or {}).get("send", False)) else "manual"
+            trigger_type = (
+                "manual_send" if bool((payload or {}).get("send", False))
+                else ("manual_save" if bool((payload or {}).get("save_image", False)) else "manual")
+            )
             if raw_period_type in {"daily", "weekly", "monthly"}:
                 # 新接口按当前时刻和周期生成，周期边界由后端统一计算。
                 summary_id = run_coro(
@@ -202,14 +233,22 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
             try:
                 image_path = render_group_summary_image(
                     detail,
-                    self._insights_runtime().store.path.parent / "summary_reports" / f"{summary_id}.png",
+                    group_summary_image_path(
+                        detail, self._insights_runtime().store.path.parent / "summary_reports"
+                    ),
                 )
                 body = image_path.read_bytes()
             except Exception as exc:
                 return self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"图文报告生成失败：{exc}")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Disposition", "inline; filename=group-summary.png")
+            download = str(params.get("download", [""])[0]).strip().lower() in {"1", "true", "yes"}
+            disposition = "attachment" if download else "inline"
+            filename = quote(image_path.name)
+            self.send_header(
+                "Content-Disposition",
+                f"{disposition}; filename=group-summary.png; filename*=UTF-8''{filename}",
+            )
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -221,6 +260,8 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
         self._send_download(body, f"group-summary-{summary_id[:8]}.md", "text/markdown")
 
     def _handle_insights_config(self) -> None:
+        if self._refuse_insights_write("修改评测配置"):
+            return
         payload = self._read_json()
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
@@ -241,6 +282,8 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
 
     def _handle_manual_evaluation(self) -> None:
         """提交一条“模型评测”样本，区别于系统自动采集的 system 来源。"""
+        if self._refuse_insights_write("提交手动评测"):
+            return
         payload = self._read_json()
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
@@ -264,53 +307,3 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         self._send_json({"ok": True, "id": evaluation_id, "status": "queued", "source": "model"}, status=HTTPStatus.CREATED)
-
-    def _handle_music_project_stage(self) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            project_id = _valid_singing_job_id(str(payload.get("id") or ""))
-            stage = str(payload.get("stage") or "").strip()
-            if stage not in {"separation", "inference", "mix"}:
-                raise ValueError("歌曲处理阶段无效")
-            params = payload.get("parameters")
-            if not isinstance(params, dict):
-                params = {}
-            result = _music_bridge_request(
-                f"/api/projects/{project_id}/stages/{stage}",
-                "POST",
-                params,
-            )
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        self._send_json(result, status=HTTPStatus.ACCEPTED)
-
-    def _handle_music_project_operation(self, operation: str) -> None:
-        payload = self._read_json()
-        if not isinstance(payload, dict):
-            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            project_id = _valid_singing_job_id(str(payload.get("id") or ""))
-            routes = {
-                "pipeline": f"/api/projects/{project_id}/pipeline",
-                "confirm": f"/api/projects/{project_id}/actions/confirm",
-                "rollback": f"/api/projects/{project_id}/actions/rollback",
-                "reset": f"/api/projects/{project_id}/actions/reset",
-                "recover": f"/api/projects/{project_id}/actions/recover",
-                "segment": f"/api/projects/{project_id}/segments/rerun",
-                "export": f"/api/projects/{project_id}/exports",
-            }
-            route = routes[operation]
-            forwarded = {key: value for key, value in payload.items() if key != "id"}
-            result = _music_bridge_request(route, "POST", forwarded, timeout=30)
-        except ValueError as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
-        status = HTTPStatus.ACCEPTED if operation in {"pipeline", "segment", "export"} else HTTPStatus.OK
-        self._send_json(result, status=status)
-
-

@@ -15,15 +15,19 @@ from atri_qq_bot.llm_tools.agent_protocol import (
 from atri_qq_bot.llm_tools.schema import TOOL_INSTRUCTION_PROMPT, available_tool_schemas
 from atri_qq_bot.llm_tools.time_tool import get_current_time
 from atri_qq_bot.llm_tools.tool_loop import append_tool_results
-from atri_qq_bot.llm_tools.weather_tool import _location_candidates, format_weather_result
+from atri_qq_bot.llm_tools.weather_tool import _location_candidates, _pinyin_candidates, format_weather_result
 from atri_qq_bot.llm_tools.web_search_tool import (
+    _arxiv_and_query,
     _bing_web_rss_url,
     _compact_research_query,
     _filter_results_by_domains,
+    _is_mostly_ascii,
+    _search_serpapi,
+    _search_tavily,
     parse_arxiv_atom,
-    parse_bing_news_rss,
     parse_github_repository_search,
     parse_news_rss,
+    parse_searxng_results,
 )
 from atri_qq_bot.llm_tools.web_page_tool import (
     _prefer_readable_source_url,
@@ -61,7 +65,7 @@ def test_parse_bing_news_rss_strips_html_and_limits_results() -> None:
       </item>
     </channel></rss>"""
 
-    results = parse_bing_news_rss(rss, max_results=1)
+    results = parse_news_rss(rss, max_results=1)
 
     assert results == [
         {
@@ -71,6 +75,39 @@ def test_parse_bing_news_rss_strips_html_and_limits_results() -> None:
             "summary": "摘要 & 更多内容",
         }
     ]
+
+
+def test_parse_news_rss_returns_empty_for_html_pages() -> None:
+    # Bing News 已于 2026 年下线 RSS，改返回搜索首页 HTML；解析器应静默返回空而非抛异常。
+    html_page = '<!doctype html><html lang="zh"><head><title>必应搜索</title></head><body></body></html>'
+
+    assert parse_news_rss(html_page) == []
+    assert parse_news_rss("") == []
+
+
+def test_parse_searxng_results_extracts_structured_json() -> None:
+    payload = {
+        "results": [
+            {
+                "title": "Attention Is All You Need",
+                "url": "https://arxiv.org/abs/1706.03762",
+                "content": "We propose a new simple network architecture, the Transformer.",
+                "publishedDate": "2017-06-12T00:00:00Z",
+            },
+            {
+                "title": "第二个结果",
+                "url": "https://example.com/two",
+                "content": "摘要二",
+            },
+        ]
+    }
+
+    results = parse_searxng_results(payload, max_results=2)
+
+    assert results[0]["url"] == "https://arxiv.org/abs/1706.03762"
+    assert results[0]["summary"] == "We propose a new simple network architecture, the Transformer."
+    assert results[1]["title"] == "第二个结果"
+    assert parse_searxng_results({}) == []
 
 
 def test_parse_google_news_rss_uses_the_same_structured_parser() -> None:
@@ -179,6 +216,61 @@ def test_format_weather_result_includes_current_and_forecast_data() -> None:
 def test_weather_location_candidates_fall_back_from_province_to_city() -> None:
     assert _location_candidates("湖北十堰") == ["湖北十堰", "十堰"]
     assert _location_candidates("湖北省十堰市") == ["湖北省十堰市", "十堰市", "十堰"]
+
+
+def test_weather_pinyin_candidates_cover_county_level_names() -> None:
+    # Open-Meteo 中文索引只到地级市，县级需转拼音回退。
+    assert "guanyang" in _pinyin_candidates("广西灌阳县")
+    assert "pizhou" in _pinyin_candidates("邳州")
+    assert _pinyin_candidates("") == []
+
+
+def test_arxiv_and_query_uses_explicit_and_for_multiple_terms() -> None:
+    # arXiv 的 all: 多词是 OR 语义，需显式 AND 精准召回。
+    assert _arxiv_and_query("Transformer attention") == (
+        'all:"Transformer" AND all:"attention"'
+    )
+    assert _arxiv_and_query("diffusion") == 'all:"diffusion"'
+    assert _arxiv_and_query("") == 'all:""'
+
+
+def test_is_mostly_ascii_detects_english_queries() -> None:
+    assert _is_mostly_ascii("PEP 594 dead batteries") is True
+    assert _is_mostly_ascii("Transformer attention") is True
+    assert _is_mostly_ascii("图灵奖 2026 获得者") is False
+    assert _is_mostly_ascii("") is False
+
+
+def test_compact_research_query_drops_stopwords() -> None:
+    # 停用词（dead/the/new 等）应被去除，避免污染检索词。
+    result = _compact_research_query("PEP 594 dead batteries")
+    assert "dead" not in result
+    assert "PEP" in result and "594" in result
+
+
+def test_parse_news_rss_replaces_google_news_redirect_with_source_url() -> None:
+    # Google News 的 <link> 是重定向链接，读不到正文；应改用 <source url> 里的真实来源。
+    rss = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel>
+      <item>
+        <title>测试新闻</title>
+        <link>https://news.google.com/rss/articles/CBMiXXXX?oc=5</link>
+        <pubDate>Fri, 17 Jul 2026 07:00:00 GMT</pubDate>
+        <description>新闻摘要</description>
+        <source url="https://www.news.cn">新华网</source>
+      </item>
+      <item>
+        <title>普通新闻</title>
+        <link>https://example.com/article</link>
+        <pubDate>Fri, 17 Jul 2026 06:00:00 GMT</pubDate>
+        <description>普通摘要</description>
+      </item>
+    </channel></rss>"""
+
+    results = parse_news_rss(rss)
+
+    assert results[0]["url"] == "https://www.news.cn"
+    assert results[1]["url"] == "https://example.com/article"
 
 
 def test_append_tool_results_executes_current_time() -> None:
@@ -771,3 +863,57 @@ def test_reply_probability_gate_hides_only_voice_tool(monkeypatch) -> None:
     assert reply == "文字回复"
     assert "speak_as_atri" not in tool_names
     assert "get_current_time" in tool_names
+
+
+def _fake_client_with_response(payload: Any) -> Any:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> Any:
+            return payload
+
+    class FakeClient:
+        async def post(self, *args: Any, **kwargs: Any) -> FakeResponse:
+            return FakeResponse()
+
+        async def get(self, *args: Any, **kwargs: Any) -> FakeResponse:
+            return FakeResponse()
+
+    return FakeClient()
+
+
+def test_search_tavily_parses_structured_results() -> None:
+    payload = {
+        "results": [
+            {"title": "蒸发反应", "url": "https://wiki.biligame.com/ys/蒸发", "content": "火打水倍率×2"},
+            {"title": "融化反应", "url": "https://wiki.biligame.com/ys/融化", "content": "冰打火倍率×2"},
+        ]
+    }
+    results, source = asyncio.run(
+        _search_tavily(_fake_client_with_response(payload), "原神 蒸发 融化", 5, [], "key")
+    )
+    assert source == "Tavily"
+    assert len(results) == 2
+    assert results[0]["title"] == "蒸发反应"
+    assert results[0]["url"].startswith("https://wiki.biligame.com")
+
+
+def test_search_serpapi_parses_organic_results_and_skips_error() -> None:
+    good = {
+        "organic_results": [
+            {"title": "city不city", "link": "https://baike.baidu.com/item/city不city", "snippet": "网络流行语"}
+        ]
+    }
+    results, source = asyncio.run(
+        _search_serpapi(_fake_client_with_response(good), "city不city", 5, [], "key")
+    )
+    assert source == "SerpAPI"
+    assert results[0]["title"] == "city不city"
+
+    # 带 error 字段时（额度耗尽/无效 key）应静默返回空，触发上层回退而非抛异常。
+    bad = {"error": "Invalid API key"}
+    results, source = asyncio.run(
+        _search_serpapi(_fake_client_with_response(bad), "x", 5, [], "key")
+    )
+    assert results == [] and source == ""

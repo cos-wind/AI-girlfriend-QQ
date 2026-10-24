@@ -43,6 +43,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="为 ATRI SQLite 记忆索引补建 bge-m3 向量")
     parser.add_argument("--limit", type=int, default=20, help="本次最多处理条数（默认 20）")
     parser.add_argument("--pause", type=float, default=0.8, help="每条之间的停顿秒数")
+    parser.add_argument("--knowledge", action="store_true", help="为当前账号共同记忆知识库补建向量")
     args = parser.parse_args()
     available = free_memory_bytes()
     if available < 5 * 1024**3:
@@ -50,7 +51,11 @@ def main() -> int:
         return 2
 
     config = load_config()
-    repo = SemanticMemoryRepository(config.memory_retrieval_path)
+    database = Path(config.memory_path).parent / "knowledge.sqlite3" if args.knowledge else config.memory_retrieval_path
+    if args.knowledge and not Path(database).exists():
+        print("共同记忆知识库尚无记录，请先导入资料或进行私聊。")
+        return 0
+    repo = SemanticMemoryRepository(database)
     client = OllamaEmbeddingClient(
         config.memory_embedding_model,
         config.memory_embedding_base_url,

@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Iterable
 
 from ..config import InsightsConfig
 from ..embeddings import SemanticEncoder
-from ..image_report import render_group_summary_image
+from ..image_report import group_summary_image_path, render_group_summary_image
 from ..llm import StructuredLLMClient
 from ..store import InsightsStore
 

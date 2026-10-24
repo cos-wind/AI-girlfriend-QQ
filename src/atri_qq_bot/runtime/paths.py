@@ -4,31 +4,33 @@ import os
 from pathlib import Path
 
 from dotenv import dotenv_values
+from atri_runtime import resource_root, user_root
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = user_root()
 DATA_DIR = PROJECT_ROOT / "data"
 ENV_PATH = PROJECT_ROOT / ".env"
-TOOLS_DIR = PROJECT_ROOT / "tools"
+TOOLS_DIR = resource_root() / "tools"
 LOG_DIR = PROJECT_ROOT / "logs"
-PROMPT_DIR = PROJECT_ROOT / "docs" / "prompts"
+PROMPT_DIR = resource_root() / "docs" / "prompts"
 
 WEBUI_DIR = DATA_DIR / "webui"
 MODEL_PROFILE_PATH = WEBUI_DIR / "model_profiles.json"
 PROACTIVE_POLICY_PATH = WEBUI_DIR / "proactive_policy.json"
 # 视觉/语音用户权限由 WebUI 写入，OneBot 进程按需读取；独立文件避免污染 .env。
 MODALITY_ACCESS_PATH = WEBUI_DIR / "modality_access.json"
+# 回复策略（按对象/好感度/活跃度决定是否回复、频率与长度）与它的运行计数分开存，
+# 避免 WebUI 保存配置时覆盖掉正在累计的频率计数。
+REPLY_STRATEGY_PATH = WEBUI_DIR / "reply_strategy.json"
+REPLY_STRATEGY_STATE_PATH = WEBUI_DIR / "reply_strategy_state.json"
 
 VOICE_ROOT = DATA_DIR / "voice"
 VOICE_PROFILE_DIR = VOICE_ROOT / "profiles"
 VOICE_CACHE_DIR = VOICE_ROOT / "cache"
 VOICE_BEHAVIOR_PATH = WEBUI_DIR / "voice_behavior.json"
 
-# QQ 唱歌只读取 COMPLETE_MUSIC_ROOT，按文件名匹配并作为 QQ 语音发送整首。
-# DELIVERY_MUSIC_ROOT 是 WebUI 的旧版分段管理/试听库，不参与 QQ 发送。
+# QQ 点歌只读取此目录中的成品文件。
 MUSIC_ROOT = DATA_DIR / "music"
-COMPLETE_MUSIC_ROOT = MUSIC_ROOT / "完整音乐"
-DELIVERY_MUSIC_ROOT = MUSIC_ROOT / "完整音乐片段"
 
 
 def _configured_path(name: str, default: Path) -> Path:

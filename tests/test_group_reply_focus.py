@@ -7,7 +7,7 @@ from atri_qq_bot.persona import AtriReplyEngine
 
 
 BOT_QQ = 100000001
-GROUP_ID = 1095215340
+GROUP_ID = 900001002
 
 
 def _group_event(user_id: int, *segments: dict) -> dict:

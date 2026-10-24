@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import SpeechServiceClient, SpeechServiceError
-from .policy import load_voice_behavior
+from .policy import load_voice_behavior, conversation_synthesis_options
 from .schema import SynthesisResult, TranscriptionResult, VoiceRequest
 from .segments import find_record_segments
 from ..runtime.modality_access import is_event_modality_allowed
@@ -86,7 +86,7 @@ class VoiceManager:
         result = await self.client.synthesize(
             request,
             profile,
-            **_synthesis_options(policy),
+            **conversation_synthesis_options(policy),
         )
         if enforce_cooldown:
             self._last_synthesis_at[conversation_id] = now
@@ -98,23 +98,6 @@ class VoiceManager:
             str(getattr(config, "voice_service_url", "http://127.0.0.1:8790")),
             float(getattr(config, "voice_service_timeout_seconds", 180.0)),
         )
-
-
-def _synthesis_options(
-    policy: dict[str, Any],
-) -> dict[str, Any]:
-    """QQ 会话的单次、低延迟合成参数。"""
-
-    return {
-        "prefer_original": bool(policy.get("original_clip_enabled", True)),
-        "quality_gate": False,
-        "quality_max_error_rate": float(policy.get("quality_max_error_rate", 0.22)),
-        # No ASR round-trip in QQ.  One alternate seed is allowed only when
-        # GPT-SoVITS rejects its first generated WAV as invalid.
-        "quality_retries": 1,
-        "allow_context_original_fallback": True,
-        "allow_best_effort": True,
-    }
 
 
 def _record_path(response: dict[str, Any] | None) -> Path | None:

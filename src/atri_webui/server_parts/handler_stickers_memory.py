@@ -67,24 +67,32 @@ class HandlerStickersMemoryMixin(WebUIHandlerMixin):
         self._send_json({"ok": True, "moved_to": str(target)})
 
     def _handle_memory_save(self) -> None:
+        # 只读检视模式下不写记忆：写路径永远落在"正在运行的那个账号"上，
+        # 否则"切到 X 看数据"会变成"改到 X 的数据"。
+        if self._refuse_when_read_only("保存记忆"):
+            return
         payload = self._read_json()
         conversation_id = str((payload or {}).get("id") or "")
         content = (payload or {}).get("content")
         if not conversation_id or not isinstance(content, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "参数不完整")
         try:
-            backup = self.webui_state.memory_admin.save_conversation(conversation_id, content)
+            backup = self.webui_state.running_memory_admin().save_conversation(
+                conversation_id, content
+            )
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         self._send_json({"ok": True, "backup": str(backup)})
 
     def _handle_memory_relationship(self) -> None:
+        if self._refuse_when_read_only("修改关系设置"):
+            return
         payload = self._read_json()
         conversation_id = str((payload or {}).get("id") or "")
         if not conversation_id:
             return self._send_error(HTTPStatus.BAD_REQUEST, "缺少会话 id")
         try:
-            backup, relationship = self.webui_state.memory_admin.update_relationship(
+            backup, relationship = self.webui_state.running_memory_admin().update_relationship(
                 conversation_id,
                 (payload or {}).get("affection_score"),
                 (payload or {}).get("proactive_override"),
@@ -98,12 +106,14 @@ class HandlerStickersMemoryMixin(WebUIHandlerMixin):
         )
 
     def _handle_memory_delete(self) -> None:
+        if self._refuse_when_read_only("删除记忆"):
+            return
         payload = self._read_json()
         conversation_id = str((payload or {}).get("id") or "")
         if not conversation_id:
             return self._send_error(HTTPStatus.BAD_REQUEST, "缺少会话 id")
         try:
-            backup = self.webui_state.memory_admin.delete_conversation(conversation_id)
+            backup = self.webui_state.running_memory_admin().delete_conversation(conversation_id)
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         self._send_json({"ok": True, "backup": str(backup)})

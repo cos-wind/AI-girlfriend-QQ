@@ -37,6 +37,7 @@ from atri_voice_service.providers import (
     IsolatedSenseVoiceProvider,
     ProviderError,
     SenseVoiceProvider,
+    _alternate_split_method,
     _auxiliary_reference_paths,
     _engine_weight_path,
     _reference_context,
@@ -69,7 +70,6 @@ from atri_voice_service.speech_pipeline import (
 from atri_voice_service import runtime_services
 from atri_qq_bot.runtime.inference_lock import InferencePriority
 from atri_qq_bot.voice import SynthesisResult, TranscriptionResult, VoiceRequest
-from tools.voice.separate_singing_stems import _resolve_output_paths
 
 
 class LocalInferenceResourceManager:
@@ -1165,63 +1165,23 @@ def test_sensevoice_unload_releases_loaded_model(tmp_path: Path) -> None:
     assert provider.status()["loaded"] is False
 
 
-def test_isolated_sensevoice_uses_one_shot_worker_and_cleans_job_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = VoiceServiceConfig(
-        cache_dir=tmp_path / "cache",
-        asr_lexicon_path=tmp_path / "asr-hotwords.json",
-    )
-    provider = IsolatedSenseVoiceProvider(config)
-    audio = tmp_path / "voice.wav"
-    audio.write_bytes(b"RIFFvoice")
-
-    def fake_worker(request_path: Path, result_path: Path, timeout_seconds: int) -> int:
-        assert timeout_seconds >= 90
-        request = json.loads(request_path.read_text(encoding="utf-8"))
-        assert request["audio_path"] == str(audio.resolve())
-        result_path.write_text(
-            json.dumps(
-                {
-                    "ok": True,
-                    "text": "你好，亚托莉",
-                    "language": "zh",
-                    "emotion": "happy",
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        return 0
-
-    monkeypatch.setattr(
-        "atri_voice_service.providers._run_asr_worker",
-        fake_worker,
-    )
-
-    result = asyncio.run(provider.transcribe(audio, "auto"))
-
-    assert result.text == "你好，亚托莉"
-    assert result.language == "zh"
-    assert result.emotion == "happy"
-    assert provider.status()["isolated_worker"] is True
-    assert list((config.cache_dir / "asr-jobs").iterdir()) == []
-
-
 def test_voice_models_use_project_specific_local_model_directory() -> None:
-    assert LOCAL_MODELS_ROOT == Path(r"D:\本地大模型\models")
+    assert LOCAL_MODELS_ROOT == Path(os.environ.get("LOCAL_MODELS_ROOT") or Path.home() / ".ollama" / "models")
     assert ATRI_MODELS_ROOT == LOCAL_MODELS_ROOT / "AI_ATRI"
 
 
-def test_modelscope_cache_preserves_ascii_junction_path(monkeypatch) -> None:
-    monkeypatch.setenv("MODELSCOPE_CACHE", r"D:\AtriModels\voice\modelscope")
+def test_modelscope_cache_preserves_configured_local_model_path(monkeypatch, tmp_path) -> None:
+    cache = tmp_path / "voice" / "modelscope"
+    local_model = cache / "models" / "iic--SenseVoiceSmall" / "snapshots" / "master"
+    local_model.mkdir(parents=True)
+    (local_model / "model.pt").write_bytes(b"fixture-only")
+    monkeypatch.setenv("MODELSCOPE_CACHE", str(cache))
     monkeypatch.delenv("ATRI_ASR_MODEL", raising=False)
 
     config = VoiceServiceConfig.from_env()
 
-    assert str(config.modelscope_cache) == r"D:\AtriModels\voice\modelscope"
-    assert str(config.asr_model).startswith(r"D:\AtriModels\voice\modelscope")
+    assert config.modelscope_cache == cache
+    assert config.asr_model == str(local_model)
 
 
 def test_profile_store_round_trips_and_reports_readiness(tmp_path: Path) -> None:
@@ -1348,6 +1308,140 @@ def test_gpt_sovits_switches_profile_weights_before_synthesis(
     assert "batch_threshold" not in payloads[0]
     assert payloads[0]["seed"] == 9992
     assert payloads[0]["aux_ref_audio_paths"] == []
+
+
+def test_gpt_sovits_retries_with_cut5_when_cut0_candidate_is_degenerate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cut0 出的废音频必须自动换 cut5 重试，而不是直接判失败。
+
+    2026-10-05 实测：日语迟疑句（25 个发音单位）在 cut0 下吐出 38 秒、
+    有声占比仅 12%，换 cut5 立刻回到 6.5 秒正常。
+    """
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(b"model")
+    degenerate = tmp_path / "degenerate.wav"
+    # 「你好」只算 2 个发音单位，上限 2.8 秒；4 秒连续音必然触发「异常拖长」。
+    _write_test_tone(degenerate, duration_seconds=4.0)
+    healthy = tmp_path / "healthy.wav"
+    _write_test_tone(healthy, duration_seconds=0.6)
+    splits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/tts":
+            splits.append(str(json.loads(request.content)["text_split_method"]))
+            body = degenerate if len(splits) == 1 else healthy
+            return httpx.Response(
+                200,
+                content=body.read_bytes(),
+                headers={"content-type": "audio/wav"},
+            )
+        return httpx.Response(200, json={"message": "success"})
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*, timeout: object) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handler), timeout=timeout)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    provider = GptSovitsProvider(tmp_path / "cache")
+    profile = VoiceProfile(
+        id="atri-test",
+        display_name="ATRI",
+        reference_audio=str(reference),
+    )
+
+    result = asyncio.run(provider.synthesize(VoiceRequest("你好", language="zh"), profile))
+
+    assert splits == ["cut0", "cut5"]
+    assert result.audio_path.is_file()
+    fallback = provider.status()["last_split_fallback"]
+    assert fallback["from"] == "cut0"
+    assert fallback["to"] == "cut5"
+    assert "异常拖长" in fallback["reason"]
+
+
+def test_gpt_sovits_does_not_change_split_when_engine_request_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """引擎 502 属于故障而非候选不合格，换切分方式没有意义。"""
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(b"model")
+    splits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/tts":
+            splits.append(str(json.loads(request.content)["text_split_method"]))
+            return httpx.Response(502, text="engine restarting", request=request)
+        return httpx.Response(200, json={"message": "success"}, request=request)
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*, timeout: object) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handler), timeout=timeout)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    provider = GptSovitsProvider(tmp_path / "cache")
+    profile = VoiceProfile(
+        id="atri-test",
+        display_name="ATRI",
+        reference_audio=str(reference),
+    )
+
+    with pytest.raises(ProviderError) as captured:
+        asyncio.run(provider.synthesize(VoiceRequest("你好", language="zh"), profile))
+
+    assert captured.value.retryable is True
+    assert splits == ["cut0"]
+    assert provider.status()["last_split_fallback"] is None
+
+
+def test_gpt_sovits_reports_both_splits_when_fallback_also_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(b"model")
+    degenerate = tmp_path / "degenerate.wav"
+    _write_test_tone(degenerate, duration_seconds=4.0)
+    splits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/tts":
+            splits.append(str(json.loads(request.content)["text_split_method"]))
+            return httpx.Response(
+                200,
+                content=degenerate.read_bytes(),
+                headers={"content-type": "audio/wav"},
+            )
+        return httpx.Response(200, json={"message": "success"})
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*, timeout: object) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handler), timeout=timeout)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    provider = GptSovitsProvider(tmp_path / "cache")
+    profile = VoiceProfile(
+        id="atri-test",
+        display_name="ATRI",
+        reference_audio=str(reference),
+    )
+
+    with pytest.raises(ProviderError) as captured:
+        asyncio.run(provider.synthesize(VoiceRequest("你好", language="zh"), profile))
+
+    assert splits == ["cut0", "cut5"]
+    assert "cut0" in str(captured.value)
+    assert "cut5" in str(captured.value)
+    assert captured.value.retryable is True
+    fallback = provider.status()["last_split_fallback"]
+    assert fallback["from"] == "cut0"
+    assert fallback["to"] == "cut5"
+    assert fallback["retry_error"]
 
 
 def test_conversation_pipeline_ensures_tts_runtime_inside_resource_lease(
@@ -1796,6 +1890,12 @@ def test_tts_fidelity_preset_reproduces_selected_v2pro_benchmark_settings() -> N
     assert _tts_split_method("短い台詞です。", "ja", preset="stable") == "cut0"
 
 
+def test_alternate_split_method_pairs_cut0_with_cut5() -> None:
+    assert _alternate_split_method("cut0") == "cut5"
+    assert _alternate_split_method("cut5") == "cut0"
+    assert _alternate_split_method("") == "cut5"
+
+
 def test_profile_rejects_unknown_emotion_inference_presets() -> None:
     profile = profile_from_dict(
         {
@@ -1833,20 +1933,6 @@ def test_tts_seed_is_stable_per_language() -> None:
     assert _tts_seed("ja") == 10015
 
 
-def test_separator_resolves_relative_outputs_against_output_directory(
-    tmp_path: Path,
-) -> None:
-    output_dir = tmp_path / "stems"
-
-    resolved = _resolve_output_paths(
-        ["separated-vocal.wav", str((tmp_path / "absolute.wav").resolve())],
-        output_dir,
-    )
-
-    assert resolved == [
-        (output_dir / "separated-vocal.wav").resolve(),
-        (tmp_path / "absolute.wav").resolve(),
-    ]
 
 
 def _write_test_tone(path: Path, *, duration_seconds: float) -> None:

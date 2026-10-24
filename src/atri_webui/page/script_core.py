@@ -6,9 +6,23 @@ PART = r"""const fields = [
   ["MESSAGE_SPLIT_MAX_PARTS","最多分条","number"],
   ["MESSAGE_SEND_DELAY_MIN","最短发送间隔","number"],
   ["MESSAGE_SEND_DELAY_MAX","最长发送间隔","number"],
+  ["TYPING_CHARS_PER_SECOND","打字速度（字/秒）","number"],
+  ["TYPING_MAX_DELAY_SECONDS","单条最长等待（秒）","number"],
+  ["REPLY_FIRST_DELAY_MIN","首条最短停顿（秒）","number"],
+  ["REPLY_FIRST_DELAY_MAX","首条最长停顿（秒）","number"],
   ["STICKER_CHANCE","表情概率","number"],
   ["STICKER_COOLDOWN_SECONDS","表情冷却秒数","number"],
-  ["REPLY_VOICE_PROBABILITY","语音概率（%）","voice-probability"]
+  ["REPLY_VOICE_PROBABILITY","语音概率（%）","voice-probability"],
+  ["WEB_SEARCH_ENABLED","启用联网搜索","checkbox"],
+  ["TAVILY_API_KEY","Tavily API Key（留空保留）","password"],
+  ["SERPAPI_API_KEY","SerpAPI API Key（留空保留）","password"],
+  ["ATRI_SEARXNG_INSTANCES","SearXNG 地址（英文逗号分隔）","text"],
+  ["WEB_SEARCH_TIMEOUT_SECONDS","搜索单次请求超时（秒）","number"],
+  ["WEB_SEARCH_MAX_RESULTS","搜索结果条数（1–8）","number"],
+  ["TOOLBOX_OCR_ENABLED","启用图片 OCR 文字识别","checkbox"],
+  ["TOOLBOX_VIDEO_FRAME_ANALYSIS_ENABLED","启用视频抽帧分析","checkbox"],
+  ["TOOLBOX_VIDEO_MAX_FRAMES","视频抽样帧数（1–8）","number"],
+  ["TOOLBOX_VIDEO_DEADLINE_SECONDS","视频分析时间预算（20–60秒）","number"]
 ];
 const categoryLabels = {
   interest:"兴趣爱好", preference:"偏好/忌口", profile_fact:"用户资料", habit:"生活习惯", communication_style:"聊天习惯",
@@ -27,7 +41,9 @@ window._selectedLocalModelName = "";
 window._activeProfileIds = {};
 window._profileTypes = [];
 window._proactive = null;
-window._minecraftData = null;
+// 「亲密度分档」是回复策略与主动互动共用的一张表，只渲染一次，避免两个 load
+// 互相覆盖用户正在编辑的输入框。
+let replyStrategyTiersLoaded = false;
 window._qzoneFeeds = [];
 window._modalityAccess = null;
 window._userDirectory = {items:[], groups:[], selectedIds:[], sourceStatus:{}};
@@ -45,8 +61,17 @@ async function withButtonBusy(button, task, pending='处理中…') {
 async function api(path, opts={}) {
   const headers = opts.body instanceof FormData ? {} : {'Content-Type':'application/json'};
   const res = await fetch(path, {headers, ...opts});
-  const data = await res.json();
-  if(!res.ok || data.ok === false) throw new Error(data.error || res.statusText);
+  let data;
+  try {
+    data = await res.json();
+  } catch (error) {
+    // 后端崩了或返回非 JSON 时把状态码带出来，否则只看到 "Unexpected token"。
+    throw new Error(`${path} 返回了非 JSON 响应（HTTP ${res.status}）`);
+  }
+  if(!res.ok || data.ok === false) {
+    // 带上路径与状态码：以前只报 error 字段，分不清是 400 参数问题还是 503 服务不可用。
+    throw new Error(`${path}（HTTP ${res.status}）：${data.error || res.statusText}`);
+  }
   return data;
 }
 function escapeHtml(value) {
@@ -58,12 +83,10 @@ function showTab(event, id) {
   (event.currentTarget || event.target).classList.add('active'); $(id).classList.add('active');
   if(id==='users') { loadUserDirectory(true); loadMemory(); loadModalityAccess(); }
   if(id==='memory') loadMemory();
-  if(id==='advanced') { loadConfig(); loadReplyVoiceProbability(); loadProactive(); }
+  if(id==='advanced') { loadConfig(); loadReplyVoiceProbability(); loadProactive(); loadReplyStrategy(); loadQQSongs(); loadStatus(); }
   if(id==='model') loadProfiles();
-  if(id==='voice') loadVoice();
-  if(id==='test') { loadVoiceTestState(); loadDeveloper(false); }
+  if(id==='test') { loadVoiceTestState(); loadDeveloper(false); loadProactive(); }
   if(id==='evaluation') loadEvaluation(false);
-  if(id==='minecraft') loadMinecraft();
 }
 const evaluationLabels = {
   relevancy:'相关性', accuracy:'准确性', completeness:'完整性', coherence:'连贯性',
@@ -79,5 +102,4 @@ function showInsightPanel(name) {
   $('evaluationDashboardPanel')?.classList.add('active');
   loadEvaluation(false);
 }
-async function loadEvaluation(force=false) {
 """

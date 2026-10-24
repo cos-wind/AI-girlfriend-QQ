@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any, Awaitable, Callable
+
 from . import *  # noqa: F403
+from ..history_import import normalize_group_history
 
 class GroupSummaryService:
     def __init__(self, store: InsightsStore, config: InsightsConfig) -> None:
@@ -10,12 +14,28 @@ class GroupSummaryService:
         self._jobs: set[asyncio.Task[Any]] = set()
         self._scheduler: asyncio.Task[None] | None = None
         self._group_sender: Callable[[str, str], Awaitable[None]] | None = None
+        self._group_history_fetcher: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None
+        self._active_groups: dict[str, str] = {}
 
     def set_group_sender(self, sender: Callable[[str, str], Awaitable[None]] | None) -> None:
         """注入可选的 OneBot 图片发送器；未注入时仍只生成报告，不影响旁路。"""
         self._group_sender = sender
 
+    def set_group_history_fetcher(
+        self,
+        fetcher: Callable[..., Awaitable[list[dict[str, Any]]]] | None,
+    ) -> None:
+        """注入按需读取 QQ 客户端历史的适配器。
+
+        该适配器只在人工点击“生成并保存/发送”时调用；实时归档和定时计划
+        均不会触发它，因此总结不再依赖亚托莉此前是否在线。
+        """
+        self._group_history_fetcher = fetcher
+
     async def start(self) -> None:
+        interrupted = await asyncio.to_thread(self.store.recover_interrupted_summaries)
+        if interrupted:
+            LOGGER.warning("已标记 %s 个因 ATRI 重启中断的群聊总结任务", interrupted)
         if self._scheduler is None:
             self._scheduler = asyncio.create_task(self._schedule_loop(), name="atri-summary-scheduler")
 
@@ -31,8 +51,11 @@ class GroupSummaryService:
     ) -> str:
         if not self.config.summary_enabled:
             raise RuntimeError("群聊总结功能未启用")
-        if not str(group_id).strip():
+        normalized_group_id = str(group_id).strip()
+        if not normalized_group_id:
             raise ValueError("群号不能为空")
+        if normalized_group_id in self._active_groups:
+            raise RuntimeError("该群已有总结正在生成，请等待当前任务完成后再试")
         period_key = ""
         period_label = ""
         if period_type:
@@ -45,13 +68,15 @@ class GroupSummaryService:
             raise ValueError("开始时间必须早于结束时间")
         summary_id = await asyncio.to_thread(
             self.store.create_summary,
-            str(group_id), start_at.isoformat(), end_at.isoformat(), trigger_type,
+            normalized_group_id, start_at.isoformat(), end_at.isoformat(), trigger_type,
             period_type or "custom", period_key, period_label,
         )
         task = asyncio.create_task(self._generate(summary_id), name=f"atri-summary-{summary_id[:8]}")
+        self._active_groups[normalized_group_id] = summary_id
         self._jobs.add(task)
         task.add_done_callback(self._jobs.discard)
         task.add_done_callback(self._log_task_error)
+        task.add_done_callback(lambda _task, key=normalized_group_id: self._active_groups.pop(key, None))
         return summary_id
 
     async def _generate(self, summary_id: str) -> None:
@@ -59,23 +84,63 @@ class GroupSummaryService:
         if not detail:
             return
         await asyncio.to_thread(self.store.mark_summary_running, summary_id)
-        messages = await asyncio.to_thread(
-            self.store.group_messages,
-            detail["group_id"],
-            detail["period_start"],
-            detail["period_end"],
-            self.config.summary_max_messages,
-        )
+        history_snapshot: dict[str, Any] | None = None
+        messages: list[dict[str, Any]] | None = None
         try:
+            if (
+                str(detail.get("trigger_type") or "") in {"manual", "manual_save", "manual_send"}
+                and str(detail.get("period_type") or "").lower() in {"daily", "weekly", "monthly"}
+            ):
+                if self._group_history_fetcher is None:
+                    raise RuntimeError("QQ 客户端历史读取器未连接；请确认 NapCat 已登录并连接")
+                start_at = datetime.fromisoformat(str(detail["period_start"]))
+                end_at = datetime.fromisoformat(str(detail["period_end"]))
+                await asyncio.to_thread(
+                    self.store.update_summary_progress, summary_id, 12, "读取 QQ 历史", "正在读取最新一页消息"
+                )
+
+                async def history_progress(page: int, scanned: int) -> None:
+                    # 总页数只有抵达时间起点后才能确定；进度条在采集阶段保持 12–58%，
+                    # 文案展示已读取页数和消息数，避免把未知总量伪装成精确百分比。
+                    percent = min(58, 12 + min(46, int(page) // 2))
+                    await asyncio.to_thread(
+                        self.store.update_summary_progress,
+                        summary_id,
+                        percent,
+                        "读取 QQ 历史",
+                        f"已读取第 {page} 页，已扫描 {scanned} 条消息",
+                    )
+
+                raw_history = await self._group_history_fetcher(
+                    str(detail["group_id"]), start_at, end_at, self.config.summary_max_messages, history_progress
+                )
+                await asyncio.to_thread(
+                    self.store.update_summary_progress, summary_id, 60, "整理聊天快照", f"已读取 {len(raw_history)} 条 QQ 历史消息"
+                )
+                messages, history_snapshot = await asyncio.to_thread(
+                    normalize_group_history, str(detail["group_id"]), raw_history
+                )
+            if messages is None:
+                await asyncio.to_thread(self.store.update_summary_progress, summary_id, 35, "读取已归档消息", "正在读取本地归档")
+                messages = await asyncio.to_thread(
+                    self.store.group_messages,
+                    detail["group_id"],
+                    detail["period_start"],
+                    detail["period_end"],
+                    self.config.summary_max_messages,
+                )
             if len(messages) < self.config.summary_min_messages:
                 raise ValueError(
                     f"时间范围内只有 {len(messages)} 条消息，少于最低要求 {self.config.summary_min_messages} 条"
                 )
+            await asyncio.to_thread(self.store.update_summary_progress, summary_id, 68, "统计与聚类", f"正在分析 {len(messages)} 条消息")
             period_type = str(detail.get("period_type") or "custom")
             statistics = _statistics(messages, period_type=period_type, period_start=detail.get("period_start"))
             statistics["period_start"] = detail.get("period_start")
             statistics["period_end"] = detail.get("period_end")
             statistics["period_label"] = detail.get("period_label") or ""
+            if history_snapshot is not None:
+                statistics["history_import"] = history_snapshot
             profile = _activity_profile(statistics)
             statistics["activity_profile"] = profile
             timeline = _activity_segments(
@@ -89,6 +154,10 @@ class GroupSummaryService:
                 history = await asyncio.to_thread(self.store.list_summaries, detail["group_id"], 4)
                 history = [item for item in history if item.get("id") != summary_id and item.get("status") == "completed"]
             chunks = _message_chunks(messages, size=profile["chunk_size"])
+            # 主题展示数与候选簇数分开：先保留更多互不相似的候选，再由话题层
+            # 合并重复主题、筛掉低信息片段。旧版直接把上限设为展示数，溢出片段
+            # 会被硬塞进无关簇，导致日报出现多个相似又不相关的标题。
+            candidate_cluster_limit = min(30, max(12, profile["max_topics"] * 3))
             try:
                 vectors = await asyncio.to_thread(
                     self._encoder.encode, [chunk["text"] for chunk in chunks]
@@ -97,18 +166,25 @@ class GroupSummaryService:
                     chunks,
                     vectors,
                     self.config.topic_cluster_threshold,
-                    min(self.config.topic_max_clusters, profile["max_topics"]),
+                    candidate_cluster_limit,
                 )
                 statistics["clustering"] = "sentence-transformers"
             except Exception as exc:
                 LOGGER.warning("话题向量聚类不可用，改用关键词聚类：%s", exc)
-                clusters = _fallback_clusters(chunks, min(self.config.topic_max_clusters, profile["max_topics"]))
+                clusters = _fallback_clusters(chunks, candidate_cluster_limit)
                 statistics["clustering"] = "keyword-fallback"
-            topics = _topic_payload(chunks, clusters)
+            topics = _topic_payload(
+                chunks,
+                clusters,
+                max_topics=min(self.config.topic_max_clusters, profile["max_topics"]),
+            )
+            statistics["topic_candidate_clusters"] = len(clusters)
+            statistics["topic_count"] = len(topics)
             report = _fallback_report(
                 detail["group_id"], topics, statistics, profile=profile, messages=messages, period_type=period_type
             )
             if self.config.judge_ready:
+                await asyncio.to_thread(self.store.update_summary_progress, summary_id, 78, "模型润色", "正在生成结构化日报")
                 try:
                     client = StructuredLLMClient(
                         base_url=self.config.judge_base_url,
@@ -171,12 +247,12 @@ class GroupSummaryService:
                 for field in (
                     "atri_intro", "overview", "activity_assessment", "timeline", "decisions",
                     "action_items", "open_questions", "notable_quotes", "member_highlights", "mood",
-                    "atri_closing", "important_messages",
+                    "atri_closing", "vibe", "important_messages",
                 ):
                     if field in report:
                         report_sections[field] = report[field]
             await asyncio.to_thread(
-                self.store.complete_summary,
+                self.store.save_summary_report,
                 summary_id,
                 title=report["title"],
                 message_count=len(messages),
@@ -185,8 +261,9 @@ class GroupSummaryService:
                 statistics=statistics,
                 content=_visible_text(report["summary"]),
             )
-            if detail.get("trigger_type") in {"scheduled", "manual_send"} and self._group_sender is not None:
+            if detail.get("trigger_type") in {"scheduled", "manual_send", "manual_save"}:
                 try:
+                    await asyncio.to_thread(self.store.update_summary_progress, summary_id, 88, "生成图文报告", "正在绘制日报图片")
                     group_name = self.store.group_name_map().get(str(detail.get("group_id") or ""), "")
                     image_detail = dict(detail)
                     image_detail.update(
@@ -201,10 +278,15 @@ class GroupSummaryService:
                     image_path = await asyncio.to_thread(
                         render_group_summary_image,
                         image_detail,
-                        self.store.path.parent / "summary_reports" / f"{summary_id}.png",
+                        group_summary_image_path(image_detail, self.store.path.parent / "summary_reports"),
                     )
-                    # OneBot 直接发送本机 PNG，QQ 端显示为图片消息，而不是链接或长文本。
-                    await self._group_sender(str(detail["group_id"]), str(image_path))
+                    # “生成并保存”只落盘；只有显式发送的任务才会触碰 OneBot/NapCat。
+                    if detail.get("trigger_type") in {"scheduled", "manual_send"}:
+                        if self._group_sender is None:
+                            raise RuntimeError("NapCat 当前未连接，无法发送群聊总结")
+                        await asyncio.to_thread(self.store.update_summary_progress, summary_id, 96, "发送到群聊", "正在发送日报图片")
+                        # OneBot 直接发送本机 PNG，QQ 端显示为图片消息，而不是链接或长文本。
+                        await self._group_sender(str(detail["group_id"]), str(image_path))
                     if detail.get("trigger_type") == "scheduled":
                         await asyncio.to_thread(
                             self.store.mark_group_summary_schedule_sent,
@@ -212,10 +294,11 @@ class GroupSummaryService:
                             datetime.now().astimezone().replace(second=0, microsecond=0, tzinfo=None).isoformat(timespec="minutes"),
                         )
                 except Exception as exc:
-                    LOGGER.warning("定时群聊总结生成成功但发送失败：group=%s error=%s", detail["group_id"], exc)
+                    raise RuntimeError(f"报告正文已生成，但图文保存或发送失败：{exc}") from exc
+            await asyncio.to_thread(self.store.finish_summary, summary_id)
             LOGGER.info("群聊总结完成：id=%s group=%s messages=%s", summary_id, detail["group_id"], len(messages))
         except Exception as exc:
-            await asyncio.to_thread(self.store.fail_summary, summary_id, str(exc), len(messages))
+            await asyncio.to_thread(self.store.fail_summary, summary_id, str(exc), len(locals().get("messages", [])))
             LOGGER.warning("群聊总结失败：id=%s error=%s", summary_id, exc)
 
     async def _schedule_loop(self) -> None:

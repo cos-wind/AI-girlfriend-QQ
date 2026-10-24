@@ -44,9 +44,35 @@ class SummariesMixin(InsightsStoreMixin):
 
     def mark_summary_running(self, summary_id: str) -> None:
         with self._connect() as db:
-            db.execute("UPDATE group_summaries SET status='running', error='' WHERE id=?", (summary_id,))
+            db.execute(
+                """UPDATE group_summaries SET status='running', error='', progress_percent=5,
+                progress_stage='准备生成', progress_detail='正在准备本次总结任务', progress_updated_at=? WHERE id=?""",
+                (utc_now(), summary_id),
+            )
 
-    def complete_summary(
+    def update_summary_progress(
+        self, summary_id: str, percent: int, stage: str, detail: str = ""
+    ) -> None:
+        with self._connect() as db:
+            db.execute(
+                """UPDATE group_summaries SET progress_percent=?, progress_stage=?,
+                progress_detail=?, progress_updated_at=? WHERE id=? AND status='running'""",
+                (max(0, min(99, int(percent))), str(stage)[:80], str(detail)[:500], utc_now(), summary_id),
+            )
+
+    def recover_interrupted_summaries(self) -> int:
+        """将进程退出时遗留的任务标记为可见失败，避免页面永久“生成中”。"""
+        with self._connect() as db:
+            cursor = db.execute(
+                """UPDATE group_summaries SET status='failed', progress_stage='已中断',
+                progress_detail='ATRI 重启前任务未完成，请重新生成。',
+                error=CASE WHEN error='' THEN 'ATRI 重启前任务未完成，请重新生成。' ELSE error END,
+                completed_at=?, progress_updated_at=? WHERE status IN ('queued','running')""",
+                (utc_now(), utc_now()),
+            )
+        return int(cursor.rowcount or 0)
+
+    def save_summary_report(
         self,
         summary_id: str,
         *,
@@ -59,21 +85,45 @@ class SummariesMixin(InsightsStoreMixin):
     ) -> None:
         with self._connect() as db:
             db.execute(
-                """UPDATE group_summaries SET status='completed', title=?, message_count=?,
-                topics_json=?, key_points_json=?, statistics_json=?, content=?, error='', completed_at=?
-                WHERE id=?""",
+                """UPDATE group_summaries SET title=?, message_count=?, topics_json=?,
+                key_points_json=?, statistics_json=?, content=?, error='' WHERE id=?""",
                 (
                     str(title)[:300], int(message_count), _json(topics), _json(key_points),
-                    _json(statistics), str(content)[:100000], utc_now(), summary_id,
+                    _json(statistics), str(content)[:100000], summary_id,
                 ),
             )
+
+    def finish_summary(self, summary_id: str) -> None:
+        with self._connect() as db:
+            db.execute(
+                """UPDATE group_summaries SET status='completed', error='', progress_percent=100,
+                progress_stage='已完成', progress_detail='日报已生成', completed_at=?, progress_updated_at=? WHERE id=?""",
+                (utc_now(), utc_now(), summary_id),
+            )
+
+    def complete_summary(
+        self,
+        summary_id: str,
+        *,
+        title: str,
+        message_count: int,
+        topics: list[dict[str, Any]],
+        key_points: list[str],
+        statistics: dict[str, Any],
+        content: str,
+    ) -> None:
+        self.save_summary_report(
+            summary_id, title=title, message_count=message_count, topics=topics,
+            key_points=key_points, statistics=statistics, content=content,
+        )
+        self.finish_summary(summary_id)
 
     def fail_summary(self, summary_id: str, error: str, message_count: int = 0) -> None:
         with self._connect() as db:
             db.execute(
                 """UPDATE group_summaries SET status='failed', error=?, message_count=?,
-                completed_at=? WHERE id=?""",
-                (str(error)[:3000], int(message_count), utc_now(), summary_id),
+                progress_stage='失败', progress_detail=?, completed_at=?, progress_updated_at=? WHERE id=?""",
+                (str(error)[:3000], int(message_count), str(error)[:500], utc_now(), utc_now(), summary_id),
             )
 
     def list_summaries(self, group_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
@@ -94,6 +144,14 @@ class SummariesMixin(InsightsStoreMixin):
     @staticmethod
     def _summary_row(row: sqlite3.Row, *, detail: bool) -> dict[str, Any]:
         item = dict(row)
+        # 兼容进度字段上线前已生成的报告：它们没有阶段信息，但完成/失败状态
+        # 仍应在时间轴上正确呈现，而不是显示默认“已排队”。
+        if not str(item.get("progress_stage") or "").strip() or (
+            str(item.get("progress_stage")) == "已排队" and str(item.get("status")) != "queued"
+        ):
+            item["progress_stage"] = "已完成" if item.get("status") == "completed" else (
+                "失败" if item.get("status") == "failed" else str(item.get("status") or "已排队")
+            )
         item["topics"] = _loads(item.pop("topics_json", "[]"), [])
         item["key_points"] = _loads(item.pop("key_points_json", "[]"), [])
         item["statistics"] = _loads(item.pop("statistics_json", "{}"), {})

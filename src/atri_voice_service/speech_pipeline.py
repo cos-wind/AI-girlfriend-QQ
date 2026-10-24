@@ -132,9 +132,11 @@ class ConversationSpeechPipeline:
                     self.last_quality = report
                 synthesis_error = exc
             finally:
-                # 质量门会临时加载 ASR；整次语音会话结束立即释放，保留
-                # 8790 服务而不让 SenseVoice 常驻数 GB 内存。
-                unload_asr = getattr(self.asr, "unload", None)
+                # CPU ASR can be reused within its bounded idle window. GPU
+                # ASR still exits before the next engine needs its VRAM.
+                unload_asr = getattr(self.asr, "release_after_request", None)
+                if unload_asr is None:
+                    unload_asr = getattr(self.asr, "unload", None)
                 if callable(unload_asr):
                     await unload_asr()
         if synthesis_error is not None:

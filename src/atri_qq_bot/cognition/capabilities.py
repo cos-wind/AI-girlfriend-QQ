@@ -90,11 +90,11 @@ def _default_contracts() -> list[CapabilityContract]:
     return [
         CapabilityContract(
             name="music.sing",
-            description="按歌名从完整音乐目录选择整首成品并发送真实 QQ 语音",
+            description="明确点歌后展示 data/music 歌单，用户确认歌名或序号后发送整首 QQ 语音",
             read_only=False,
             has_side_effect=True,
             required_fields=(),
-            success_condition="选择符合约束且不同于被排除歌曲的片段，并收到 QQ 发送成功回执",
+            success_condition="用户从成品歌单确认歌曲，并收到该整首歌曲的 QQ 发送成功回执",
             can_handle=lambda meaning, state: _goal_contains(
                 meaning, "唱", "歌", "换一首", "下一首", "来一首", "这首"
             )

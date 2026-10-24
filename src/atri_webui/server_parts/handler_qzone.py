@@ -4,22 +4,73 @@ from .handler_support import WebUIHandlerMixin, _sync_webui_globals
 
 
 class HandlerQZoneMixin(WebUIHandlerMixin):
+    # QQ 空间是**运行账号**的登录会话（Cookie 存在本地 Bridge 里）。
+    # 面板查看别的账号时，那个账号没有登录会话——所以这里必须返回"空 + 原因"，
+    # 而不是把运行账号的动态/好友继续显示出来。显示别人的数据是在撒谎，
+    # 比显示空更糟：用户会以为切过去了。
+    QZONE_VIEWED_OTHER_REASON = (
+        "QQ 空间数据来自正在运行的那个账号的登录会话（Bridge 中的 Cookie）。"
+        "面板正在查看另一个账号，它没有登录会话，因此这里不显示数据。"
+        "要查看该账号的空间，需要让 NapCat 登录它。"
+    )
+
+    def _viewing_other_account(self) -> bool:
+        try:
+            return self.webui_state.view_account() is not None
+        except Exception:
+            return False
+
+    def _qzone_unavailable(self, **extra: Any) -> None:
+        payload: dict[str, Any] = {
+            "ok": True,
+            "viewing_other_account": True,
+            "unavailable_reason": self.QZONE_VIEWED_OTHER_REASON,
+        }
+        payload.update(extra)
+        self._send_json(payload)
+
     def _qzone_admin(self) -> QZoneAdmin:
         # 复用记忆面板的聚合结果，确保这里只能选择已经认识的人物 QQ。
+        # 用**运行账号**的记忆：QQ 空间是运行账号的登录会话，用默认账号的名单会选错人。
         return QZoneAdmin(
-            self.webui_state.memory_admin.summary(),
+            self.webui_state.running_memory_admin().summary(),
             bot_qq=self.webui_state.config.bot_qq,
             owner_qqs=self.webui_state.config.owner_qqs,
         )
 
     def _handle_qzone_dashboard(self) -> None:
+        if self._viewing_other_account():
+            return self._qzone_unavailable(users=[])
         self._send_json(self._qzone_admin().dashboard())
 
     def _handle_qzone_friends(self) -> None:
+        if self._viewing_other_account():
+            return self._qzone_unavailable(friends=[])
         try:
             self._send_json({"ok": True, "friends": self._qzone_admin().friends()})
         except (ValueError, QZoneBridgeError) as exc:
             self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+
+    def _handle_qzone_bridge_status(self) -> None:
+        """只读状态：Bridge 是否在跑、是否登录、是否还会自动启动。"""
+
+        self._send_json(bridge_status())
+
+    def _handle_qzone_bridge_action(self) -> None:
+        """手动启动/停止 Bridge；不再由桌宠启动链自动拉起。"""
+
+        payload = self._read_json()
+        action = str((payload or {}).get("action") or "").strip().lower()
+        try:
+            if action == "start":
+                result = start_bridge()
+            elif action == "stop":
+                result = stop_bridge()
+            else:
+                return self._send_error(HTTPStatus.BAD_REQUEST, "action 必须是 start 或 stop")
+        except OSError as exc:
+            return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+        self._send_json(result)
 
     def _handle_qzone_automation_settings(self) -> None:
         payload = self._read_json()
@@ -189,6 +240,8 @@ class HandlerQZoneMixin(WebUIHandlerMixin):
         self._send_json({"ok": True})
 
     def _handle_qzone_feeds(self, query: str) -> None:
+        if self._viewing_other_account():
+            return self._qzone_unavailable(feeds=[])
         params = parse_qs(query)
         try:
             result = self._qzone_admin().feeds(
@@ -202,6 +255,8 @@ class HandlerQZoneMixin(WebUIHandlerMixin):
         self._send_json(result)
 
     def _handle_qzone_all_feeds(self, query: str) -> None:
+        if self._viewing_other_account():
+            return self._qzone_unavailable(feeds=[])
         params = parse_qs(query)
         try:
             result = self._qzone_admin().all_feeds(params.get("limit", ["20"])[0])

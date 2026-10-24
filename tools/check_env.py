@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import socket
 import sys
 from pathlib import Path
@@ -64,7 +65,7 @@ def main() -> int:
         for problem in problems:
             print(f"[WARN] {problem}")
         return 1
-    print("\n[OK] 环境检查通过。可启动桌宠，或运行 python -m atri_qq_bot。")
+    print("\n[OK] 环境检查通过。可运行 python -m atri_qq_bot。")
     return 0
 
 
@@ -77,9 +78,9 @@ def _port_open(port: int) -> bool:
 
 
 def _napcat_webui_config() -> dict[str, object] | None:
-    roots = [Path(r"D:\Tools\NapCat\OneKey"), Path.home() / "AppData" / "Local" / "NapCat"]
+    roots = [Path(os.environ["NAPCAT_DIR"])] if os.environ.get("NAPCAT_DIR") else [ROOT.parent / "NapCat", Path.home() / "AppData" / "Local" / "NapCat"]
     for root in roots:
-        for path in root.glob("NapCat*.Shell/versions/*/resources/app/napcat/config/webui.json"):
+        for path in [root / "config" / "webui.json", *root.glob("NapCat*.Shell/versions/*/resources/app/napcat/config/webui.json")]:
             try:
                 return json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):

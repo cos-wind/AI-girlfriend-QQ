@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any, Mapping
 
 from dotenv import load_dotenv
 
@@ -24,14 +26,46 @@ from .env import (
 from .schema import VALID_REPLY_MODES, BotConfig
 
 
-def load_config(env_file: str | Path | None = None) -> BotConfig:
-    """加载指定 .env 并返回已校验配置；非法回复模式会立即报错。"""
+def load_config(
+    env_file: str | Path | None = None,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> BotConfig:
+    """加载指定 .env 并返回已校验配置；非法回复模式会立即报错。
+
+    ``overrides`` 是账号作用域的配置覆盖（键名与 .env 同名，见
+    ``atri_webui.config_admin.CONFIG_FIELDS``）。它**先写进进程环境再走一遍
+    完整的加载流程**，所以所有范围钳制与类型校验（``MESSAGE_SPLIT_MAX_CHARS``
+    的上下限之类）对覆盖同样生效——这是刻意的：另写一套校验迟早会和这里漂移。
+
+    写入是**临时**的：读完之后逐个还原 ``os.environ``，避免污染后续调用。
+    这一点很重要，因为记忆提取、视觉兜底等模块会直接读环境变量。
+    """
     root = _project_root()
     if env_file:
         load_dotenv(env_file, override=True)
     else:
         load_dotenv(root / ".env", override=True)
 
+    if not overrides:
+        return _build_config(root)
+
+    applied = {str(key): value for key, value in overrides.items()}
+    saved = {key: os.environ.get(key) for key in applied}
+    try:
+        for key, value in applied.items():
+            os.environ[key] = "" if value is None else str(value)
+        return _build_config(root)
+    finally:
+        for key, previous in saved.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
+def _build_config(root: Path) -> BotConfig:
+    """按当前进程环境与 .env 组装并校验 ``BotConfig``。"""
     reply_mode = _env("REPLY_MODE", "mention").lower()
     if reply_mode not in VALID_REPLY_MODES:
         modes = ", ".join(sorted(VALID_REPLY_MODES))
@@ -48,6 +82,30 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         "QQ_RECORDS_ROOT",
         Path.home() / "Documents" / "Tencent Files",
         root,
+    )
+    # 分段/发送节奏一律在这里收敛：WebUI 的数字输入框没有 min/max，
+    # 非法值（负数、小数、超大值）必须先被夹住再落进运行配置。
+    split_max_chars = max(8, min(200, _env_int("MESSAGE_SPLIT_MAX_CHARS", 44)))
+    split_max_parts = max(1, min(10, _env_int("MESSAGE_SPLIT_MAX_PARTS", 4)))
+    send_delay_min = max(0.0, min(10.0, _env_float("MESSAGE_SEND_DELAY_MIN", 0.55)))
+    send_delay_max = max(
+        send_delay_min,
+        min(30.0, _env_float("MESSAGE_SEND_DELAY_MAX", 1.35)),
+    )
+    first_delay_min = max(0.0, min(30.0, _env_float("REPLY_FIRST_DELAY_MIN", 0.8)))
+    first_delay_max = max(
+        first_delay_min,
+        min(60.0, _env_float("REPLY_FIRST_DELAY_MAX", 2.5)),
+    )
+    typing_chars_per_second = max(
+        0.5, min(40.0, _env_float("TYPING_CHARS_PER_SECOND", 5.5))
+    )
+    typing_max_delay_seconds = max(
+        1.0, min(60.0, _env_float("TYPING_MAX_DELAY_SECONDS", 12.0))
+    )
+    sticker_chance = max(0.0, min(1.0, _env_float("STICKER_CHANCE", 0.24)))
+    sticker_cooldown_seconds = max(
+        0, min(86_400, _env_int("STICKER_COOLDOWN_SECONDS", 120))
     )
     return BotConfig(
         bot_qq=bot_qq,
@@ -69,10 +127,14 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         chat_quality_retries=max(
             0, min(2, _env_int("CHAT_QUALITY_RETRIES", 1))
         ),
-        message_split_max_chars=_env_int("MESSAGE_SPLIT_MAX_CHARS", 44),
-        message_split_max_parts=_env_int("MESSAGE_SPLIT_MAX_PARTS", 4),
-        message_send_delay_min=_env_float("MESSAGE_SEND_DELAY_MIN", 0.55),
-        message_send_delay_max=_env_float("MESSAGE_SEND_DELAY_MAX", 1.35),
+        message_split_max_chars=split_max_chars,
+        message_split_max_parts=split_max_parts,
+        message_send_delay_min=send_delay_min,
+        message_send_delay_max=send_delay_max,
+        typing_chars_per_second=typing_chars_per_second,
+        typing_max_delay_seconds=typing_max_delay_seconds,
+        reply_first_delay_min=first_delay_min,
+        reply_first_delay_max=first_delay_max,
         sticker_dir=_env_path("STICKER_DIR", root / "data" / "stickers", root),
         sticker_trigger_file=_env_path(
             "STICKER_TRIGGER_FILE", root / "data" / "stickers" / "triggers.json", root
@@ -82,8 +144,8 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
             qq_records_root / str(bot_qq) / "ATRI" / "chat_history",
             root,
         ),
-        sticker_chance=_env_float("STICKER_CHANCE", 0.24),
-        sticker_cooldown_seconds=_env_int("STICKER_COOLDOWN_SECONDS", 120),
+        sticker_chance=sticker_chance,
+        sticker_cooldown_seconds=sticker_cooldown_seconds,
         sticker_capture_enabled=_env_bool("STICKER_CAPTURE_ENABLED", True),
         sticker_capture_max_bytes=_env_int("STICKER_CAPTURE_MAX_BYTES", 3_000_000),
         memory_path=_env_path("MEMORY_PATH", root / "data" / "memory" / "users.json", root),
@@ -213,8 +275,12 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         web_search_enabled=_env_bool("WEB_SEARCH_ENABLED", True),
         web_search_timeout_seconds=_env_float("WEB_SEARCH_TIMEOUT_SECONDS", 6.0),
         web_search_max_results=max(1, min(8, _env_int("WEB_SEARCH_MAX_RESULTS", 5))),
+        tavily_api_key=_optional_env("TAVILY_API_KEY") or "",
+        serpapi_api_key=_optional_env("SERPAPI_API_KEY") or "",
+        searxng_instances=_env("ATRI_SEARXNG_INSTANCES", ""),
         web_page_max_chars=max(1000, min(20_000, _env_int("WEB_PAGE_MAX_CHARS", 8_000))),
         web_grounding_review_enabled=_env_bool("WEB_GROUNDING_REVIEW_ENABLED", True),
+        web_fact_search_enforcement=_env_bool("WEB_FACT_SEARCH_ENFORCEMENT", True),
         voice_asr_enabled=_env_bool("VOICE_ASR_ENABLED", False),
         voice_tts_enabled=_env_bool("VOICE_TTS_ENABLED", False),
         voice_service_url=_env("VOICE_SERVICE_URL", "http://127.0.0.1:8790").rstrip("/"),
@@ -237,6 +303,14 @@ def load_config(env_file: str | Path | None = None) -> BotConfig:
         webui_enabled=_env_bool("WEBUI_ENABLED", True),
         webui_host=_env("WEBUI_HOST", "127.0.0.1"),
         webui_port=_env_int("WEBUI_PORT", 8787),
+        # 账号管理系统默认关闭：关闭时行为与账号化之前逐条一致。
+        account_system_enabled=_env_bool("ACCOUNT_SYSTEM_ENABLED", False),
+        account_follow_napcat=_env_bool("ACCOUNT_FOLLOW_NAPCAT", False),
+        accounts_db_path=_env_path(
+            "ACCOUNTS_DB_PATH",
+            root / "data" / "accounts" / "index.sqlite3",
+            root,
+        ),
     )
 
 

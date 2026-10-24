@@ -193,7 +193,8 @@ def _log_tool_event(
         "result_preview": " ".join(content.split())[:240],
     }
     try:
-        log_path = Path(__file__).resolve().parents[3] / "logs" / "llm-tools.jsonl"
+        from ..runtime.paths import LOG_DIR
+        log_path = LOG_DIR / "llm-tools.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")

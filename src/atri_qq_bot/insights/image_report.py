@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import io
 import math
+import re
 import textwrap
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
@@ -28,6 +30,29 @@ PINK = (252, 228, 236)
 MINT = (213, 245, 227)
 CORAL = (239, 151, 121)
 WHITE = (255, 253, 247)
+_WINDOWS_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+
+
+def group_summary_image_path(detail: dict[str, Any], directory: str | Path) -> Path:
+    """为群聊总结生成稳定、可读且适用于 Windows 的 PNG 文件名。"""
+    raw_time = str(detail.get("created_at") or detail.get("completed_at") or "").strip()
+    try:
+        generated_at = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+        if generated_at.tzinfo is not None:
+            generated_at = generated_at.astimezone()
+    except ValueError:
+        generated_at = datetime.now().astimezone()
+    timestamp = generated_at.strftime("%Y%m%d-%H%M%S")
+    raw_group_name = str(detail.get("group_name") or f"群{detail.get('group_id') or '未知'}")
+    group_name = _WINDOWS_FILENAME_RE.sub("", raw_group_name).strip(" .")[:80] or "未命名群聊"
+    period_name = {"daily": "日报", "weekly": "周报", "monthly": "月报"}.get(
+        str(detail.get("period_type") or "").lower(), "群聊总结"
+    )
+    summary_suffix = _WINDOWS_FILENAME_RE.sub("", str(detail.get("id") or ""))[:8]
+    filename = f"{timestamp}_{group_name}_{period_name}"
+    if summary_suffix:
+        filename += f"_{summary_suffix}"
+    return Path(directory).expanduser().resolve() / f"{filename}.png"
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -41,8 +66,19 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+# 微软雅黑等中文字体缺少的表情/特殊符号，直接画会渲染成"方框"；渲染前移除。
+_NO_TOFU_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U0001F300-\U0001F5FF\U0001D400-\U0001D7FF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]"
+)
+
+
+def _no_tofu(value: Any) -> str:
+    """剔除中文字体画不出来、会显示为方框的表情与装饰符号。"""
+    return _NO_TOFU_RE.sub("", str(value or ""))
+
+
 def _wrap(draw: ImageDraw.ImageDraw, value: Any, font: ImageFont.FreeTypeFont, width: int) -> list[str]:
-    text = " ".join(str(value or "").replace("\r", "").split()) or "暂无内容"
+    text = " ".join(_no_tofu(value).replace("\r", "").split()) or "暂无内容"
     lines: list[str] = []
     current = ""
     for char in text:
@@ -169,15 +205,18 @@ def render_group_summary_image(detail: dict[str, Any], output_path: str | Path) 
     messages = int(detail.get("message_count") or 0)
     members = int(statistics.get("member_count") or len(statistics.get("active_members") or []))
     chars = int(statistics.get("total_characters") or 0)
-    cards = [("▢", messages, "消息总数", CORAL), ("♧", members, "参与人数", (121, 201, 140)),
-             ("✦", chars, "总字符数", (167, 120, 213)), ("◷", statistics.get("active_hours", 0), "活跃时段", SKY_DEEP)]
+    cards = [("消息", messages, "消息总数", CORAL), ("成员", members, "参与人数", (121, 201, 140)),
+             ("字数", chars, "总字符数", (167, 120, 213)), ("时段", statistics.get("active_hours", 0), "活跃时段", SKY_DEEP)]
     card_w = (WIDTH - 2 * MARGIN - 36) // 4
     for index, (icon, value, label, color) in enumerate(cards):
         x = MARGIN + index * (card_w + 12)
         draw.rounded_rectangle((x, y, x + card_w, y + 122), radius=18, fill=WHITE, outline=SKY, width=2)
-        draw.text((x + card_w // 2, y + 21), icon, font=_font(25, bold=True), fill=color, anchor="ma")
-        draw.text((x + card_w // 2, y + 53), str(value), font=_font(28, bold=True), fill=CORAL, anchor="ma")
-        draw.text((x + card_w // 2, y + 96), label, font=small_font, fill=MUTED, anchor="ma")
+        # 用小圆点+文字代替 ▢♧✦◷ 等装饰符号，避免中文字体渲染成方框。
+        cx = x + card_w // 2
+        draw.ellipse((cx - 10, y + 18, cx + 10, y + 38), fill=color)
+        draw.text((cx, y + 28), icon, font=_font(17, bold=True), fill=WHITE, anchor="mm")
+        draw.text((cx, y + 53), str(value), font=_font(28, bold=True), fill=CORAL, anchor="ma")
+        draw.text((cx, y + 96), label, font=small_font, fill=MUTED, anchor="ma")
     y += 150
 
     def section(title: str) -> None:
@@ -218,7 +257,9 @@ def render_group_summary_image(detail: dict[str, Any], output_path: str | Path) 
     topics = [item for item in (detail.get("topics") or []) if isinstance(item, dict)][:8]
     for index, topic in enumerate(topics):
         title = _topic_title(topic.get("title"), index)
-        participants = "、".join(str(x) for x in list(topic.get("participants") or [])[:8]) or "未识别"
+        participants = "、".join(
+            name for name in (_no_tofu(x).strip() for x in list(topic.get("participants") or [])[:8]) if name
+        ) or "未识别"
         summary = topic.get("summary") or "；".join(str(x) for x in list(topic.get("samples") or [])[:2]) or "暂无文字摘要"
         opinion = topic.get("atri_view") or "亚托莉暂时没有足够信息形成额外判断。"
         topic_title_font = _font(24, bold=True)
@@ -232,18 +273,24 @@ def render_group_summary_image(detail: dict[str, Any], output_path: str | Path) 
             participant_lines = participant_lines[:2]
             participant_lines[-1] = participant_lines[-1].rstrip("、，") + "…"
         summary_lines = _wrap(draw, summary, body_font, title_width)
-        if len(summary_lines) > 7:
-            summary_lines = summary_lines[:7]
+        if len(summary_lines) > 9:
+            summary_lines = summary_lines[:9]
             summary_lines[-1] = summary_lines[-1].rstrip("。；，") + "…"
         opinion_width = WIDTH - 2 * MARGIN - 80
         opinion_lines = _wrap(draw, opinion, small_font, opinion_width)
         if len(opinion_lines) > 8:
             opinion_lines = opinion_lines[:8]
             opinion_lines[-1] = opinion_lines[-1].rstrip("。；，") + "…"
+        bubble_text = str(opinion or "").strip()
+        # 锐评若仍是后台/风控套话，或为空，就整块不画，避免展示一句模板口号。
+        show_bubble = bool(bubble_text) and not any(
+            marker in bubble_text
+            for marker in ("数据侧", "从证据看", "建议把", "可以确认", "先拒绝", "分开记录", "排查", "符合认证口径", "长期记忆稳定")
+        )
         title_lh = _line_height(topic_title_font, 5)
         small_lh = _line_height(small_font, 5)
         body_lh = _line_height(body_font, 8)
-        bubble_height = 14 + small_lh + 4 + len(opinion_lines) * small_lh + 14
+        bubble_height = (14 + small_lh + 4 + len(opinion_lines) * small_lh + 14) if show_bubble else 0
         height = (
             24 + len(title_lines) * title_lh + 8 + len(participant_lines) * small_lh
             + 10 + len(summary_lines) * body_lh + 16 + bubble_height + 18
@@ -256,21 +303,44 @@ def render_group_summary_image(detail: dict[str, Any], output_path: str | Path) 
         _text_block(draw, f"参与者：{participants}", (MARGIN + 24, participant_y), small_font, title_width, fill=MUTED, line_gap=5, max_lines=2)
         summary_y = participant_y + len(participant_lines) * small_lh + 10
         _text_block(draw, summary, (MARGIN + 24, summary_y), body_font, title_width, max_lines=7)
-        bubble_top = summary_y + len(summary_lines) * body_lh + 16
-        bubble_bottom = bubble_top + bubble_height
-        draw.rounded_rectangle((MARGIN + 24, bubble_top, WIDTH - MARGIN - 24, bubble_bottom), radius=14, fill=SKY)
-        draw.text((MARGIN + 40, bubble_top + 10), "亚托莉锐评", font=small_font, fill=(78, 143, 165))
-        _text_block(draw, opinion, (MARGIN + 40, bubble_top + 10 + small_lh + 4), small_font, opinion_width, fill=INK, line_gap=5, max_lines=8)
+        if show_bubble:
+            bubble_top = summary_y + len(summary_lines) * body_lh + 16
+            bubble_bottom = bubble_top + bubble_height
+            draw.rounded_rectangle((MARGIN + 24, bubble_top, WIDTH - MARGIN - 24, bubble_bottom), radius=14, fill=SKY)
+            draw.text((MARGIN + 40, bubble_top + 10), "亚托莉的小随笔", font=small_font, fill=(78, 143, 165))
+            _text_block(draw, bubble_text, (MARGIN + 40, bubble_top + 10 + small_lh + 4), small_font, opinion_width, fill=INK, line_gap=5, max_lines=8)
         y += height + 16
 
-    section("③ 群友画像 · 活跃成员")
+    # 氛围随手记：把这一天最有人味、最好玩或最暖的瞬间写进来。
+    vibe_paragraph = str(sections.get("vibe") or "").strip()
+    vibe_rows: list[str] = []
+    if vibe_paragraph:
+        vibe_rows = _wrap(draw, vibe_paragraph, body_font, WIDTH - 2 * MARGIN - 48)
+    else:
+        for atm in (statistics.get("atmosphere") or [])[:4]:
+            for sample in (atm.get("samples") or [])[:1]:
+                if str(sample).strip():
+                    vibe_rows.append(str(sample).strip())
+        vibe_rows = vibe_rows[:4]
+    if vibe_rows:
+        section("③ 氛围随手记")
+        vibe_text = "\n".join(vibe_rows)
+        vibe_lines = _wrap(draw, vibe_text, body_font, WIDTH - 2 * MARGIN - 48)
+        vibe_lh = _line_height(body_font, 8)
+        vibe_h = 24 + len(vibe_lines) * vibe_lh + 20
+        draw.rounded_rectangle((MARGIN, y, WIDTH - MARGIN, y + vibe_h), radius=22, fill=WHITE, outline=(222, 212, 201), width=2)
+        draw.rectangle((MARGIN + 70, y - 6, MARGIN + 170, y + 17), fill=(213, 238, 224))
+        _text_block(draw, vibe_text, (MARGIN + 24, y + 20), body_font, WIDTH - 2 * MARGIN - 48, max_lines=6)
+        y += vibe_h + 16
+
+    section("④ 群友画像 · 活跃成员")
     active = [item for item in (statistics.get("active_members") or []) if isinstance(item, dict)][:8]
     highlights = {str(item.get("name")): item for item in list(sections.get("member_highlights") or []) if isinstance(item, dict)}
     message_total = max(1, int(statistics.get("message_count") or messages or 0))
     card_w = (WIDTH - 2 * MARGIN - 18) // 2
     for index in range(0, len(active), 2):
         row_items = active[index:index + 2]
-        row_h = 178
+        row_h = 254
         for col, member in enumerate(row_items):
             x = MARGIN + col * (card_w + 18)
             draw.rounded_rectangle((x, y, x + card_w, y + row_h), radius=20, fill=WHITE, outline=(222, 212, 201), width=2)
@@ -279,14 +349,34 @@ def render_group_summary_image(detail: dict[str, Any], output_path: str | Path) 
                 _rounded_image(image, avatar, (x + 20, y + 22, x + 86, y + 88), 33)
             else:
                 draw.ellipse((x + 20, y + 22, x + 86, y + 88), fill=SKY)
-                draw.text((x + 53, y + 55), str(member.get("nickname") or "群")[:1], font=_font(25, bold=True), fill=WHITE, anchor="mm")
-            name = str(member.get("nickname") or "未知成员")
-            draw.text((x + 105, y + 25), name[:18], font=_font(21, bold=True), fill=INK)
+                fallback_char = _no_tofu(str(member.get("nickname") or "群")).strip()[:1] or "群"
+                draw.text((x + 53, y + 55), fallback_char, font=_font(25, bold=True), fill=WHITE, anchor="mm")
+            name = _no_tofu(str(member.get("nickname") or "未知成员")).strip()[:16] or "群友"
+            hl = highlights.get(name, {})
+            if not hl and (name != str(member.get("nickname") or "")):
+                hl = highlights.get(str(member.get("nickname") or ""), {})
+            draw.text((x + 105, y + 25), name[:16], font=_font(21, bold=True), fill=INK)
             member_messages = int(member.get("messages") or 0)
             share_percent = float(member.get("share_percent") or (member_messages / message_total * 100.0))
-            draw.text((x + 105, y + 60), f"{member_messages} 条消息 · 活跃占比 {share_percent:.1f}%", font=small_font, fill=MUTED)
-            evaluation = highlights.get(name, {}).get("evaluation") or "在本时段保持稳定参与，发言构成了群聊的重要节奏。"
-            _text_block(draw, evaluation, (x + 20, y + 105), small_font, card_w - 40, max_lines=3)
+            draw.text((x + 105, y + 55), f"{member_messages} 条 · 占 {share_percent:.1f}%", font=small_font, fill=MUTED)
+
+            impression = _no_tofu(str(hl.get("atri_impression") or hl.get("evaluation") or "本时段在群里稳定参与，发言构成了重要的节奏。"))
+            cursor = y + 92
+            cursor = _text_block(draw, impression, (x + 20, cursor), small_font, card_w - 40, max_lines=2)
+
+            behavior = [_no_tofu(b) for b in (hl.get("behavior") or []) if _no_tofu(b)]
+            if behavior:
+                cursor = _text_block(draw, " · ".join(behavior), (x + 20, cursor + 6), small_font, card_w - 40, fill=(167, 120, 213), max_lines=1)
+
+            quote = [_no_tofu(q) for q in (hl.get("quote_style") or []) if _no_tofu(q)]
+            if quote:
+                cursor = _text_block(draw, "「" + quote[0][:60] + "」", (x + 20, cursor + 6), small_font, card_w - 40, fill=MUTED, max_lines=2)
+            elif behavior:
+                cursor = _text_block(draw, "（这次没抢到太多话，但一直在）", (x + 20, cursor + 6), small_font, card_w - 40, fill=MUTED, max_lines=1)
+
+            stats = _no_tofu(str(hl.get("evaluation") or ""))
+            if stats:
+                _text_block(draw, stats, (x + 20, y + row_h - 30), small_font, card_w - 40, fill=MUTED, max_lines=1)
         y += row_h + 14
     if not active:
         draw.text((MARGIN + 20, y), "这一段时间还没有足够数据形成群友画像。", font=body_font, fill=MUTED)

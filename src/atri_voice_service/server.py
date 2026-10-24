@@ -68,6 +68,7 @@ class VoiceHttpServer(ThreadingHTTPServer):
         )
         self.loop_thread.start()
         self.background_futures: set[Any] = set()
+        self.asr_provider: Any | None = None
         super().__init__(*args, **kwargs)
 
     def run_async(self, coroutine: Coroutine[Any, Any, dict[str, Any]]) -> dict[str, Any]:
@@ -83,9 +84,16 @@ class VoiceHttpServer(ThreadingHTTPServer):
         super().server_close()
         for future in tuple(self.background_futures):
             future.cancel()
-        self.event_loop.call_soon_threadsafe(self.event_loop.stop)
-        self.loop_thread.join(timeout=3)
-        self.event_loop.close()
+        try:
+            if self.asr_provider is not None:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.asr_provider.unload(), self.event_loop
+                )
+                future.result(timeout=10)
+        finally:
+            self.event_loop.call_soon_threadsafe(self.event_loop.stop)
+            self.loop_thread.join(timeout=3)
+            self.event_loop.close()
 
 
 def create_server(config: VoiceServiceConfig | None = None) -> VoiceHttpServer:
@@ -118,6 +126,8 @@ def create_server(config: VoiceServiceConfig | None = None) -> VoiceHttpServer:
                 path = urlsplit(self.path).path.rstrip("/")
                 if path == "/v1/transcribe":
                     result = self.server.run_async(app.transcribe(payload))
+                elif path == "/v1/asr/model":
+                    result = self.server.run_async(app.control_asr(str(payload.get("action") or "")))
                 elif path == "/v1/synthesize":
                     result = self.server.run_async(app.synthesize(payload))
                 elif path == "/v1/singing/jobs":
@@ -162,6 +172,7 @@ def create_server(config: VoiceServiceConfig | None = None) -> VoiceHttpServer:
             return None
 
     server = VoiceHttpServer((resolved.host, resolved.port), Handler)
+    server.asr_provider = app.asr
     if resolved.tts_prewarm_enabled:
         server.run_background(app.prewarm_tts())
 

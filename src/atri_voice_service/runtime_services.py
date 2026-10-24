@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -161,10 +162,49 @@ def _windows_process_name(pid: int) -> str:
     return str(row[0] if row else "").strip()
 
 
+def _detached_flags() -> int:
+    """让子进程脱离父进程 —— 服务重启/退出时不把引擎一起带走。"""
+    return int(
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    )
+
+
+def _launch_gpt_sovits_via_python() -> bool:
+    """用 `tools/voice/run-gpt-sovits.py` 拉起 9880（首选路径）。
+
+    为什么优先它：`start-gpt-sovits.ps1` 走 `Start-Process`，而 PowerShell 5.1
+    会把进程环境拷进大小写不敏感的字典 —— 当宿主 shell 同时导出了 `Path` 和
+    `PATH`（Git Bash、部分启动器都会）时，`Start-Process` 直接抛
+    「已添加项。字典中的关键字:"Path"所添加的关键字:"PATH"」，
+    9880 永远起不来，8790 只会回一句「GPT-SoVITS 按需启动失败」，
+    本文件同目录的 `run-gpt-sovits.py` 就是为此写的。
+    """
+    launcher = PROJECT_ROOT / "tools" / "voice" / "run-gpt-sovits.py"
+    if not launcher.is_file():
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, str(launcher)],
+            cwd=str(PROJECT_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_detached_flags(),
+        )
+    except OSError:
+        return False
+    return True
+
+
 def _launch_gpt_sovits() -> bool:
-    script = PROJECT_ROOT / "tools" / "voice" / "start-gpt-sovits.ps1"
     marker = PROJECT_ROOT / "data" / "runtime" / "gpt-sovits" / ".dependencies-ready"
-    if not script.is_file() or not marker.is_file():
+    if not marker.is_file():
+        return False
+    if _launch_gpt_sovits_via_python():
+        return True
+    script = PROJECT_ROOT / "tools" / "voice" / "start-gpt-sovits.ps1"
+    if not script.is_file():
         return False
     try:
         subprocess.Popen(

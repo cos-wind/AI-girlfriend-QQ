@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 from typing import Any
 
 import httpx
@@ -112,56 +113,6 @@ class SpeechServiceClient:
             quality=payload.get("quality") if isinstance(payload.get("quality"), dict) else None,
         )
 
-    async def create_singing_job(
-        self,
-        *,
-        text: str,
-        source_audio_path: Path,
-        profile: str,
-        reference_audio_path: Path | None = None,
-        language: str = "auto",
-        preview_seconds: int = 15,
-        pitch_shift: float = 0.0,
-        prefer_original: bool = False,
-    ) -> dict[str, Any]:
-        request_payload: dict[str, object] = {
-            "text": text,
-            "source_audio_path": str(Path(source_audio_path).expanduser().resolve()),
-            "profile": profile or "atri",
-            "language": language or "auto",
-            "preview_seconds": preview_seconds,
-            "pitch_shift": pitch_shift,
-            "prefer_original": prefer_original,
-        }
-        if reference_audio_path is not None:
-            request_payload["reference_audio_path"] = str(
-                Path(reference_audio_path).expanduser().resolve()
-            )
-        payload = await self._post_json(
-            "/v1/singing/jobs",
-            request_payload,
-        )
-        _require_ok(payload)
-        return payload
-
-    async def singing_jobs(self) -> dict[str, Any]:
-        payload = await self._get_json("/v1/singing/jobs")
-        _require_ok(payload)
-        return payload
-
-    async def singing_job(self, job_id: str) -> dict[str, Any]:
-        payload = await self._get_json(f"/v1/singing/jobs/{job_id}")
-        _require_ok(payload)
-        return payload
-
-    async def cancel_singing_job(self, job_id: str) -> dict[str, Any]:
-        payload = await self._post_json(
-            f"/v1/singing/jobs/{job_id}/cancel",
-            {},
-        )
-        _require_ok(payload)
-        return payload
-
     async def _get_json(self, path: str) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout()) as client:
@@ -233,7 +184,7 @@ class SpeechServiceClient:
         await asyncio.to_thread(_launch_runtime_mode, runtime_mode)
         # 9880 由重试请求进入 8790 后、在全局推理锁内启动；在此提前等待
         # 会形成“请求未进入，所以引擎永远不启动”的死锁。
-        required_ports = (8790,)
+        required_ports = (urlsplit(self.base_url).port or 80,)
         deadline = time.monotonic() + (120.0 if runtime_mode == "voice-tts" else 45.0)
         while time.monotonic() < deadline:
             readiness = []
@@ -291,6 +242,7 @@ def _tcp_open(port: int) -> bool:
 
 
 def _launch_runtime_mode(mode: str) -> None:
+    pass
     project_root = Path(__file__).resolve().parents[3]
     launcher = project_root / "tools" / "launch" / "qq_legacy" / "hidden_launcher.py"
     if not launcher.is_file():

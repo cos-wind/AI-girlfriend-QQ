@@ -94,6 +94,21 @@ def load_modality_access(*, force: bool = False) -> dict[str, Any]:
         return json.loads(json.dumps(_CACHE, ensure_ascii=False))
 
 
+def load_modality_access_from(path: str | Path) -> dict[str, Any]:
+    """从指定文件读取视觉/语音权限策略，**不碰模块级缓存**。
+
+    给"面板查看别的账号"用：那个账号有自己的 ``modality_access.json``，
+    读它不能污染运行账号的缓存。文件不存在时返回空策略——**不是回落到全局**，
+    否则看别的账号会看到运行账号的权限配置。
+    """
+    target = Path(path)
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    return _normalize(payload)
+
+
 def save_modality_access(payload: dict[str, Any]) -> dict[str, Any]:
     global _CACHE, _CACHE_MTIME_NS
     normalized = _normalize(payload)

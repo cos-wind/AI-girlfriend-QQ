@@ -276,9 +276,10 @@ function openRequestedTab() {
   );
   if(button) button.click();
 }
+installQZoneModelSelectorSync();
 setupAdvancedAccordions();
 openRequestedTab();
-loadStatus(); loadProfiles(); loadConfig(); loadReplyVoiceProbability(); loadProactive(); loadUserDirectory(false); loadModalityAccess();
+loadStatus(); loadProfiles(); loadQZoneModelProfiles(); loadConfig(); loadReplyVoiceProbability(); loadProactive(); loadUserDirectory(false); loadModalityAccess();
 // 目录核心数据先显示；本地自动发布状态与 QQ 动态优先读取。完整记忆摘要
 // 的构建较重，等 QQ 动态完成或最多等待 25 秒后再后台加载，避免争抢首屏。
 loadDirectoryAutomationState();

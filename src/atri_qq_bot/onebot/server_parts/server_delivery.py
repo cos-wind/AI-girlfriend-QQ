@@ -1,6 +1,33 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
+
 from .server_support import OneBotServerMixin, _sync_server_globals
+
+
+def _history_event_time(event: dict[str, Any]) -> datetime | None:
+    """读取 OneBot 历史消息的 epoch 秒，异常记录不参与时间范围判断。"""
+
+    try:
+        return datetime.fromtimestamp(float(event.get("time")), timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _outgoing_delay_text(
+    messages: list[Any],
+    fallback_text: str | None = None,
+) -> str:
+    """估算打字耗时要用的文本：文本取正文，语音等取将要发出的文本。"""
+    for message in messages:
+        if getattr(message, "kind", "") == "text":
+            content = str(getattr(message, "content", "") or "").strip()
+            if content:
+                return content
+    if fallback_text:
+        return str(fallback_text)
+    return "".join(str(getattr(message, "content", "") or "") for message in messages)
 
 
 class OneBotDeliveryMixin(OneBotServerMixin):
@@ -28,21 +55,17 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         event: dict[str, Any],
         user_text: str,
         decision: SingingDecision,
-        *,
-        request: VoiceRequest | None = None,
     ) -> tuple[list[OutgoingMessage], str]:
         """将点歌决策转换为唯一一种 OneBot 输出，并记录可诊断事件。"""
 
-        voice_request = request or VoiceRequest(
+        voice_request = VoiceRequest(
             text=str(user_text or "")[: max(20, int(self.config.voice_max_chars))],
             reason="explicit_request",
             mode="singing",
-            song_title=decision.song.title if decision.song else "",
-            segment_index=None,
         )
-        if decision.song is not None and decision.segment is not None:
+        if decision.song is not None:
             fallback_text = f"《{decision.song.title}》完整歌曲"
-            message = OutgoingMessage("record", str(decision.segment.path))
+            message = OutgoingMessage("record", str(decision.song.path))
             self._log_voice_event(
                 event,
                 "complete_song_selected",
@@ -52,7 +75,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             )
             return [message], fallback_text
 
-        reply_text = decision.reply_text or "这首歌我还没学会哦。"
+        if not decision.handled:
+            return [], ""
+        reply_text = decision.reply_text
         self._log_voice_event(
             event,
             "song_unavailable" if decision.reason not in {"catalog", "stopped"} else "singing_guidance",
@@ -215,6 +240,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     fallback_text=text,
                     model_type="voice",
                     model_name=self._delivery_model_name("voice"),
+                    first_delay=index == 0,
                 )
                 if not delivered:
                     # 音频文件已经生成，但 NapCat 可能拒绝了 record 上传。
@@ -312,12 +338,21 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         fallback_text: str | None = None,
         model_type: str = "",
         model_name: str = "",
+        first_delay: bool = True,
     ) -> str:
         outgoing = [OutgoingMessage("text", messages)] if isinstance(messages, str) else messages
         normalized_model_type = str(model_type or "").strip().lower()
         if normalized_model_type not in {"chat", "vision", "voice"}:
             normalized_model_type = "voice" if any(item.kind == "record" for item in outgoing) else "chat"
         delivered_parts: list[str] = []
+        if outgoing and first_delay:
+            # 真人不会在消息到达的同一瞬间发出回复：先停顿"看到消息 + 起手打字"。
+            # 语音分段逐段调用本方法，由调用方用 first_delay=False 关掉重复停顿。
+            await asyncio.sleep(
+                _first_reply_delay(
+                    self.config, _outgoing_delay_text(outgoing, fallback_text)
+                )
+            )
         for index, message in enumerate(outgoing):
             try:
                 await self._send_one_reply(websocket, event, message)
@@ -360,7 +395,10 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 delivered_parts.append(fallback_text)
 
             if index < len(outgoing) - 1:
-                await asyncio.sleep(_send_delay(self.config))
+                # 下一条要等"把这一条打完"的时间，长消息等得久、短句更干脆。
+                await asyncio.sleep(
+                    _typing_delay(self.config, _outgoing_delay_text([message], fallback_text))
+                )
         return "\n".join(part for part in delivered_parts if part).strip()
 
     def _record_delivery_event(
@@ -528,6 +566,155 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             return groups
         return []
 
+    async def fetch_group_history(
+        self,
+        group_id: str,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        progress: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """按需从当前登录 QQ 客户端读取一个时间范围内的群历史。
+
+        这是 NapCat 暴露给已登录 QQ 内核的 ``get_group_msg_history``，不是
+        ATRI 的实时事件归档。分页直到覆盖 ``start``，因此 ATRI 昨天未运行
+        不会让今天的手动日报少统计那段时间的客户端历史。
+        """
+
+        normalized_group_id = str(group_id or "").strip()
+        if not normalized_group_id:
+            raise ValueError("群号不能为空")
+        if start.tzinfo is None or end.tzinfo is None or start >= end:
+            raise ValueError("历史记录读取时间范围无效")
+
+        maximum = max(100, min(20000, int(limit)))
+        # ``get_group_msg_history`` 在部分 QQ NT 内核上一次转换大量消息会阻塞
+        # 回执，继而使反向 WS 心跳超时。使用 NapCat 的默认页大小，换取稳定的
+        # 小批次读取；仅在用户手动生成报告时运行，不影响日常消息链路。
+        # 20 条一页会让高活跃群在 24 小时窗口内产生数百次 WS 往返；50 条仍
+        # 明显低于曾引发 QQ 内核阻塞的 100 条大页，同时可大幅缩短手动日报等待。
+        page_size = min(50, maximum)
+        cursor = ""
+        seen_cursors: set[str] = set()
+        seen_messages: set[str] = set()
+        matched: list[dict[str, Any]] = []
+        reached_start = False
+
+        # 首次调用取最新一页；之后以本页最早的消息为游标，并显式要求向更早
+        # 的方向翻页。此前 ``reverse_order=False`` 会反复落到较新的记录，最终
+        # 在去重时静默结束，造成“24 小时”只采到一页的假象。
+        for page_index in range((maximum + page_size - 1) // page_size + 2):
+            params: dict[str, Any] = {
+                "group_id": normalized_group_id,
+                "count": page_size,
+                "reverse_order": bool(cursor),
+                # 日报只需文本和媒体类型，不需要为每张历史图片额外解析 URL，
+                # 也无需展开合并转发；这两项是大群历史读取的主要耗时来源。
+                "disable_get_url": True,
+                "parse_mult_msg": False,
+            }
+            if cursor:
+                params["message_seq"] = cursor
+            result: dict[str, Any] | None = None
+            last_error: Exception | None = None
+            # NapCat 重连会替换 websocket；每次重试重新取活动连接，避免把已
+            # 关闭的 socket 固定到整次历史导入中。
+            for attempt in range(3):
+                websocket = self._first_active_websocket()
+                if websocket is None:
+                    last_error = RuntimeError("NapCat 当前未连接")
+                    await asyncio.sleep(0.8 * (attempt + 1))
+                    continue
+                try:
+                    result = await self.call_action_and_wait(
+                        websocket, "get_group_msg_history", params, 30.0
+                    )
+                    break
+                except (asyncio.TimeoutError, ConnectionError, OSError) as exc:
+                    last_error = exc
+                    LOGGER.warning(
+                        "读取群历史超时或连接重置，准备重试：group=%s page=%s attempt=%s error=%r",
+                        normalized_group_id, len(matched), attempt + 1, exc,
+                    )
+                    await asyncio.sleep(0.8 * (attempt + 1))
+            if result is None:
+                raise RuntimeError(
+                    "QQ 客户端未响应群历史读取请求；NapCat 已自动重试 3 次"
+                    + (f"（{last_error!r}）" if last_error is not None else "")
+                )
+            if not isinstance(result, dict) or str(result.get("status") or "ok").lower() != "ok":
+                detail = ""
+                if isinstance(result, dict):
+                    detail = str(result.get("wording") or result.get("message") or result.get("msg") or "")
+                raise RuntimeError(f"QQ 客户端历史读取失败{f'：{detail}' if detail else ''}")
+            data = result.get("data") if isinstance(result, dict) else None
+            batch = data.get("messages") if isinstance(data, dict) else None
+            if not isinstance(batch, list) or not batch:
+                if reached_start:
+                    break
+                raise RuntimeError("QQ 客户端历史分页在到达周期起点前提前结束，未使用不完整消息生成报告")
+
+            oldest: datetime | None = None
+            # 游标必须对应时间上最早的一条消息，不能依赖短 ID 的数值大小。
+            # QQ 短 ID 并不承诺按时间单调递增。
+            oldest_cursor: tuple[datetime, str] | None = None
+            new_in_page = 0
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                item_group_id = str(item.get("group_id") or normalized_group_id)
+                if item_group_id != normalized_group_id:
+                    continue
+                message_key = str(item.get("message_id") or item.get("message_seq") or item.get("id") or "")
+                if not message_key:
+                    message_key = f"{item.get('user_id')}:{item.get('time')}:{item.get('raw_message')}"
+                if message_key in seen_messages:
+                    continue
+                seen_messages.add(message_key)
+                new_in_page += 1
+                occurred_at = _history_event_time(item)
+                if occurred_at is not None:
+                    oldest = occurred_at if oldest is None or occurred_at < oldest else oldest
+                    if occurred_at < start:
+                        reached_start = True
+                    if start <= occurred_at < end:
+                        matched.append(item)
+                # NapCat 的历史消息在不同版本中可能只带 ``message_id``。
+                # 该值就是 get_group_msg_history 接受的 short id；若只认
+                # message_seq 会在第一页提前停止，导致“过去 24h”被截断。
+                sequence = str(item.get("message_seq") or "").strip()
+                # 该字段常被 NapCat 填为字符串 "0"，语义仍是“未提供游标”，
+                # 必须退回到可分页的 message_id，不能把 "0" 再发回去。
+                if not sequence or sequence == "0":
+                    sequence = str(item.get("message_id") or "").strip()
+                if occurred_at is not None and sequence:
+                    candidate = (occurred_at, sequence)
+                    if oldest_cursor is None or candidate < oldest_cursor:
+                        oldest_cursor = candidate
+
+            if progress is not None and (page_index == 0 or (page_index + 1) % 5 == 0 or reached_start):
+                await progress(page_index + 1, len(seen_messages))
+
+            if reached_start:
+                break
+            if len(seen_messages) >= maximum:
+                raise RuntimeError(
+                    f"QQ 客户端历史在指定周期内超过 {maximum} 条；请提高 GROUP_SUMMARY_MAX_MESSAGES 后重试"
+                )
+            if oldest_cursor is None:
+                raise RuntimeError("QQ 客户端历史缺少可用于分页的消息游标，未使用不完整消息生成报告")
+            next_cursor = oldest_cursor[1]
+            if not next_cursor or next_cursor in seen_cursors or new_in_page == 0:
+                raise RuntimeError("QQ 客户端历史分页游标未向更早消息推进，未使用不完整消息生成报告")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        if not reached_start and len(matched) >= maximum:
+            raise RuntimeError(
+                f"QQ 客户端历史未读取到周期起点，已达到 {maximum} 条上限；请提高 GROUP_SUMMARY_MAX_MESSAGES 后重试"
+            )
+        return sorted(matched, key=lambda item: (_history_event_time(item) or end, str(item.get("message_seq") or "")))
+
     async def call_action_and_wait(
         self,
         websocket: Any,
@@ -566,5 +753,3 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     exc,
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
-
-

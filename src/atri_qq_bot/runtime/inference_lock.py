@@ -24,6 +24,15 @@ INFERENCE_LOCK_PATH = DATA_DIR / "runtime" / "gpu-inference.lock"
 INFERENCE_QUEUE_PATH = DATA_DIR / "runtime" / "gpu-inference-queue"
 INFERENCE_OWNER_PATH = DATA_DIR / "runtime" / "gpu-inference.lock.owner.json"
 
+# 没给截止时间时的兜底上限（秒）。
+#
+# Windows 的文件锁在**同一进程的不同句柄之间**同样互斥（不像 flock 那样按进程计），
+# 所以只要有一个租约异常退出而没走到 `release()`，本进程后续的 `acquire()` 就会
+# 永远拿不到锁 —— 而 `timeout_seconds=None` 的调用方（TTS 会话等）原本会无限空转，
+# 表现为「端口在监听、/health 秒回、合成永不返回、GPU 0%」的假死。
+# 这里给一个保守上限，把「永久死锁」降级成可重试的 InferenceResourceBusyError。
+DEFAULT_ACQUIRE_TIMEOUT_SECONDS = 600.0
+
 
 class InferencePriority(IntEnum):
     """单 GPU 上各类工作的调度优先级，数值越小越先执行。
@@ -82,10 +91,15 @@ class _InterprocessFileLock:
             stream.write(b"\0")
             stream.flush()
 
+        effective_timeout = (
+            DEFAULT_ACQUIRE_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        )
         deadline = (
             None
-            if timeout_seconds is None
-            else time.monotonic() + max(0.0, float(timeout_seconds))
+            if effective_timeout is None
+            else time.monotonic() + max(0.0, float(effective_timeout))
         )
         ticket = self.queue_path / (
             f"{self.priority:03d}-{time.time_ns():020d}-{os.getpid()}-"

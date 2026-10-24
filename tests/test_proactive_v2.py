@@ -20,11 +20,39 @@ from atri_qq_bot.proactive import (
     normalize_proactive_policy,
     save_proactive_policy,
 )
+from atri_qq_bot.proactive import policy as proactive_policy
 from atri_qq_bot.proactive.planner import candidate_tier
+from atri_qq_bot.runtime import reply_strategy as reply_strategy_module
+from atri_qq_bot.runtime.reply_strategy import default_reply_strategy
 from atri_webui.page import render_index
 
 
 CHINA = timezone(timedelta(hours=8))
+
+
+def _policy_with_tiers() -> dict[str, object]:
+    """带两张档位表的主动互动配置：档位只存在于回复策略里。
+
+    ``default_proactive_policy()`` 自己的 ``tiers`` / ``activity_tiers`` 都是空的，
+    真实运行时由 ``load_proactive_policy()`` 从 ``reply_strategy.json`` 注入，
+    测试里走同一份默认档位。
+    """
+
+    strategy = default_reply_strategy()
+    return {
+        **default_proactive_policy(),
+        "tiers": strategy["affection_tiers"],
+        "activity_tiers": strategy["activity_tiers"],
+    }
+
+
+def _isolate_reply_strategy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """把回复策略文件指向临时目录，避免测试读到仓库里的真实档位表。"""
+
+    path = tmp_path / "reply_strategy.json"
+    monkeypatch.setattr(reply_strategy_module, "REPLY_STRATEGY_PATH", path)
+    monkeypatch.setattr(reply_strategy_module, "_CACHE", None)
+    return path
 
 
 def test_proactive_generation_skips_instead_of_using_template_without_model(
@@ -58,8 +86,11 @@ def test_proactive_generation_skips_instead_of_using_template_without_model(
     assert "未配置聊天模型" in result["error"]
 
 
-def test_policy_save_is_normalized_and_atomic(tmp_path: Path) -> None:
+def test_policy_save_is_normalized_and_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "proactive.json"
+    _isolate_reply_strategy(monkeypatch, tmp_path)
     policy = default_proactive_policy()
     policy["check_seconds"] = 1
     policy["max_chars"] = 999
@@ -68,9 +99,28 @@ def test_policy_save_is_normalized_and_atomic(tmp_path: Path) -> None:
 
     assert saved["check_seconds"] == 15
     assert saved["max_chars"] == 240
-    assert load_proactive_policy(path) == saved
     assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
     assert not path.with_suffix(".tmp").exists()
+    # 两张档位表都不存在 proactive_policy.json 里，而是读取时从回复策略注入。
+    assert saved.get("tiers") is None
+    loaded = load_proactive_policy(path)
+    assert [tier["id"] for tier in loaded["tiers"]] == [
+        "low",
+        "normal",
+        "familiar",
+        "close",
+        "intimate",
+    ]
+    assert [tier["id"] for tier in loaded["activity_tiers"]] == [
+        "quiet",
+        "normal",
+        "active",
+        "hot",
+    ]
+    injected = {"tiers", "activity_tiers"}
+    assert {k: v for k, v in loaded.items() if k not in injected} == {
+        k: v for k, v in saved.items() if k not in injected
+    }
 
 
 def test_policy_rejects_disabling_every_content_type() -> None:
@@ -79,6 +129,64 @@ def test_policy_rejects_disabling_every_content_type() -> None:
 
     with pytest.raises(ValueError, match="至少需要启用"):
         normalize_proactive_policy(policy)
+
+
+def test_legacy_proactive_tier_table_migrates_into_the_single_tier_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧版 proactive_policy.json 自带档位表时的升级路径。
+
+    档位名/好感范围/启用以回复策略为准，但当时配好的随机间隔和每日上限不能丢；
+    WebUI 保存一次（提交 tiers）之后旧表就彻底退场。
+    """
+
+    strategy_path = _isolate_reply_strategy(monkeypatch, tmp_path)
+    reply_strategy_module.save_reply_strategy(default_reply_strategy(), strategy_path)
+    path = tmp_path / "proactive.json"
+    monkeypatch.setattr(proactive_policy, "PROACTIVE_POLICY_PATH", path)
+    payload = default_proactive_policy()
+    payload.pop("tiers", None)
+    payload["tiers"] = [
+        {
+            "id": "intimate",
+            "name": "旧名字不该生效",
+            "min_affection": 0,
+            "max_affection": 10,
+            "enabled": False,
+            "min_hours": 1.5,
+            "max_hours": 3.0,
+            "daily_limit": 9,
+        }
+    ]
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    legacy = load_proactive_policy(path)
+    intimate = next(tier for tier in legacy["tiers"] if tier["id"] == "intimate")
+    # 旧表里的间隔/上限被继承……
+    assert intimate["min_hours"] == 1.5
+    assert intimate["max_hours"] == 3.0
+    assert intimate["daily_limit"] == 9
+    # ……但档位名、好感范围和启用状态仍由唯一来源决定。
+    assert intimate["name"] == "亲密"
+    assert intimate["min_affection"] == 85.0
+    assert intimate["enabled"] is True
+
+    # WebUI 保存主动互动配置时：档位表写回唯一来源，proactive_policy.json 保持干净。
+    saved_tiers = proactive_policy.persist_tiers_from_payload(
+        {**payload, "tiers": legacy["tiers"]}
+    )
+    save_proactive_policy({**payload, "tiers": legacy["tiers"]})
+    assert saved_tiers is not None
+    assert json.loads(strategy_path.read_text(encoding="utf-8"))[
+        "proactive_tiers_migrated"
+    ] is True
+    assert "tiers" not in json.loads(path.read_text(encoding="utf-8"))
+    refreshed = load_proactive_policy(path)
+    refreshed_intimate = next(
+        tier for tier in refreshed["tiers"] if tier["id"] == "intimate"
+    )
+    assert refreshed_intimate["min_hours"] == 1.5
+    assert refreshed_intimate["daily_limit"] == 9
 
 
 def test_proactive_grounding_guard_detects_unperformed_experience_claims() -> None:
@@ -101,7 +209,7 @@ def test_planner_persists_random_plan_until_it_is_due(tmp_path: Path) -> None:
     store = UserMemoryStore(tmp_path / "users.json")
     store.remember_target("private:10001", {"message_type": "private", "user_id": 10001})
     store.set_affection("private:10001", 82, is_owner=True)
-    policy = default_proactive_policy()
+    policy = _policy_with_tiers()
     policy["quiet_start"] = "00:00"
     policy["quiet_end"] = "00:00"
     for tier in policy["tiers"]:
@@ -152,7 +260,7 @@ def test_planner_moves_quiet_hour_plan_to_morning(tmp_path: Path) -> None:
     store = UserMemoryStore(tmp_path / "users.json")
     store.remember_target("private:10001", {"message_type": "private", "user_id": 10001})
     store.set_affection("private:10001", 90, is_owner=True)
-    policy = default_proactive_policy()
+    policy = _policy_with_tiers()
     intimate = next(tier for tier in policy["tiers"] if tier["id"] == "intimate")
     intimate["min_hours"] = intimate["max_hours"] = 1
     planner = ProactivePlanner(store, (10001,), rng=random.Random(3))
@@ -174,12 +282,24 @@ def test_webui_merges_proactive_controls_and_plans_into_existing_pages() -> None
     assert 'id="proactive" class="panel"' not in page
     assert "showTab(event,'proactive')" not in page
     assert 'id="advanced" class="panel"' in page
-    assert 'id="proactiveTierRows"' in page
+    assert 'id="affectionTierRows"' in page
+    # 两张分档表已合并成一张，旧的主动互动独立档位表不再存在。
+    assert 'id="proactiveTierRows"' not in page
     assert "/api/proactive/save" in page
     assert "PROACTIVE_V2_ENABLED" in page
     assert 'id="proactiveEngineEnabled"' in page
+    # 群聊主动消息与用户分档同构：档位表里直接带主动侧两列，不再单独一套门槛。
     assert 'id="proactiveGroupEnabled"' in page
-    assert 'id="proactivePrivateMinAffection"' in page
+    assert 'id="replyActivityTierRows"' in page
+    for removed in (
+        'id="proactiveGroupMinHours"',
+        'id="proactiveGroupMinActivity"',
+        'id="proactiveGroupActiveDays"',
+        'id="proactiveGroupMinMessages"',
+        'id="proactiveGroupDailyLimit"',
+        'id="proactivePrivateMinAffection"',
+    ):
+        assert removed not in page, removed
     assert 'id="proactiveScheduleRows"' not in page
     assert "proactive_plan" in page
     assert "好感 ${formatScore(x.affection)}" in page
@@ -208,7 +328,7 @@ def test_advanced_config_excludes_model_and_legacy_proactive_fields() -> None:
 
 
 def test_manual_proactive_override_has_priority_over_automatic_thresholds() -> None:
-    policy = default_proactive_policy()
+    policy = _policy_with_tiers()
     now = datetime(2026, 7, 14, 12, 0, tzinfo=CHINA).timestamp()
     low_activity = {
         "affection_score": 1,
@@ -244,7 +364,7 @@ def test_manual_allow_bypasses_owner_only_candidate_filter(tmp_path: Path) -> No
     payload = json.loads(memory_path.read_text(encoding="utf-8"))
     payload["conversations"]["private:20001"]["proactive_override"] = "allow"
     memory_path.write_text(json.dumps(payload), encoding="utf-8")
-    policy = default_proactive_policy()
+    policy = _policy_with_tiers()
     policy["owner_only"] = True
 
     items = ProactivePlanner(store, (10001,), rng=random.Random(8)).status(
@@ -269,7 +389,7 @@ def test_only_active_high_affection_non_owner_is_eligible(tmp_path: Path) -> Non
         store.set_trust_tier(conversation_id, "approved")
 
     planner = ProactivePlanner(store, (), rng=random.Random(5))
-    items = planner.status(default_proactive_policy(), now)["items"]
+    items = planner.status(_policy_with_tiers(), now)["items"]
     by_id = {item["target_id"]: item for item in items}
 
     assert by_id[20001]["eligible"] is False
@@ -294,7 +414,7 @@ def test_active_group_is_scheduled_and_new_group_message_resets_plan(tmp_path: P
         )
 
     planner = ProactivePlanner(store, (), rng=random.Random(8))
-    policy = default_proactive_policy()
+    policy = _policy_with_tiers()
     assert planner.due_plans(policy, now + timedelta(minutes=1)) == []
     state = store.proactive_state(conversation_id, now=(now + timedelta(minutes=1)).timestamp())
     assert state["next_at"] is not None

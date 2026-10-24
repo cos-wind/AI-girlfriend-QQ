@@ -15,7 +15,7 @@ RUNTIME_ROOT = PROJECT_ROOT / "data" / "runtime" / "gpt-sovits"
 SOURCE_ROOT = RUNTIME_ROOT / "source"
 VENV_ROOT = RUNTIME_ROOT / ".venv"
 PYTHON = VENV_ROOT / "Scripts" / "python.exe"
-MODEL_ROOT = Path(os.environ.get("ATRI_GPT_SOVITS_MODEL_ROOT", r"D:\本地大模型\models\AI_ATRI\voice\base\gpt-sovits"))
+MODEL_ROOT = Path(os.environ.get("ATRI_GPT_SOVITS_MODEL_ROOT", str(PROJECT_ROOT / "models" / "voice" / "base" / "gpt-sovits")))
 HF_ROOT = "https://huggingface.co/XXXXRT/GPT-SoVITS-Pretrained/resolve/main"
 
 PRETRAINED_FILES = {

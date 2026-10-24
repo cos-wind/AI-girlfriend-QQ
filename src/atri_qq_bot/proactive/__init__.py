@@ -7,6 +7,7 @@ from .policy import (
     default_proactive_policy,
     load_proactive_policy,
     normalize_proactive_policy,
+    persist_tiers_from_payload,
     save_proactive_policy,
 )
 from .time_utils import parse_hhmm, safe_zoneinfo
@@ -21,6 +22,7 @@ __all__ = [
     "default_proactive_policy",
     "load_proactive_policy",
     "normalize_proactive_policy",
+    "persist_tiers_from_payload",
     "save_proactive_policy",
     "parse_hhmm",
     "safe_zoneinfo",
