@@ -144,6 +144,5 @@ data/music/
 - 项目：[cos-wind/AI-girlfriend-QQ](https://github.com/cos-wind/AI-girlfriend-QQ)
 - 网站：[yatuoli.com](https://yatuoli.com/)
 - 交流群：**1095215340**
-- 联系邮箱：**900000001@qq.com**
 
 欢迎通过 GitHub Issues 提交复现步骤与脱敏日志，通过 Star、使用反馈和代码贡献支持项目。
