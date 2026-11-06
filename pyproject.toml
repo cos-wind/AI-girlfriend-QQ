@@ -1,7 +1,7 @@
 [project]
 name = "atri-qq-bot"
 version = "0.5.0"
-description = "A minimal OneBot/NapCat QQ companion bot with an Atri persona."
+description = "QQ companion bot (OneBot/NapCat) with an Atri persona, shared Bot core and optional WebUI."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,10 +10,12 @@ dependencies = [
   "langgraph==1.2.11",
   "langgraph-checkpoint-sqlite==3.1.1",
   "Pillow>=10.0.0",
+  "playwright>=1.55,<2",
   "pypinyin>=0.53.0,<1.0",
   "pypdf>=4.0.0",
   "python-dotenv>=1.0.1",
   "rapidocr>=3.9.0,<4.0",
+  "tokenizers>=0.22,<0.23",
   "onnxruntime>=1.18.0,<2.0",
   "websockets>=14.0,<16.0",
 ]
@@ -26,19 +28,44 @@ insights = [
   "jieba>=0.42.1,<1.0",
   "sentence-transformers>=3.0.0,<6.0.0",
 ]
+music = [
+  "numpy>=1.26.0,<3.0",
+  "pedalboard>=0.9.24,<1.0",
+  "scipy>=1.11.0,<2.0",
+  "soundfile>=0.12.0,<1.0",
+]
 
 [project.scripts]
 atri-qq-bot = "atri_qq_bot.__main__:main"
+atri-core = "atri_bot.__main__:main"
 atri-voice-service = "atri_voice_service.server:main"
 
 [build-system]
 requires = ["setuptools>=69.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["atri_qq_bot*", "atri_webui*", "atri_shared*", "atri_voice_service*"]
-
+# 包按模块分层存放（core / platforms / apps / shared），这里显式列出，
+# 避免依赖 packages.find 的多路径扫描行为。
 [tool.setuptools]
-py-modules = ["atri_runtime"]
+packages = [
+  "atri_bot", "atri_bot.application", "atri_bot.cognition", "atri_bot.group_chat",
+  "atri_bot.insights", "atri_bot.insights.store", "atri_bot.insights.summary",
+  "atri_bot.iteration", "atri_bot.knowledge", "atri_bot.language_guard", "atri_bot.llm_tools",
+  "atri_bot.lore", "atri_bot.memory", "atri_bot.music", "atri_bot.persona", "atri_bot.proactive",
+  "atri_bot.relationship", "atri_bot.retrieval", "atri_bot.toolbox", "atri_bot.voice",
+  "atri_platform",
+  "atri_qq_bot", "atri_qq_bot.accounts", "atri_qq_bot.message_plan",
+  "atri_qq_bot.onebot", "atri_qq_bot.onebot.server_parts", "atri_qq_bot.qqzone",
+  "atri_qq_bot.qqzone.tests", "atri_qq_bot.qzone", "atri_qq_bot.qzone_automation",
+  "atri_qq_bot.runtime", "atri_qq_bot.sticker_parts", "atri_qq_bot.voice",
+  "atri_shared", "atri_shared.config", "atri_shared.runtime", "atri_shared.video",
+  "atri_shared.voice",
+  "atri_voice_service",
+  "atri_webui", "atri_webui.page", "atri_webui.server_parts",
+]
+py-modules = ["atrium_runtime"]
+package-dir = {"" = "src/shared", "atri_bot" = "src/bot/core/src/atri_bot", "atri_platform" = "src/bot/framework/src/atri_platform", "atri_qq_bot" = "src/platforms/qq/src/atri_qq_bot", "atri_qq_bot.qqzone" = "src/platforms/qq/plugins/maibot/qqzone", "atri_webui" = "src/apps/webui/src/atri_webui", "atri_voice_service" = "src/apps/voice/src/atri_voice_service"}
 
+[tool.setuptools.package-data]
+atri_qq_bot = ["*.mjs"]
+"atri_qq_bot.qqzone" = ["*.toml", "*.json", "webui/*"]

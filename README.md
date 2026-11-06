@@ -28,6 +28,12 @@ QQ 启动链路解除对桌面 Core API 和桌面组件安装器的依赖，使�
 - **CPU 语音识别复用**：延续已有的本地语音服务，将 CPU ASR 工作进程在短时间内复用，减少连续识别时重复加载模型的开销；空闲后释放。GPU 工作进程仍按请求结束退出，避免持续占用显存。
 - **账号隔离**：提供可选的账号注册、账号视图、独立配置与数据目录；新账号需明确确认，避免串用记忆。账号管理与跟随 NapCat 的开关默认关闭，单账号用户可保持默认配置。
 
+### 5. 核心与 QQ 接入进一步分层
+
+本快照把 Bot 核心从 QQ 接入中拆出：对话、人格、记忆、工具、认知与评测位于 `src/bot/core/src/atri_bot`，OneBot 接入与消息调度留在 `src/platforms/qq/src/atri_qq_bot`。核心不引用 QQ 接入，因此也可以单独作为核心 API 运行（`atri-core`）。
+
+共享模块、WebUI 与语音服务分别位于 `src/shared`、`src/apps/webui`、`src/apps/voice`，打包配置按模块路径显式声明。桌面客户端与桌宠仍不在本发行版内。
+
 v0.4 已有的角色对话、长期记忆、资料检索、工具调用、认知内核、回复评测和群聊总结继续保留。上述调整主要改变模块边界与运行方式；QQ 协议仍为 NapCat / OneBot v11。
 
 ## 工作流程
@@ -132,13 +138,17 @@ data/music/
 
 ## 目录
 
+本快照按“核心 / 平台 / 应用”分层，`atri_bot` 与 `atri_qq_bot` 分离：核心不依赖 QQ 接入，QQ 接入只依赖核心与共享模块。
+
 | 位置 | 用途 |
 | --- | --- |
-| `src/atri_qq_bot/` | OneBot、对话、账号、记忆、工具、点歌与消息发送 |
-| `src/atri_webui/` | Qbot 浏览器管理页面及 API |
-| `src/atri_shared/` | 共享配置、模型档案、NapCat 登录与服务控制 |
-| `src/atri_voice_service/` | 可选本地语音服务 |
-| `src/atri_runtime.py` | 源码资源位置与可选用户数据根目录 |
+| `src/bot/core/src/atri_bot/` | 对话、人格、记忆、工具、认知与评测等 Bot 核心 |
+| `src/platforms/qq/src/atri_qq_bot/` | OneBot 接入、账号、点歌、消息发送与运行调度 |
+| `src/bot/framework/src/atri_platform/` | 平台桥接契约（能力、投递、工作台） |
+| `src/apps/webui/src/atri_webui/` | Qbot 浏览器管理页面及 API |
+| `src/apps/voice/src/atri_voice_service/` | 可选本地语音服务 |
+| `src/shared/atri_shared/` | 共享配置、模型档案、NapCat 登录与语音客户端 |
+| `src/shared/atrium_runtime.py` | 源码资源位置与可选用户数据根目录 |
 | `docs/prompts/` | 公开角色设定与提示词模板 |
 | `tools/`、`deploy/` | 运行辅助、语音部署和服务器部署脚本 |
 | `tests/` | Qbot 与配套服务的回归测试 |

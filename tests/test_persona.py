@@ -1026,9 +1026,9 @@ def test_group_qq_number_with_disabled_model_returns_diagnostic() -> None:
     )
     engine = AtriReplyEngine(config)
 
-    reply = asyncio.run(engine.reply("group:20001", "@2502391316 你是谁"))
+    reply = asyncio.run(engine.reply("group:20001", "@100000001 你是谁"))
 
-    assert "@2502391316" not in reply
+    assert "@100000001" not in reply
     assert "原神是一款" not in reply
     assert "meaning" not in reply
     assert_model_unavailable(reply)

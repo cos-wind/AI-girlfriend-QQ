@@ -1,0 +1,1 @@
+"""Passive platform integration framework."""

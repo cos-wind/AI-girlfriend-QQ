@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+from urllib.parse import urlsplit
+from typing import Any
+
+import httpx
+
+from atri_shared.voice.schema import SynthesisResult, TranscriptionResult, VoiceRequest
+from atri_shared.networking import is_loopback_url as _is_loopback_url
+
+
+class SpeechServiceError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        quality: dict[str, Any] | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.quality = quality
+        self.status_code = status_code
+
+
+class SpeechServiceClient:
+    def __init__(self, base_url: str, timeout_seconds: float = 180.0) -> None:
+        self.base_url = str(base_url or "http://127.0.0.1:8790").rstrip("/")
+        self.timeout_seconds = max(2.0, float(timeout_seconds))
+
+    def _timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(self.timeout_seconds, connect=min(5.0, self.timeout_seconds))
+
+    async def health(self) -> dict[str, Any]:
+        return await self._get_json("/health")
+
+    async def transcribe(self, audio_path: Path, language: str = "auto") -> TranscriptionResult:
+        path = Path(audio_path).expanduser().resolve()
+        if not path.is_file():
+            raise SpeechServiceError(f"语音文件不存在：{path}")
+        payload = await self._post_with_runtime(
+            "/v1/transcribe",
+            {"audio_path": str(path), "language": language or "auto"},
+            runtime_mode="voice-asr",
+        )
+        _require_ok(payload)
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise SpeechServiceError("语音识别没有返回文本")
+        confidence = _optional_float(payload.get("confidence"))
+        return TranscriptionResult(
+            text=text,
+            language=str(payload.get("language") or language or "auto"),
+            emotion=str(payload.get("emotion") or "neutral").lower(),
+            confidence=confidence,
+        )
+
+    async def synthesize(
+        self,
+        request: VoiceRequest,
+        profile: str,
+        *,
+        prefer_original: bool | None = None,
+        quality_gate: bool | None = None,
+        quality_max_error_rate: float | None = None,
+        quality_retries: int | None = None,
+        allow_context_original_fallback: bool | None = None,
+        allow_best_effort: bool | None = None,
+    ) -> SynthesisResult:
+        request_payload: dict[str, object] = {
+            "text": request.text,
+            "emotion": request.emotion,
+            "intensity": request.intensity,
+            "language": request.language,
+            "profile": profile or "atri",
+            "mode": request.mode,
+        }
+        if prefer_original is not None:
+            request_payload["prefer_original"] = prefer_original
+        if quality_gate is not None:
+            request_payload["quality_gate"] = quality_gate
+        if quality_max_error_rate is not None:
+            request_payload["quality_max_error_rate"] = quality_max_error_rate
+        if quality_retries is not None:
+            request_payload["quality_retries"] = quality_retries
+        if allow_context_original_fallback is not None:
+            request_payload["allow_context_original_fallback"] = (
+                allow_context_original_fallback
+            )
+        if allow_best_effort is not None:
+            request_payload["allow_best_effort"] = allow_best_effort
+        payload = await self._post_with_runtime(
+            "/v1/synthesize",
+            request_payload,
+            runtime_mode="voice-tts",
+        )
+        _require_ok(payload)
+        raw_path = str(payload.get("audio_path") or "").strip()
+        if not raw_path:
+            raise SpeechServiceError("语音合成没有返回音频文件")
+        audio_path = Path(raw_path).expanduser().resolve()
+        if not audio_path.is_file():
+            raise SpeechServiceError(f"合成音频不存在：{audio_path}")
+        return SynthesisResult(
+            audio_path=audio_path,
+            duration_seconds=_optional_float(payload.get("duration_seconds")),
+            source=str(payload.get("source") or "tts"),
+            quality=payload.get("quality") if isinstance(payload.get("quality"), dict) else None,
+        )
+
+    async def _get_json(self, path: str) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout(), trust_env=not _is_loopback_url(self.base_url)) as client:
+                response = await client.get(f"{self.base_url}{path}")
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise _speech_service_error(exc.response) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SpeechServiceError(f"语音服务不可用：{exc}") from exc
+        if not isinstance(payload, dict):
+            raise SpeechServiceError("语音服务返回了无效数据")
+        return payload
+
+    async def _post_json(self, path: str, payload: dict[str, object]) -> dict[str, Any]:
+        # One short transport retry only. Model-level retries belong to the
+        # voice service; repeating them here duplicated slow TTS work.
+        delays = (0.25,)
+        for attempt in range(len(delays) + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout(), trust_env=not _is_loopback_url(self.base_url)) as client:
+                    response = await client.post(f"{self.base_url}{path}", json=payload)
+                    response.raise_for_status()
+                    result = response.json()
+            except httpx.HTTPStatusError as exc:
+                if (
+                    attempt < len(delays)
+                    and exc.response.status_code in {429, 502, 503, 504}
+                ):
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                raise _speech_service_error(exc.response) from exc
+            except httpx.HTTPError as exc:
+                if attempt < len(delays) and isinstance(
+                    exc,
+                    (
+                        httpx.ConnectError,
+                        httpx.ConnectTimeout,
+                        httpx.NetworkError,
+                        httpx.RemoteProtocolError,
+                    ),
+                ):
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                raise SpeechServiceError(f"语音服务不可用：{exc}") from exc
+            except ValueError as exc:
+                raise SpeechServiceError(f"语音服务不可用：{exc}") from exc
+            if not isinstance(result, dict):
+                raise SpeechServiceError("语音服务返回了无效数据")
+            return result
+        raise SpeechServiceError("语音服务重试后仍不可用")
+
+    async def _post_with_runtime(
+        self,
+        path: str,
+        payload: dict[str, object],
+        *,
+        runtime_mode: str,
+    ) -> dict[str, Any]:
+        """Retry one local request after starting only its required slice."""
+        try:
+            return await self._post_json(path, payload)
+        except SpeechServiceError as exc:
+            if not _is_loopback_url(self.base_url) or not str(exc).startswith(
+                "语音服务不可用："
+            ):
+                raise
+
+        await asyncio.to_thread(_launch_runtime_mode, runtime_mode)
+        # 9880 由重试请求进入 8790 后、在全局推理锁内启动；在此提前等待
+        # 会形成“请求未进入，所以引擎永远不启动”的死锁。
+        required_ports = (urlsplit(self.base_url).port or 80,)
+        deadline = time.monotonic() + (120.0 if runtime_mode == "voice-tts" else 45.0)
+        while time.monotonic() < deadline:
+            readiness = []
+            for port in required_ports:
+                readiness.append(await asyncio.to_thread(_tcp_open, port))
+            if all(readiness):
+                return await self._post_json(path, payload)
+            await asyncio.sleep(0.5)
+        raise SpeechServiceError("语音服务按需启动超时；已停止本次操作以保护系统资源")
+
+
+def _require_ok(payload: dict[str, Any]) -> None:
+    if payload.get("ok") is False:
+        raise SpeechServiceError(str(payload.get("error") or "语音服务执行失败"))
+
+
+def _speech_service_error(response: httpx.Response) -> SpeechServiceError:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        detail = str(payload.get("error") or "").strip()
+        if detail:
+            quality = payload.get("quality")
+            return SpeechServiceError(
+                detail,
+                quality=quality if isinstance(quality, dict) else None,
+                status_code=response.status_code,
+            )
+    return SpeechServiceError(
+        f"语音服务请求失败：HTTP {response.status_code}",
+        status_code=response.status_code,
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _tcp_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.35):
+            return True
+    except OSError:
+        return False
+
+
+def _launch_runtime_mode(mode: str) -> None:
+    from atrium_runtime import is_packaged, resource_root, user_root
+    if is_packaged():
+        raise SpeechServiceError("轻量版未安装本地语音引擎，请在服务管理查看部署说明，或配置已有语音服务地址。")
+    project_root = user_root()
+    launcher = resource_root() / "dev/tools/launch/qq_legacy/hidden_launcher.py"
+    if not launcher.is_file():
+        raise SpeechServiceError(f"找不到语音按需启动器：{launcher}")
+    candidates = (
+        project_root / ".venv" / "Scripts" / "pythonw.exe",
+        project_root / ".venv" / "Scripts" / "python.exe",
+        Path(sys.executable),
+    )
+    executable = next((path for path in candidates if path.is_file()), None)
+    if executable is None:
+        raise SpeechServiceError("找不到项目 Python，无法按需启动语音服务")
+    options: dict[str, Any] = {
+        "cwd": str(project_root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        options["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = 0
+            options["startupinfo"] = startupinfo
+    subprocess.Popen([str(executable), str(launcher), mode], **options)
